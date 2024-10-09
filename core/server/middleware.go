@@ -145,19 +145,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	settingsQuery, _ := domains.DomainsMap.Load(domainName)
 	domainSettings := settingsQuery.(domains.DomainSettings)
 
-	ipInfoCountry := "N/A"
-	ipInfoASN := "N/A"
-	if domainSettings.IPInfo {
-		ipInfoCountry, ipInfoASN = utils.GetIpInfo(ip)
-	}
-
 	reqUa := request.UserAgent()
 
 	if len(domainSettings.CustomRules) != 0 {
 		requestVariables := gofilter.Message{
 			"ip.src":                net.ParseIP(ip),
-			"ip.country":            ipInfoCountry,
-			"ip.asn":                ipInfoASN,
 			"ip.engine":             browser,
 			"ip.bot":                botFp,
 			"ip.fingerprint":        tlsFp,
@@ -336,7 +328,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	case "/_bProxy/fingerprint":
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("IP: "+ip+"\nASN: "+ipInfoASN+"\nCountry: "+ipInfoCountry+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
+		SendResponse("IP: "+ip+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
 		return
 	case "/_bProxy/verified":
 		writer.Header().Set("Content-Type", "text/plain")

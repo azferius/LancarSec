@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"goProxy/core/db"
 	"goProxy/core/domains"
 	"goProxy/core/firewall"
 	"goProxy/core/proxy"
@@ -109,14 +108,10 @@ func Load() {
 	for i, domain := range domains.Config.Domains {
 		domains.Domains = append(domains.Domains, domain.Name)
 
-		ipInfo := false
 		firewallRules := []domains.Rule{}
 		rawFirewallRules := domains.Config.Domains[i].FirewallRules
 		for index, fwRule := range domains.Config.Domains[i].FirewallRules {
 
-			if strings.Contains(fwRule.Expression, "ip.country") || strings.Contains(fwRule.Expression, "ip.asn") {
-				ipInfo = true
-			}
 			rule, err := gofilter.NewFilter(fwRule.Expression)
 			if err != nil {
 				panic("[ " + utils.PrimaryColor("!") + " ] [ Error Loading Custom Firewall Rules For " + domain.Name + " ( Rule " + strconv.Itoa(index) + " ) : " + utils.PrimaryColor(err.Error()) + " ]")
@@ -147,7 +142,6 @@ func Load() {
 			Name: domain.Name,
 
 			CustomRules:    firewallRules,
-			IPInfo:         ipInfo,
 			RawCustomRules: rawFirewallRules,
 
 			DomainProxy:        dProxy,
@@ -237,7 +231,6 @@ func Load() {
 		Load()
 	} else {
 		proxy.WatchedDomain = domains.Domains[0]
-		db.Connect()
 	}
 }
 

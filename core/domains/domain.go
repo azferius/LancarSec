@@ -43,7 +43,6 @@ type DomainSettings struct {
 	Name string
 
 	CustomRules    []Rule
-	IPInfo         bool
 	RawCustomRules []JsonRule
 
 	DomainProxy        *httputil.ReverseProxy
