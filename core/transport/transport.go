@@ -92,21 +92,20 @@ func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if err != nil {
 		errStrs := strings.Split(err.Error(), " ")
-		errMsg := ""
+		filtered := strings.Builder{}
 		for _, str := range errStrs {
-			if !strings.Contains(str, ".") && !strings.Contains(str, "/") && !(strings.Contains(str, "[") && strings.Contains(str, "]")) {
-				errMsg += str + " "
+			// Drop IP addresses, file paths, and bracketed IPv6 from the
+			// surfaced error so we don't leak backend topology to the client.
+			if strings.Contains(str, ".") || strings.Contains(str, "/") || strings.ContainsAny(str, "[]") {
+				continue
 			}
+			filtered.WriteString(str)
+			filtered.WriteByte(' ')
 		}
-
-		buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-		buffer.WriteString(errMsg)
-		buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>Error: `)
-		buffer.WriteString(errMsg)
-		buffer.WriteString(`</h1><p>Sorry, there was an error connecting to the backend. That's all we know.</p><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-
+		buffer.WriteString(renderConnectErrorPage(filtered.String()))
 		return &http.Response{
-			StatusCode: http.StatusOK,
+			StatusCode: http.StatusBadGateway,
+			Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
 			Body:       io.NopCloser(bytes.NewReader(append([]byte(nil), buffer.Bytes()...))),
 		}, nil
 	}
@@ -116,31 +115,18 @@ func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		errBody, errErr := io.ReadAll(limitReader)
 		resp.Body.Close()
 
-		errMsg := ""
-		if errErr == nil && len(errBody) > 0 {
-			errMsg = string(errBody)
+		body := ""
+		if errErr == nil {
+			body = string(errBody)
 			if int64(len(errBody)) == 1024*1024 {
-				errMsg += `<p>( Error message truncated. )</p>`
+				body += "\n\n[…truncated…]"
 			}
 		}
-
-		if errErr == nil && len(errBody) != 0 {
-			buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>Error:`)
-			buffer.WriteString(`</h1><p>Sorry, the backend returned this error.</p><iframe width="100%" height="25%" style="border:1px ridge lightgrey; border-radius: 5px;"srcdoc="`)
-			buffer.WriteString(errMsg)
-			buffer.WriteString(`"></iframe><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-		} else {
-			buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>`)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</h1><p>Sorry, the backend returned an error. That's all we know.</p><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-		}
+		buffer.WriteString(renderUpstreamErrorPage(resp.Status, body))
 
 		return &http.Response{
-			StatusCode: http.StatusOK,
+			StatusCode: resp.StatusCode,
+			Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
 			Body:       io.NopCloser(bytes.NewReader(append([]byte(nil), buffer.Bytes()...))),
 		}, nil
 	}
