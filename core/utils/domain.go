@@ -3,8 +3,8 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"goProxy/core/domains"
-	"io/ioutil"
+	"lancarsec/core/domains"
+	"os"
 	"strings"
 )
 
@@ -41,7 +41,7 @@ func AddDomain() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0644)
 	if err != nil {
 		panic(err)
 	}

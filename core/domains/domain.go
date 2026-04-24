@@ -37,6 +37,13 @@ type Domain struct {
 	DisableRawStage3    int             `json:"disableRawStage3"`
 	DisableBypassStage2 int             `json:"disableBypassStage2"`
 	DisableRawStage2    int             `json:"disableRawStage2"`
+
+	// Per-domain transport knobs. All optional — zero values fall back to the
+	// transport package's defaults. BackendTLSVerify=false preserves the prior
+	// behavior of accepting self-signed upstream certs.
+	BackendTLSVerify bool `json:"backend_tls_verify"`
+	MaxIdleConns     int  `json:"max_idle_conns"`
+	MaxConnsPerHost  int  `json:"max_conns_per_host"`
 }
 
 type DomainSettings struct {
@@ -92,14 +99,26 @@ type DomainData struct {
 }
 
 type Proxy struct {
-	Cloudflare      bool              `json:"cloudflare"`
-	AdminSecret     string            `json:"adminsecret"`
-	APISecret       string            `json:"apisecret"`
-	Secrets         map[string]string `json:"secrets"`
-	Timeout         TimeoutSettings   `json:"timeout"`
-	RatelimitWindow int               `json:"ratelimit_time"`
-	Ratelimits      map[string]int    `json:"ratelimits"`
-	Colors          []string          `json:"colors"`
+	Cloudflare        bool `json:"cloudflare"`
+	CloudflareFullSSL bool `json:"cloudflare_full_ssl"`
+	// CloudflareEnforceOrigin rejects any request in Cloudflare mode whose
+	// socket peer is not in the trusted CIDR list (Cloudflare IP ranges +
+	// extras). Defaults to false for backwards compat — flip to true once
+	// the origin IP is not public, so attackers who discover the origin
+	// cannot bypass Cloudflare. Works together with the trusted/ package.
+	CloudflareEnforceOrigin bool `json:"cloudflare_enforce_origin"`
+	// HideVersionHeader suppresses the `LancarSec-Proxy` response header so
+	// fingerprinting attackers can't trivially read the installed version.
+	// Default false keeps the header (useful for debugging); flip to true
+	// in production.
+	HideVersionHeader       bool              `json:"hide_version_header"`
+	AdminSecret             string            `json:"adminsecret"`
+	APISecret               string            `json:"apisecret"`
+	Secrets                 map[string]string `json:"secrets"`
+	Timeout                 TimeoutSettings   `json:"timeout"`
+	RatelimitWindow         int               `json:"ratelimit_time"`
+	Ratelimits              map[string]int    `json:"ratelimits"`
+	Colors                  []string          `json:"colors"`
 }
 
 type TimeoutSettings struct {

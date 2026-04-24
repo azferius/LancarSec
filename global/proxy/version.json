@@ -1,5 +1,6 @@
 {
-    "last_version": 1.5,
-    "stable_version": 1.5,
-    "download": "https://github.com/41Baloo/balooProxy/releases/download/1.5/main"
+    "_comment": "TODO: LancarSec versioning system will be served from sec.splay.id. This local file is a placeholder used only while that endpoint is being built.",
+    "last_version": 1.0,
+    "stable_version": 1.0,
+    "download": "https://sec.splay.id/download/latest"
 }

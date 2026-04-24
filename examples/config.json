@@ -1,6 +1,9 @@
 {
     "proxy": {
         "cloudflare": true,
+        "cloudflare_full_ssl": false,
+        "cloudflare_enforce_origin": false,
+        "hide_version_header": false,
         "maxLogLength": 5,
         "adminsecret": "CHANGE_ME",
         "apisecret": "CHANGE_ME",
@@ -28,15 +31,15 @@
     },
     "domains": [
         {
-            "name": "baloo.one",
+            "name": "sec.splay.id",
             "backend": "[::1]",
             "scheme": "http",
             "certificate": "assets/server/server.crt",
             "key": "assets/server/server.key",
             "webhook": {
-                "url": "https://discord.com/api/webhooks/1055573557880569886/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-                "name": "balooProxy",
-                "avatar": "https://avatars.githubusercontent.com/u/73783549",
+                "url": "https://discord.com/api/webhooks/XXXXXXXXXXXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                "name": "LancarSec",
+                "avatar": "",
                 "attack_start_msg": "A DDoS attack has been detected against your domain `{{domain.name}}`",
                 "attack_stop_msg": "The DDoS attack against your domain `{{domain.name}}` has stopped"
             },
@@ -66,15 +69,15 @@
             "disableRawStage2": 75
         },
         {
-            "name": "9090.baloo.dog",
+            "name": "9090.sec.splay.id",
             "backend": "1.1.1.1:9090",
             "scheme": "http",
             "certificate": "assets/server/server.crt",
             "key": "assets/server/server.key",
             "webhook": {
-                "url": "https://discord.com/api/webhooks/1055573557880569886/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-                "name": "balooProxy",
-                "avatar": "https://avatars.githubusercontent.com/u/73783549",
+                "url": "https://discord.com/api/webhooks/XXXXXXXXXXXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                "name": "LancarSec",
+                "avatar": "",
                 "attack_start_msg": "A DDoS attack has been detected against your domain `{{domain.name}}`",
                 "attack_stop_msg": "The DDoS attack against your domain `{{domain.name}}` has stopped"
             },
@@ -104,15 +107,15 @@
             "disableRawStage2": 75
         },
         {
-            "name": "baloo.dog",
+            "name": "api.splay.id",
             "backend": "1.1.1.1",
             "scheme": "http",
             "certificate": "assets/server/server.crt",
             "key": "assets/server/server.key",
             "webhook": {
-                "url": "https://discord.com/api/webhooks/1055573557880569886/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-                "name": "balooProxy",
-                "avatar": "https://avatars.githubusercontent.com/u/73783549",
+                "url": "https://discord.com/api/webhooks/XXXXXXXXXXXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                "name": "LancarSec",
+                "avatar": "",
                 "attack_start_msg": "A DDoS attack has been detected against your domain `{{domain.name}}`",
                 "attack_stop_msg": "The DDoS attack against your domain `{{domain.name}}` has stopped"
             },

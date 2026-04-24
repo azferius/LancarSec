@@ -9,11 +9,14 @@ const (
 var (
 	Fingerprint string
 
-	WatchedDomain string
-	TWidth        int
-	THeight       int
-	Cloudflare    bool
-	MaxLogLength  int
+	WatchedDomain     string
+	TWidth            int
+	THeight           int
+	Cloudflare              bool
+	CloudflareFullSSL       bool
+	CloudflareEnforceOrigin bool
+	HideVersionHeader       bool
+	MaxLogLength            int
 
 	CpuUsage string
 	RamUsage string

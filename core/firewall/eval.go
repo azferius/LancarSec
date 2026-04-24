@@ -2,7 +2,7 @@ package firewall
 
 import (
 	"fmt"
-	"goProxy/core/domains"
+	"lancarsec/core/domains"
 
 	"github.com/kor44/gofilter"
 )
@@ -27,7 +27,7 @@ func EvalFirewallRule(currDomain domains.DomainSettings, variables gofilter.Mess
 				var actionInt int
 				_, err := fmt.Sscan(rule.Action[1:], &actionInt)
 				if err != nil {
-					fmt.Println("[ ! ] [ Error Evaluating Rule %d : %s ]\n", index, err.Error())
+					fmt.Printf("[ ! ] [ Error Evaluating Rule %d : %s ]\n", index, err.Error())
 					//Dont change anything on error. We dont want issues in production
 				} else {
 					result = result - actionInt

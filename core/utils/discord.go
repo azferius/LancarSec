@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"goProxy/core/domains"
-	"goProxy/core/pnc"
-	"goProxy/core/proxy"
+	"lancarsec/core/domains"
+	"lancarsec/core/pnc"
+	"lancarsec/core/proxy"
 	"net/http"
 	"strings"
+	"time"
 
 	quickchartgo "github.com/henomis/quickchart-go"
 )
@@ -23,7 +24,16 @@ func InitPlaceholders(msg string, domainData domains.DomainData, domain string) 
 	return msg
 }
 
+// SendWebhook is the legacy entrypoint; new code should call EnqueueWebhook
+// so sends go through the bounded worker pool instead of leaking goroutines
+// during sustained attacks. This function now delegates to that queue.
 func SendWebhook(domainData domains.DomainData, domainSettings domains.DomainSettings, notificationType int) {
+	EnqueueWebhook(domainData, domainSettings, notificationType)
+}
+
+// sendWebhookSync does the actual HTTP send. Runs inside a pool worker;
+// callers outside this file should use EnqueueWebhook.
+func sendWebhookSync(domainData domains.DomainData, domainSettings domains.DomainSettings, notificationType int) {
 
 	defer pnc.PanicHndl()
 
@@ -245,8 +255,14 @@ func SendWebhook(domainData domains.DomainData, domainSettings domains.DomainSet
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	client.Do(req)
+	// Bounded client with a hard deadline so a slow Discord endpoint can't
+	// park a worker for the default 30 seconds.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 type Webhook struct {

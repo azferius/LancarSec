@@ -9,6 +9,7 @@ func init() {
 	gofilter.RegisterField("ip.engine", gofilter.FT_STRING)
 	gofilter.RegisterField("ip.bot", gofilter.FT_STRING)
 	gofilter.RegisterField("ip.fingerprint", gofilter.FT_STRING)
+	gofilter.RegisterField("ip.ja4", gofilter.FT_STRING)
 	gofilter.RegisterField("ip.requests", gofilter.FT_INT)
 	gofilter.RegisterField("ip.http_requests", gofilter.FT_INT)
 	gofilter.RegisterField("ip.challenge_requests", gofilter.FT_INT)

@@ -196,7 +196,7 @@
    function checkAnswer(e) {
      e.preventDefault();
      var t = document.getElementById("text").value;
-     document.cookie = "`+ip+`_3__bProxy_v=" + t + "`+publicPart+`; SameSite=Lax; path=/; Secure", fetch("https://" + location.hostname + "/_bProxy/verified").then(function(e) {
+     document.cookie = "`+ip+`_3__lSec_v=" + t + "`+publicPart+`; SameSite=Lax; path=/; Secure", fetch("https://" + location.hostname + "/_lancarsec/verified").then(function(e) {
        return e.text()
      }).then(function(e) {
        "verified" === e ? (document.getElementById("successMessage").style.display = "block", setInterval(function() {

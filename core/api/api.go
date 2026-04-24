@@ -1,20 +1,27 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"goProxy/core/domains"
-	"goProxy/core/firewall"
-	"goProxy/core/proxy"
-	"goProxy/core/utils"
 	"io"
+	"lancarsec/core/domains"
+	"lancarsec/core/firewall"
+	"lancarsec/core/proxy"
+	"lancarsec/core/utils"
 	"net/http"
 	"strings"
 )
 
+// secretsEqual does a constant-time compare so the API/admin secret cannot be
+// probed byte-by-byte by timing the 401 response.
+func secretsEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 func Process(writer http.ResponseWriter, request *http.Request, domainData domains.DomainData) bool {
 
-	if request.Header.Get("proxy-secret") != proxy.APISecret {
+	if !secretsEqual(request.Header.Get("proxy-secret"), proxy.APISecret) {
 		return false
 	}
 
@@ -70,10 +77,10 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 			"RAM_USAGE": proxy.RamUsage,
 		})
 	case "GET_IP_REQUESTS":
-		firewall.Mutex.RLock()
+		firewall.CountersMu.RLock()
 		ipsAll := firewall.AccessIps
 		ipsCookie := firewall.AccessIpsCookie
-		firewall.Mutex.RUnlock()
+		firewall.CountersMu.RUnlock()
 
 		APIResponse(writer, true, map[string]interface{}{
 			"TOTAL_IP_REQUESTS":     ipsAll,
@@ -81,9 +88,9 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 		})
 	//Only returns UNK Fingerprints
 	case "GET_FINGERPRINT_REQUESTS":
-		firewall.Mutex.RLock()
+		firewall.CountersMu.RLock()
 		ipsFps := firewall.UnkFps
-		firewall.Mutex.RUnlock()
+		firewall.CountersMu.RUnlock()
 
 		APIResponse(writer, true, map[string]interface{}{
 			"TOTAL_FINGERPRINT_REQUESTS": ipsFps,
@@ -100,16 +107,15 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 		})
 	// Useful to fill up your ipCache and see how your proxy performs with high memory usage
 	case "FILL_IP_CACHE":
-		firewall.Mutex.Lock()
+		// CacheIps is a sync.Map, so concurrent Store is safe without a lock.
 		for i := 0; i < 19980; i++ {
 			firewall.CacheIps.Store(utils.RandomString(24), utils.RandomString(64))
 		}
-		firewall.Mutex.Unlock()
 
 		APIResponse(writer, true, map[string]interface{}{})
 	case "RELOAD":
-		firewall.Mutex.Lock()
-		firewall.Mutex.Unlock()
+		// No-op placeholder; a real reload should call config.Apply via the
+		// reload command.
 	default:
 		APIResponse(writer, false, map[string]interface{}{
 			"ERROR": ERR_ACTION_NOT_FOUND,
@@ -152,11 +158,11 @@ func handleDomainActions(action string, writer http.ResponseWriter, domainData *
 
 func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 
-	if r.Header.Get("Proxy-Secret") != proxy.APISecret {
+	if !secretsEqual(r.Header.Get("Proxy-Secret"), proxy.APISecret) {
 		return false
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/_bProxy/api/v2/")
+	path := strings.TrimPrefix(r.URL.Path, "/_lancarsec/api/v2/")
 	parts := strings.Split(path, "/")
 
 	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
@@ -182,9 +188,9 @@ func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 		}
 		domainSettingsdomain, _ := uncastedDomainSettingsdomain.(domains.DomainSettings)
 
-		firewall.Mutex.RLock()
+		firewall.DataMu.RLock()
 		domainData := domains.DomainsData[parts[0]]
-		firewall.Mutex.RUnlock()
+		firewall.DataMu.RUnlock()
 
 		handleDomainActions(parts[1], w, &domainData, &domainSettingsdomain)
 		return true

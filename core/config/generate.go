@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"goProxy/core/domains"
-	"goProxy/core/utils"
-	"io/ioutil"
-	"net/http"
+	"lancarsec/core/domains"
+	"lancarsec/core/utils"
+	"os"
 	"strings"
 )
 
@@ -50,7 +49,7 @@ func Generate() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0644)
 	if err != nil {
 		panic(err)
 	}
@@ -93,27 +92,22 @@ func AddDomain() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0644)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func GetFingerprints(url string, target *map[string]string) error {
-	resp, err := http.Get(url)
+func LoadFingerprints(path string, target *map[string]string) error {
+	body, err := os.ReadFile(path)
 	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
+		return errors.New("failed to load fingerprints from " + path + ": " + err.Error())
 	}
 
-	err = json.Unmarshal(body, &target)
-	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
+	parsed := map[string]string{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return errors.New("failed to parse fingerprints from " + path + ": " + err.Error())
 	}
+	*target = parsed
 	return nil
 }

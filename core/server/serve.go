@@ -4,219 +4,251 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
-	"goProxy/core/domains"
-	"goProxy/core/firewall"
-	"goProxy/core/pnc"
-	"goProxy/core/proxy"
-	"io"
-	"net"
+	"lancarsec/core/domains"
+	"lancarsec/core/firewall"
+	"lancarsec/core/pnc"
+	"lancarsec/core/proxy"
 	"net/http"
-	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/net/http2"
 )
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
+// Servers kept at package level so Shutdown can drain them on SIGTERM.
 var (
-	transportMap = sync.Map{}
-	bufferPool   = sync.Pool{
-		New: func() interface{} {
-			return &bytes.Buffer{}
-		},
-	}
+	serverMu   sync.Mutex
+	httpServer *http.Server
+	tlsServer  *http.Server
 )
 
 func Serve() {
 
 	defer pnc.PanicHndl()
 
-	if domains.Config.Proxy.Cloudflare {
+	// Mode matrix:
+	//   cloudflare=false                  -> Origin mode   : :80 redirect + :443 HTTPS w/ user cert + TLS fingerprinting
+	//   cloudflare=true, fullSSL=false    -> Flexible mode : :80 HTTP only, Cloudflare terminates client TLS
+	//   cloudflare=true, fullSSL=true     -> Full SSL mode : :80 HTTP + :443 HTTPS w/ user cert, still trusts Cf headers
+	switch {
+	case proxy.Cloudflare && !proxy.CloudflareFullSSL:
+		serveCloudflareFlexible()
+	case proxy.Cloudflare && proxy.CloudflareFullSSL:
+		serveCloudflareFullSSL()
+	default:
+		serveOrigin()
+	}
+}
 
-		service := &http.Server{
-			IdleTimeout:       proxy.IdleTimeoutDuration,
-			ReadTimeout:       proxy.ReadTimeoutDuration,
-			WriteTimeout:      proxy.WriteTimeoutDuration,
-			ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
-			Addr:              ":80",
-			MaxHeaderBytes:    1 << 20,
-		}
+func serveCloudflareFlexible() {
+	service := &http.Server{
+		IdleTimeout:       proxy.IdleTimeoutDuration,
+		ReadTimeout:       proxy.ReadTimeoutDuration,
+		WriteTimeout:      proxy.WriteTimeoutDuration,
+		ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
+		Addr:              ":80",
+		MaxHeaderBytes:    1 << 20,
+	}
 
-		http2.ConfigureServer(service, &http2.Server{})
-		service.SetKeepAlivesEnabled(true)
-		service.Handler = http.HandlerFunc(Middleware)
+	http2.ConfigureServer(service, h2Server())
+	service.SetKeepAlivesEnabled(true)
+	service.Handler = http.HandlerFunc(Middleware)
 
-		if err := service.ListenAndServe(); err != nil {
+	serverMu.Lock()
+	httpServer = service
+	serverMu.Unlock()
+
+	if err := service.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		panic(err)
+	}
+}
+
+// serveOrigin is direct-to-client mode (no CDN in front). TLS fingerprinting
+// is enabled via GetConfigForClient, and the peek listener captures raw
+// ClientHello bytes so JA4 can be computed to spec.
+func serveOrigin() {
+	service, serviceH := buildTLSServers(true)
+	runPlusRedirectPeek(service, serviceH)
+}
+
+// serveCloudflareFullSSL runs HTTPS on :443 with the user's cert so Cloudflare
+// can use Full/Strict SSL, while still treating Cloudflare as a trusted proxy
+// for header-based real IP resolution. TLS fingerprinting stays off because
+// Cloudflare terminates the client TLS and re-handshakes with us.
+func serveCloudflareFullSSL() {
+	service, serviceH := buildTLSServers(false)
+	runPlusRedirect(service, serviceH)
+}
+
+func buildTLSServers(withFingerprint bool) (*http.Server, *http.Server) {
+	service := &http.Server{
+		IdleTimeout:       proxy.IdleTimeoutDuration,
+		ReadTimeout:       proxy.ReadTimeoutDuration,
+		WriteTimeout:      proxy.WriteTimeoutDuration,
+		ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
+		ConnState:         firewall.OnStateChange,
+		Addr:              ":80",
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	tlsCfg := &tls.Config{
+		GetCertificate: domains.GetCertificate,
+		Renegotiation:  tls.RenegotiateOnceAsClient,
+		// Refuse deprecated versions so attackers cannot force a downgrade
+		// to TLS 1.0/1.1 (BEAST, CRIME, Lucky13, etc.).
+		MinVersion: tls.VersionTLS12,
+	}
+	if withFingerprint {
+		tlsCfg.GetConfigForClient = firewall.Fingerprint
+	}
+
+	serviceH := &http.Server{
+		IdleTimeout:       proxy.IdleTimeoutDuration,
+		ReadTimeout:       proxy.ReadTimeoutDuration,
+		WriteTimeout:      proxy.WriteTimeoutDuration,
+		ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
+		ConnState:         firewall.OnStateChange,
+		Addr:              ":443",
+		TLSConfig:         tlsCfg,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	http2.ConfigureServer(service, h2Server())
+	http2.ConfigureServer(serviceH, h2Server())
+	return service, serviceH
+}
+
+// h2Server returns HTTP/2 server config with attack-resistant limits. Default
+// Go values are generous; explicit caps harden against CVE-style stream
+// abuse (rapid-reset, continuation flood, etc.) that Go's mitigations already
+// address but benefit from being made concrete.
+func h2Server() *http2.Server {
+	return &http2.Server{
+		MaxConcurrentStreams:         100,
+		MaxReadFrameSize:             16 * 1024, // RFC-permitted minimum that realistic clients use
+		PermitProhibitedCipherSuites: false,
+		IdleTimeout:                  proxy.IdleTimeoutDuration,
+	}
+}
+
+// runPlusRedirectPeek is used by serveOrigin — it runs the TLS server via a
+// peekListener so we capture raw ClientHello bytes for spec-compliant JA4.
+func runPlusRedirectPeek(service *http.Server, serviceH *http.Server) {
+	wireRedirect(service, serviceH)
+
+	serverMu.Lock()
+	httpServer = service
+	tlsServer = serviceH
+	serverMu.Unlock()
+
+	go func() {
+		defer pnc.PanicHndl()
+		if err := listenAndServeTLSPeek(serviceH); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			panic(err)
 		}
-	} else {
+	}()
 
-		service := &http.Server{
-			IdleTimeout:       proxy.IdleTimeoutDuration,
-			ReadTimeout:       proxy.ReadTimeoutDuration,
-			WriteTimeout:      proxy.WriteTimeoutDuration,
-			ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
-			ConnState:         firewall.OnStateChange,
-			Addr:              ":80",
-			MaxHeaderBytes:    1 << 20,
-		}
-		serviceH := &http.Server{
-			IdleTimeout:       proxy.IdleTimeoutDuration,
-			ReadTimeout:       proxy.ReadTimeoutDuration,
-			WriteTimeout:      proxy.WriteTimeoutDuration,
-			ReadHeaderTimeout: proxy.ReadHeaderTimeoutDuration,
-			ConnState:         firewall.OnStateChange,
-			Addr:              ":443",
-			TLSConfig: &tls.Config{
-				GetConfigForClient: firewall.Fingerprint,
-				GetCertificate:     domains.GetCertificate,
-				Renegotiation:      tls.RenegotiateOnceAsClient,
-			},
-			MaxHeaderBytes: 1 << 20,
+	if err := service.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		panic(err)
+	}
+}
+
+func wireRedirect(service, serviceH *http.Server) {
+	service.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firewall.DataMu.RLock()
+		_, domainFound := domains.DomainsData[r.Host]
+		firewall.DataMu.RUnlock()
+
+		if !domainFound {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "LancarSec: "+r.Host+" does not exist. If you are the owner please check your config.json if you believe this is a mistake")
+			return
 		}
 
-		http2.ConfigureServer(service, &http2.Server{})
-		http2.ConfigureServer(serviceH, &http2.Server{})
+		// Bump TotalRequests with an exclusive lock; this is the redirect
+		// path so we don't race with middleware here.
+		firewall.DataMu.Lock()
+		d := domains.DomainsData[r.Host]
+		d.TotalRequests++
+		domains.DomainsData[r.Host] = d
+		firewall.DataMu.Unlock()
 
-		service.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			firewall.Mutex.RLock()
-			domainData, domainFound := domains.DomainsData[r.Host]
-			firewall.Mutex.RUnlock()
+		http.Redirect(w, r, "https://"+r.Host+r.URL.Path+r.URL.RawQuery, http.StatusMovedPermanently)
+	})
+	service.SetKeepAlivesEnabled(true)
+	serviceH.Handler = http.HandlerFunc(Middleware)
+}
 
-			if !domainFound {
-				w.Header().Set("Content-Type", "text/plain")
-				fmt.Fprintf(w, "balooProxy: "+r.Host+" does not exist. If you are the owner please check your config.json if you believe this is a mistake")
-				return
-			}
+func runPlusRedirect(service *http.Server, serviceH *http.Server) {
+	service.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firewall.DataMu.RLock()
+		domainData, domainFound := domains.DomainsData[r.Host]
+		firewall.DataMu.RUnlock()
 
-			firewall.Mutex.Lock()
-			domainData = domains.DomainsData[r.Host]
-			domainData.TotalRequests++
-			domains.DomainsData[r.Host] = domainData
-			firewall.Mutex.Unlock()
+		if !domainFound {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "LancarSec: "+r.Host+" does not exist. If you are the owner please check your config.json if you believe this is a mistake")
+			return
+		}
 
-			http.Redirect(w, r, "https://"+r.Host+r.URL.Path+r.URL.RawQuery, http.StatusMovedPermanently)
-		})
+		firewall.DataMu.Lock()
+		domainData = domains.DomainsData[r.Host]
+		domainData.TotalRequests++
+		domains.DomainsData[r.Host] = domainData
+		firewall.DataMu.Unlock()
 
-		service.SetKeepAlivesEnabled(true)
-		serviceH.Handler = http.HandlerFunc(Middleware)
+		http.Redirect(w, r, "https://"+r.Host+r.URL.Path+r.URL.RawQuery, http.StatusMovedPermanently)
+	})
 
+	service.SetKeepAlivesEnabled(true)
+	serviceH.Handler = http.HandlerFunc(Middleware)
+
+	serverMu.Lock()
+	httpServer = service
+	tlsServer = serviceH
+	serverMu.Unlock()
+
+	go func() {
+		defer pnc.PanicHndl()
+		if err := serviceH.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(err)
+		}
+	}()
+
+	if err := service.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		panic(err)
+	}
+}
+
+// Shutdown drains both HTTP servers, waiting up to the context deadline for
+// in-flight requests to complete. Idempotent: servers not yet started are
+// skipped.
+func Shutdown(ctx context.Context) {
+	serverMu.Lock()
+	h, t := httpServer, tlsServer
+	serverMu.Unlock()
+
+	var wg sync.WaitGroup
+	if h != nil {
+		wg.Add(1)
 		go func() {
-			defer pnc.PanicHndl()
-			if err := serviceH.ListenAndServeTLS("", ""); err != nil {
-				panic(err)
-			}
+			defer wg.Done()
+			_ = h.Shutdown(ctx)
 		}()
-
-		if err := service.ListenAndServe(); err != nil {
-			panic(err)
-		}
 	}
-}
-
-func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-
-	buffer := bufferPool.Get().(*bytes.Buffer)
-	buffer.Reset()
-	defer bufferPool.Put(buffer)
-
-	//Use Proxy Read Timeout
-	transport := getTripperForDomain(req.Host)
-
-	//Use inbuild RoundTrip
-	resp, err := transport.RoundTrip(req)
-
-	//Connection to backend failed. Display error message
-	if err != nil {
-		errStrs := strings.Split(err.Error(), " ")
-		errMsg := ""
-		for _, str := range errStrs {
-			if !strings.Contains(str, ".") && !strings.Contains(str, "/") && !(strings.Contains(str, "[") && strings.Contains(str, "]")) {
-				errMsg += str + " "
-			}
-		}
-
-		buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-		buffer.WriteString(errMsg) // Page Title
-		buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>Error: `)
-		buffer.WriteString(errMsg) // Page Body
-		buffer.WriteString(`</h1><p>Sorry, there was an error connecting to the backend. That's all we know.</p><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewReader(buffer.Bytes())),
-		}, nil
+	if t != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = t.Shutdown(ctx)
+		}()
 	}
-
-	//Connection was successfull, got bad response tho
-	if resp.StatusCode > 499 && resp.StatusCode < 600 {
-
-		limitReader := io.LimitReader(resp.Body, 1024*1024) // 1 MB for instance
-		errBody, errErr := io.ReadAll(limitReader)
-
-		// Close the original body
-		resp.Body.Close()
-
-		errMsg := ""
-		if errErr == nil && len(errBody) > 0 {
-			errMsg = string(errBody)
-			if int64(len(errBody)) == 1024*1024 {
-				errMsg += `<p>( Error message truncated. )</p>`
-			}
-		}
-
-		if errErr == nil && len(errBody) != 0 {
-
-			buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>Error:`)
-			buffer.WriteString(`</h1><p>Sorry, the backend returned this error.</p><iframe width="100%" height="25%" style="border:1px ridge lightgrey; border-radius: 5px;"srcdoc="`)
-			buffer.WriteString(errMsg)
-			buffer.WriteString(`"></iframe><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-
-		} else {
-
-			buffer.WriteString(`<!DOCTYPE html><html><head><title>Error: `)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</title><style>body{font-family:'Helvetica Neue',sans-serif;color:#333;margin:0;padding:0}.container{display:flex;align-items:center;justify-content:center;height:100vh;background:#fafafa}.error-box{width:600px;padding:20px;background:#fff;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,.1)}.error-box h1{font-size:36px;margin-bottom:20px}.error-box p{font-size:16px;line-height:1.5;margin-bottom:20px}.error-box p.description{font-style:italic;color:#666}.error-box a{display:inline-block;padding:10px 20px;background:#00b8d4;color:#fff;border-radius:5px;text-decoration:none;font-size:16px}</style><div class=container><div class=error-box><h1>`)
-			buffer.WriteString(resp.Status)
-			buffer.WriteString(`</h1><p>Sorry, the backend returned an error. That's all we know.</p><a onclick="location.reload()">Reload page</a></div></div></body></html>`)
-		}
-
-		resp.Body.Close()
-
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewReader(buffer.Bytes())),
-		}, nil
-	}
-
-	return resp, nil
-}
-
-var defaultTransport = &http.Transport{
-	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext(ctx, network, addr)
-	},
-	TLSHandshakeTimeout: 10 * time.Second,
-	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-	IdleConnTimeout:     90 * time.Second,
-	MaxIdleConns:        10,
-	MaxConnsPerHost:     10,
-}
-
-func getTripperForDomain(domain string) *http.Transport {
-
-	transport, ok := transportMap.Load(domain)
-	if !ok {
-		transport, _ = transportMap.LoadOrStore(domain, defaultTransport)
-	}
-	return transport.(*http.Transport)
-}
-
-type RoundTripper struct {
+	wg.Wait()
 }
