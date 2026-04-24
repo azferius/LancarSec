@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>Dashboard · LancarSec</title>
+    <style>
+        *,*::before,*::after { box-sizing: border-box; }
+        :root {
+            --bg: radial-gradient(1200px 600px at 50% -10%, #1e293b 0%, #0f172a 60%, #020617 100%);
+            --card-bg: rgba(15,23,42,.72);
+            --card-border: rgba(148,163,184,.15);
+            --text: #e2e8f0;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+            --text-bright: #f8fafc;
+            --accent: linear-gradient(135deg, #06b6d4, #3b82f6);
+            --success: #10b981;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg);
+            background-attachment: fixed;
+            color: var(--text);
+        }
+
+        /* Top bar */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--card-border);
+            background: rgba(2,6,23,.5);
+            backdrop-filter: blur(20px) saturate(150%);
+            -webkit-backdrop-filter: blur(20px) saturate(150%);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: .02em;
+            color: var(--text-bright);
+        }
+        .brand-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 16px rgba(59,130,246,.7);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%,100% { opacity: .85; }
+            50% { opacity: 1; box-shadow: 0 0 24px rgba(59,130,246,.9); }
+        }
+        .brand-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 500;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .topbar-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            background: rgba(16,185,129,.12);
+            border: 1px solid rgba(16,185,129,.35);
+            color: #6ee7b7;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status-chip .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 8px rgba(16,185,129,.6);
+        }
+
+        /* Main layout */
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px;
+        }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 24px;
+        }
+        .page-header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--text-bright);
+            letter-spacing: -.01em;
+        }
+        .domain-switcher {
+            display: flex;
+            gap: 6px;
+            padding: 4px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+        }
+        .domain-switcher button {
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 13px;
+            padding: 6px 12px;
+            border-radius: 7px;
+            cursor: pointer;
+            transition: background .15s, color .15s;
+            font-family: inherit;
+        }
+        .domain-switcher button:hover { color: var(--text-bright); }
+        .domain-switcher button.active {
+            background: rgba(59,130,246,.15);
+            color: #93c5fd;
+        }
+
+        /* Stat cards grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 500px) { .grid { grid-template-columns: 1fr; } }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 20px;
+            backdrop-filter: blur(20px) saturate(150%);
+            -webkit-backdrop-filter: blur(20px) saturate(150%);
+            box-shadow: 0 4px 20px -8px rgba(0,0,0,.4);
+        }
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 500;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: 600;
+            color: var(--text-bright);
+            letter-spacing: -.02em;
+            font-variant-numeric: tabular-nums;
+        }
+        .stat-unit {
+            font-size: 14px;
+            color: var(--text-muted);
+            font-weight: 400;
+            margin-left: 4px;
+        }
+        .stat-trend {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .stat-trend.up { color: #6ee7b7; }
+        .stat-trend.down { color: #fca5a5; }
+
+        /* Stage indicator */
+        .stage-card {
+            grid-column: span 2;
+        }
+        .stage-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+        .stage-1 { background: rgba(16,185,129,.12); border: 1px solid rgba(16,185,129,.35); color: #6ee7b7; }
+        .stage-2 { background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); color: #fbbf24; }
+        .stage-3 { background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); color: #fca5a5; }
+        .stage-desc {
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-top: 12px;
+            line-height: 1.5;
+        }
+        .stage-actions {
+            margin-top: 16px;
+            display: flex;
+            gap: 8px;
+        }
+        .btn {
+            padding: 7px 14px;
+            border-radius: 7px;
+            border: 1px solid var(--card-border);
+            background: rgba(15,23,42,.6);
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: inherit;
+            transition: border-color .15s;
+        }
+        .btn:hover { border-color: rgba(59,130,246,.5); color: var(--text-bright); }
+        .btn.primary {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            border: none;
+            color: white;
+        }
+        .btn.primary:hover { box-shadow: 0 4px 16px rgba(59,130,246,.35); }
+
+        /* Chart placeholder */
+        .chart-card { grid-column: span 4; }
+        @media (max-width: 900px) { .chart-card { grid-column: span 2; } }
+        @media (max-width: 500px) { .chart-card { grid-column: span 1; } }
+        .chart-card .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .card-header h2 {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .chart-legend {
+            display: flex;
+            gap: 16px;
+            font-size: 12px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-muted);
+        }
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+        }
+        .chart {
+            height: 240px;
+            border-radius: 10px;
+            background: linear-gradient(180deg, rgba(59,130,246,.08), rgba(59,130,246,0));
+            position: relative;
+            overflow: hidden;
+            border: 1px solid var(--card-border);
+        }
+        .chart svg { width: 100%; height: 100%; display: block; }
+
+        /* Logs table */
+        .logs-card { grid-column: span 4; }
+        @media (max-width: 900px) { .logs-card { grid-column: span 2; } }
+        @media (max-width: 500px) { .logs-card { grid-column: span 1; } }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+        thead th {
+            text-align: left;
+            padding: 10px 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            border-bottom: 1px solid var(--card-border);
+        }
+        tbody td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(148,163,184,.06);
+            color: var(--text);
+        }
+        tbody tr:last-child td { border-bottom: none; }
+        tbody tr:hover { background: rgba(59,130,246,.05); }
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .tag-browser { background: rgba(16,185,129,.12); color: #6ee7b7; }
+        .tag-bot { background: rgba(245,158,11,.12); color: #fbbf24; }
+        .tag-unknown { background: rgba(239,68,68,.12); color: #fca5a5; }
+        .ip { color: #93c5fd; }
+
+        /* Footer */
+        footer {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 28px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--text-dim);
+            font-size: 12px;
+        }
+        footer a {
+            color: var(--text-muted);
+            text-decoration: none;
+        }
+        footer a:hover { color: var(--text-bright); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-dot"></span>
+            <div>
+                LancarSec
+                <div class="brand-sub">L7 DDoS Protection</div>
+            </div>
+        </div>
+        <div class="topbar-actions">
+            <span class="status-chip">
+                <span class="dot"></span>
+                Operational
+            </span>
+            <span>operator@sec.splay.id</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="page-header">
+            <h1>Overview</h1>
+            <div class="domain-switcher">
+                <button class="active">sec.splay.id</button>
+                <button>api.splay.id</button>
+                <button>9090.sec.splay.id</button>
+            </div>
+        </div>
+
+        <section class="grid">
+            <div class="card">
+                <div class="stat-label">Incoming r/s</div>
+                <div class="stat-value">1,284<span class="stat-unit">req/s</span></div>
+                <div class="stat-trend up">↑ 12% vs 5min ago</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Forwarded r/s</div>
+                <div class="stat-value">842<span class="stat-unit">req/s</span></div>
+                <div class="stat-trend">65.6% pass rate</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">CPU</div>
+                <div class="stat-value">18.4<span class="stat-unit">%</span></div>
+                <div class="stat-trend">4 cores @ 2.4GHz</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Memory</div>
+                <div class="stat-value">312<span class="stat-unit">MB</span></div>
+                <div class="stat-trend">7.2% of 4GB</div>
+            </div>
+        </section>
+
+        <section class="grid">
+            <div class="card stage-card">
+                <div class="stat-label">Current stage</div>
+                <div class="stage-pill stage-1">
+                    <span>●</span> Stage 1 · Cookie Challenge
+                </div>
+                <div class="stage-desc">
+                    Traffic is within normal thresholds. Visitors receive an invisible cookie challenge that passes automatically for real browsers and most well-behaved HTTP clients.
+                </div>
+                <div class="stage-actions">
+                    <button class="btn">Lock Stage</button>
+                    <button class="btn">Force Stage 2</button>
+                    <button class="btn">Force Stage 3</button>
+                </div>
+            </div>
+            <div class="card">
+                <div class="stat-label">L4 connections</div>
+                <div class="stat-value">2,147</div>
+                <div class="stat-trend">active sockets</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Blocked in last min</div>
+                <div class="stat-value">18,402</div>
+                <div class="stat-trend down">↑ from 1.2k</div>
+            </div>
+        </section>
+
+        <section class="grid">
+            <div class="card chart-card">
+                <div class="card-header">
+                    <h2>Requests per second — last 10 minutes</h2>
+                    <div class="chart-legend">
+                        <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Total</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#10b981"></span>Forwarded</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Blocked</span>
+                    </div>
+                </div>
+                <div class="chart">
+                    <svg viewBox="0 0 600 240" preserveAspectRatio="none">
+                        <defs>
+                            <linearGradient id="g1" x1="0" x2="0" y1="0" y2="1">
+                                <stop offset="0%" stop-color="#3b82f6" stop-opacity=".35"/>
+                                <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+                            </linearGradient>
+                        </defs>
+                        <path d="M0,180 L40,160 L80,170 L120,140 L160,130 L200,110 L240,90 L280,80 L320,60 L360,40 L400,55 L440,70 L480,90 L520,110 L560,130 L600,140 L600,240 L0,240 Z"
+                              fill="url(#g1)"/>
+                        <path d="M0,180 L40,160 L80,170 L120,140 L160,130 L200,110 L240,90 L280,80 L320,60 L360,40 L400,55 L440,70 L480,90 L520,110 L560,130 L600,140"
+                              fill="none" stroke="#3b82f6" stroke-width="2"/>
+                        <path d="M0,200 L40,188 L80,192 L120,172 L160,168 L200,158 L240,148 L280,138 L320,130 L360,118 L400,125 L440,135 L480,148 L520,160 L560,172 L600,178"
+                              fill="none" stroke="#10b981" stroke-width="2"/>
+                        <path d="M0,220 L40,215 L80,218 L120,205 L160,202 L200,195 L240,190 L280,185 L320,180 L360,168 L400,172 L440,178 L480,185 L520,195 L560,202 L600,205"
+                              fill="none" stroke="#ef4444" stroke-width="2"/>
+                    </svg>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid">
+            <div class="card logs-card">
+                <div class="card-header">
+                    <h2>Latest forwarded requests</h2>
+                    <button class="btn">Clear logs</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>IP</th>
+                            <th>Engine</th>
+                            <th>Path</th>
+                            <th>User-Agent</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>14:32:18</td><td class="ip">203.194.18.42</td><td><span class="tag tag-browser">Chromium</span></td><td>/api/v1/health</td><td>Mozilla/5.0 (Macintosh; Intel…)</td></tr>
+                        <tr><td>14:32:17</td><td class="ip">103.22.200.185</td><td><span class="tag tag-bot">Curl</span></td><td>/robots.txt</td><td>curl/8.4.0</td></tr>
+                        <tr><td>14:32:17</td><td class="ip">172.68.59.11</td><td><span class="tag tag-browser">Firefox</span></td><td>/dashboard</td><td>Mozilla/5.0 (X11; Linux x86_64…)</td></tr>
+                        <tr><td>14:32:16</td><td class="ip">118.97.4.210</td><td><span class="tag tag-browser">Safari</span></td><td>/login</td><td>Mozilla/5.0 (iPhone; CPU iPhone…)</td></tr>
+                        <tr><td>14:32:16</td><td class="ip">45.33.19.8</td><td><span class="tag tag-unknown">UNK</span></td><td>/api/session</td><td>Go-http-client/1.1</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
+        <span>v1.0 · uptime 4d 12h 38m</span>
+    </footer>
+</body>
+</html>
