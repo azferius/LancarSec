@@ -3,10 +3,12 @@ package server
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,9 +26,9 @@ import (
 var (
 	mReqTotal      atomic.Int64 // all requests reaching the middleware
 	mReqForwarded  atomic.Int64 // forwarded to backend
-	mReqBlocked    atomic.Int64 // challenged or outright blocked
+	mReqBlocked    atomic.Int64 // outright blocked
 	mReqBlocklist  atomic.Int64 // blocklist short-circuit
-	mReqPathLimit  atomic.Int64 // path-scoped 429
+	mReqPathLimit  atomic.Int64 // path-scoped limit hit
 	mReqRateLimit  atomic.Int64 // global per-IP ratelimit block
 	mReqConnect    atomic.Int64 // CONNECT rejected
 	mChallengeJS   atomic.Int64 // Stage 2 challenges shown
@@ -37,21 +39,21 @@ var (
 
 // RecordRequest / RecordForwarded / … are called from middleware.go via the
 // Incr* wrappers below so metric names don't leak into the hot path.
-func IncrRequest()      { mReqTotal.Add(1) }
-func IncrForwarded()    { mReqForwarded.Add(1) }
-func IncrBlocked()      { mReqBlocked.Add(1) }
-func IncrBlocklistHit() { mReqBlocklist.Add(1) }
-func IncrPathLimitHit() { mReqPathLimit.Add(1) }
-func IncrRateLimitHit() { mReqRateLimit.Add(1) }
+func IncrRequest()       { mReqTotal.Add(1) }
+func IncrForwarded()     { mReqForwarded.Add(1) }
+func IncrBlocked()       { mReqBlocked.Add(1) }
+func IncrBlocklistHit()  { mReqBlocklist.Add(1) }
+func IncrPathLimitHit()  { mReqPathLimit.Add(1) }
+func IncrRateLimitHit()  { mReqRateLimit.Add(1) }
 func IncrConnectReject() { mReqConnect.Add(1) }
-func IncrChallengeJS()  { mChallengeJS.Add(1) }
-func IncrChallengeCAP() { mChallengeCAP.Add(1) }
-func IncrTLSHandshake() { mTLSHandshakes.Add(1) }
+func IncrChallengeJS()   { mChallengeJS.Add(1) }
+func IncrChallengeCAP()  { mChallengeCAP.Add(1) }
+func IncrTLSHandshake()  { mTLSHandshakes.Add(1) }
 
 // ServeMetrics renders Prometheus text format. Authentication is via an
-// optional METRICS_TOKEN env-gated bearer — not an operator session, because
+// optional METRICS_TOKEN env-gated bearer, not an operator session, because
 // Prometheus scrapers shouldn't be juggling cookies. If the token env var is
-// unset the endpoint is open (for local scrape setups).
+// unset, only loopback peers may scrape.
 func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 	if required := metricsToken(); required != "" {
 		got := bearerFromHeader(r)
@@ -59,6 +61,9 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+	} else if !requestFromLoopback(r) {
+		w.WriteHeader(http.StatusForbidden)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -81,7 +86,7 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 	write("# TYPE lancarsec_requests_forwarded_total counter\n")
 	write("lancarsec_requests_forwarded_total %d\n", mReqForwarded.Load())
 
-	write("# HELP lancarsec_requests_blocked_total Requests denied or challenged instead of forwarded.\n")
+	write("# HELP lancarsec_requests_blocked_total Requests denied instead of forwarded.\n")
 	write("# TYPE lancarsec_requests_blocked_total counter\n")
 	write("lancarsec_requests_blocked_total %d\n", mReqBlocked.Load())
 
@@ -89,7 +94,7 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 	write("# TYPE lancarsec_blocklist_hits_total counter\n")
 	write("lancarsec_blocklist_hits_total %d\n", mReqBlocklist.Load())
 
-	write("# HELP lancarsec_pathlimit_hits_total Requests rejected by a path-scoped rate limit.\n")
+	write("# HELP lancarsec_pathlimit_hits_total Requests exceeding a path-scoped rate limit.\n")
 	write("# TYPE lancarsec_pathlimit_hits_total counter\n")
 	write("lancarsec_pathlimit_hits_total %d\n", mReqPathLimit.Load())
 
@@ -122,7 +127,7 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 		if d.StageManuallySet {
 			locked = 1
 		}
-		write("lancarsec_domain_stage{domain=\"%s\",locked=\"%d\"} %d\n", name, locked, d.Stage)
+		write("lancarsec_domain_stage{domain=\"%s\",locked=\"%d\"} %d\n", prometheusLabel(name), locked, d.Stage)
 	}
 	firewall.DataMu.RUnlock()
 
@@ -133,10 +138,11 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 	if cfg != nil {
 		for _, d := range cfg.Domains {
 			ctr := domains.CountersFor(d.Name)
-			write("lancarsec_domain_requests_total{domain=\"%s\"} %d\n", d.Name, ctr.Total.Load())
+			domainLabel := prometheusLabel(d.Name)
+			write("lancarsec_domain_requests_total{domain=\"%s\"} %d\n", domainLabel, ctr.Total.Load())
 			write("# HELP lancarsec_domain_bypassed_total Total forwarded requests per-domain.\n")
 			write("# TYPE lancarsec_domain_bypassed_total counter\n")
-			write("lancarsec_domain_bypassed_total{domain=\"%s\"} %d\n", d.Name, ctr.Bypassed.Load())
+			write("lancarsec_domain_bypassed_total{domain=\"%s\"} %d\n", domainLabel, ctr.Bypassed.Load())
 		}
 	}
 
@@ -155,17 +161,27 @@ func ServeMetrics(w http.ResponseWriter, r *http.Request) {
 
 	write("# HELP lancarsec_process_cpu_percent Last-observed CPU percentage reported by the monitor.\n")
 	write("# TYPE lancarsec_process_cpu_percent gauge\n")
-	write("lancarsec_process_cpu_percent %s\n", safeNumber(proxy.CpuUsage))
+	write("lancarsec_process_cpu_percent %s\n", safeNumber(proxy.GetCPUUsage()))
 }
 
-// metricsToken returns the LANCARSEC_METRICS_TOKEN env value or "" when
-// unset. An unset token leaves the metrics endpoint open, which is fine for
-// local scrape setups behind a firewall but must be set when the proxy is
-// internet-reachable.
+// metricsToken returns the LANCARSEC_METRICS_TOKEN env value or "" when unset.
 func metricsToken() string { return os.Getenv("LANCARSEC_METRICS_TOKEN") }
 
+func requestFromLoopback(r *http.Request) bool {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func prometheusLabel(s string) string {
+	return strings.NewReplacer("\\", "\\\\", "\n", "\\n", "\"", "\\\"").Replace(s)
+}
+
 // safeNumber returns s if it parses as a Go float, or "0" otherwise. We use
-// it to emit proxy.CpuUsage (a string) into Prometheus format without risking
+// it to emit proxy CPU usage (a string) into Prometheus format without risking
 // a parse error if the monitor goroutine wrote an "ERR" sentinel.
 func safeNumber(s string) string {
 	if _, err := strconv.ParseFloat(s, 64); err == nil {
@@ -182,4 +198,3 @@ func bearerFromHeader(r *http.Request) string {
 	}
 	return h[len(p):]
 }
-

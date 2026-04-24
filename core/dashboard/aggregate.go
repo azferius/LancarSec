@@ -21,8 +21,10 @@ func IsGlobal(domain string) bool { return domain == AllDomainsSentinel }
 // breakdown rows, and the last few requests across every configured domain
 // merged by timestamp. Shape mirrors statsFor so the frontend can render the
 // same card skeleton with only numbers swapped in.
-func aggregateStats() map[string]any {
-	list := domainList()
+func aggregateStats(list []string) map[string]any {
+	if list == nil {
+		list = domainList()
+	}
 	breakdown := make([]map[string]any, 0, len(list))
 
 	var (
@@ -37,8 +39,12 @@ func aggregateStats() map[string]any {
 
 	for _, name := range list {
 		firewall.DataMu.RLock()
-		d := domains.DomainsData[name]
+		d, ok := domains.DomainsData[name]
+		logs := append([]domains.DomainLog(nil), d.LastLogs...)
 		firewall.DataMu.RUnlock()
+		if !ok {
+			continue
+		}
 
 		ctr := domains.CountersFor(name)
 		t := ctr.Total.Load()
@@ -55,11 +61,9 @@ func aggregateStats() map[string]any {
 			domainsAttacked++
 		}
 
-		firewall.DataMu.RLock()
-		for _, l := range d.LastLogs {
+		for _, l := range logs {
 			allLogs = append(allLogs, domainLogEntry{domain: name, log: l})
 		}
-		firewall.DataMu.RUnlock()
 
 		breakdown = append(breakdown, map[string]any{
 			"domain":        name,
@@ -94,10 +98,10 @@ func aggregateStats() map[string]any {
 		"peak_rps":         peakRPS,
 		"total":            totalReq,
 		"bypassed":         bypassedReq,
-		"domains_count":    len(list),
+		"domains_count":    len(breakdown),
 		"domains_attacked": domainsAttacked,
-		"cpu":              proxy.CpuUsage,
-		"ram":              proxy.RamUsage,
+		"cpu":              proxy.GetCPUUsage(),
+		"ram":              proxy.GetRAMUsage(),
 		"breakdown":        breakdown,
 		"logs":             merged,
 	}
@@ -139,8 +143,10 @@ func mergeLogs(entries []domainLogEntry, n int) []map[string]any {
 // aggregateAnalytics combines RequestLogger samples across all domains into
 // one stream, summing Total/Allowed per matching timestamp. Used by the
 // analytics page when viewing global.
-func aggregateAnalytics() map[string]any {
-	list := domainList()
+func aggregateAnalytics(list []string) map[string]any {
+	if list == nil {
+		list = domainList()
+	}
 	// Keyed by "HH:MM:SS" — coarse but matches the per-domain granularity.
 	byTime := map[string]*aggSample{}
 	var peakRPS, peakBypassed int
@@ -148,8 +154,12 @@ func aggregateAnalytics() map[string]any {
 
 	for _, name := range list {
 		firewall.DataMu.RLock()
-		d := domains.DomainsData[name]
+		d, ok := domains.DomainsData[name]
+		samples := append([]domains.RequestLog(nil), d.RequestLogger...)
 		firewall.DataMu.RUnlock()
+		if !ok {
+			continue
+		}
 
 		if d.PeakRequestsPerSecond > peakRPS {
 			peakRPS = d.PeakRequestsPerSecond
@@ -160,7 +170,7 @@ func aggregateAnalytics() map[string]any {
 		bypassAttack = bypassAttack || d.BypassAttack
 		rawAttack = rawAttack || d.RawAttack
 
-		for _, s := range d.RequestLogger {
+		for _, s := range samples {
 			t := s.Time.Format("15:04:05")
 			existing := byTime[t]
 			cpuF, _ := strconv.ParseFloat(s.CpuUsage, 64)

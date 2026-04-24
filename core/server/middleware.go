@@ -47,6 +47,39 @@ func stripProxyCookies(r *http.Request) {
 	}
 }
 
+func peerHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func validSecret(got, want string) bool {
+	if want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func rejectDirectOrigin(w http.ResponseWriter, r *http.Request, buffer *bytes.Buffer) bool {
+	if !proxy.Cloudflare || !proxy.CloudflareEnforceOrigin {
+		return false
+	}
+	peer := peerHost(r.RemoteAddr)
+	if trusted.IsTrusted(peer) || isLoopbackHost(peer) {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusForbidden)
+	SendResponse("Blocked by LancarSec.\nDirect origin access is not allowed; connect via Cloudflare.", buffer, w)
+	return true
+}
+
 // hasValidChallengeCookie checks the request's cookies for a LancarSec
 // challenge token whose value exactly matches the stage-specific encryptedIP.
 // Stage 1/2/3 use cookie names ending with "_1__lSec_v", "_2__lSec_v", or
@@ -74,10 +107,7 @@ func hasValidChallengeCookie(r *http.Request, encryptedIP string) bool {
 // bypasses firewall/ratelimit decisions — it only resolves the subject IP.
 func realClientIP(r *http.Request) string {
 	remote := r.RemoteAddr
-	peer := remote
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		peer = host
-	}
+	peer := peerHost(remote)
 
 	if trusted.IsTrusted(peer) {
 		if cf := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); cf != "" {
@@ -107,6 +137,10 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	domainName := request.Host
 
+	if rejectDirectOrigin(writer, request, buffer) {
+		return
+	}
+
 	firewall.DataMu.RLock()
 	domainData, domainFound := domains.DomainsData[domainName]
 	firewall.DataMu.RUnlock()
@@ -126,9 +160,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	// Prometheus scrape endpoint — lives outside /api/dashboard so a
-	// scraper can hit it without juggling the dashboard session/Bearer
-	// flow. Optionally gated by LANCARSEC_METRICS_TOKEN env var.
+	// Prometheus scrape endpoint — lives outside /api/dashboard so a scraper
+	// can hit it without juggling the dashboard session/Bearer flow.
 	if request.URL.Path == "/_lancarsec/metrics" {
 		ServeMetrics(writer, request)
 		return
@@ -175,10 +208,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// confirmed bad actor never consumes a window counter or a PoW worker.
 	// ASN field left blank for now; ASN resolution lands with the future
 	// GeoLite2 integration.
-	peerIP := request.RemoteAddr
-	if h, _, err := net.SplitHostPort(peerIP); err == nil {
-		peerIP = h
-	}
+	peerIP := peerHost(request.RemoteAddr)
 	// Resolve forwarded IP early for blocklist match — but only trust it
 	// from a trusted proxy, per the realClientIP rules.
 	resolvedIP := peerIP
@@ -204,18 +234,31 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// Per-path / per-method rate limits evaluated against the same IP. Runs
-	// before the generic per-IP limit so a heavy endpoint gets its tight cap
-	// without polluting the baseline counter. Only touches lock-protected
-	// state when the path actually matches a configured pattern, so domains
-	// without path rules pay zero compute.
-	if pd := firewall.EvaluatePath(domainName, request.Method, request.URL.Path, resolvedIP, proxy.LastSecondTimestamp, proxy.RatelimitWindow); pd.Hit {
-		IncrPathLimitHit()
-		IncrBlocked()
-		writer.Header().Set("Content-Type", "text/plain")
-		writer.Header().Set("Retry-After", "60")
-		writer.WriteHeader(http.StatusTooManyRequests)
-		SendResponse("Blocked by LancarSec.\n"+pd.Reason, buffer, writer)
+	// Admin API v1: secret moved from URL path (where it ends up in access
+	// logs, referers, and CDN caches) to required Admin-Secret + Proxy-Secret
+	// headers. Bad credentials stop here instead of falling through upstream.
+	if request.URL.Path == "/_lancarsec/api/v1" {
+		if !validSecret(request.Header.Get("Admin-Secret"), proxy.AdminSecret) ||
+			!validSecret(request.Header.Get("Proxy-Secret"), proxy.APISecret) {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if api.Process(writer, request, domainData) {
+			return
+		}
+		http.NotFound(writer, request)
+		return
+	}
+
+	if request.URL.Path == "/_lancarsec/api/v2" || strings.HasPrefix(request.URL.Path, "/_lancarsec/api/v2/") {
+		if !validSecret(request.Header.Get("Proxy-Secret"), proxy.APISecret) {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if api.ProcessV2(writer, request) {
+			return
+		}
+		http.NotFound(writer, request)
 		return
 	}
 
@@ -234,6 +277,28 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	// Per-path / per-method rate limits evaluated against the same IP. Runs
+	// before the generic per-IP limit so a heavy endpoint gets its tight cap
+	// without polluting the baseline counter. Only touches lock-protected
+	// state when the path actually matches a configured pattern, so domains
+	// without path rules pay zero compute.
+	pathLimitChallenge := false
+	nowSecond := proxy.GetLastSecondTimestamp()
+	nowBucket := proxy.GetLast10SecondTimestamp()
+	if pd := firewall.EvaluatePath(domainName, request.Method, request.URL.Path, resolvedIP, nowSecond, proxy.RatelimitWindow); pd.Hit {
+		IncrPathLimitHit()
+		if strings.EqualFold(pd.Action, "challenge") {
+			pathLimitChallenge = true
+		} else {
+			IncrBlocked()
+			writer.Header().Set("Content-Type", "text/plain")
+			writer.Header().Set("Retry-After", "60")
+			writer.WriteHeader(http.StatusTooManyRequests)
+			SendResponse("Blocked by LancarSec.\n"+pd.Reason, buffer, writer)
+			return
+		}
+	}
+
 	var ip string
 	var tlsFp string
 	var ja4 string
@@ -246,26 +311,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	ip = realClientIP(request)
 
-	if domains.LoadConfig().Proxy.Cloudflare {
-
-		// Enforce that the socket peer is in the trusted proxy list. Anyone
-		// reaching the origin directly (discovered the IP, bypassed CF) gets
-		// a 403 instead of being served. realClientIP already honors CF
-		// headers only for trusted peers; this flag makes the untrusted path
-		// a hard block rather than a fallback to RemoteAddr.
-		if proxy.CloudflareEnforceOrigin {
-			peer := request.RemoteAddr
-			if h, _, err := net.SplitHostPort(peer); err == nil {
-				peer = h
-			}
-			if !trusted.IsTrusted(peer) {
-				writer.Header().Set("Content-Type", "text/plain")
-				writer.WriteHeader(http.StatusForbidden)
-				SendResponse("Blocked by LancarSec.\nDirect origin access is not allowed; connect via Cloudflare.", buffer, writer)
-				return
-			}
-		}
-
+	if proxy.Cloudflare {
 		tlsFp = "Cloudflare"
 		// If Cloudflare Enterprise is enabled with TLS fingerprinting add-on,
 		// it forwards the client JA3 here. Otherwise the sentinel stays.
@@ -279,8 +325,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		fpCount = 0
 
 		firewall.CountersMu.RLock()
-		ipCount = firewall.SumWindow(firewall.WindowAccessIps, ip, proxy.RatelimitWindow, proxy.LastSecondTimestamp)
-		ipCountCookie = firewall.SumWindow(firewall.WindowAccessIpsCookie, ip, proxy.RatelimitWindow, proxy.LastSecondTimestamp)
+		ipCount = firewall.SumWindow(firewall.WindowAccessIps, ip, proxy.RatelimitWindow, nowSecond)
+		ipCountCookie = firewall.SumWindow(firewall.WindowAccessIpsCookie, ip, proxy.RatelimitWindow, nowSecond)
 		firewall.CountersMu.RUnlock()
 	} else {
 		if v, ok := firewall.Connections.Load(request.RemoteAddr); ok {
@@ -291,9 +337,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		}
 
 		firewall.CountersMu.RLock()
-		fpCount = firewall.SumWindow(firewall.WindowUnkFps, tlsFp, proxy.RatelimitWindow, proxy.LastSecondTimestamp)
-		ipCount = firewall.SumWindow(firewall.WindowAccessIps, ip, proxy.RatelimitWindow, proxy.LastSecondTimestamp)
-		ipCountCookie = firewall.SumWindow(firewall.WindowAccessIpsCookie, ip, proxy.RatelimitWindow, proxy.LastSecondTimestamp)
+		fpCount = firewall.SumWindow(firewall.WindowUnkFps, tlsFp, proxy.RatelimitWindow, nowSecond)
+		ipCount = firewall.SumWindow(firewall.WindowAccessIps, ip, proxy.RatelimitWindow, nowSecond)
+		ipCountCookie = firewall.SumWindow(firewall.WindowAccessIpsCookie, ip, proxy.RatelimitWindow, nowSecond)
 		firewall.CountersMu.RUnlock()
 
 		// Atomic pointer lookups — safe to read concurrently with config
@@ -305,7 +351,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// Bounded counter bump. Incr drops the increment if the per-bucket key
 	// count has hit the cap — an attacker flooding with fresh IPs can't
 	// balloon the window map.
-	firewall.Incr(firewall.WindowAccessIps, proxy.Last10SecondTimestamp, ip)
+	firewall.Incr(firewall.WindowAccessIps, nowBucket, ip)
 
 	// Per-domain request counter is an atomic — no lock, no struct copy. The
 	// full DomainData copy only happens where we genuinely need the rest of
@@ -321,6 +367,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	//Start the suspicious level where the stage currently is
 	susLv := domainData.Stage
+	if pathLimitChallenge && susLv < 3 {
+		susLv = 3
+	}
 
 	// WebSocket: require at least Stage 2 (JS PoW) so a long-lived socket
 	// can't be opened by a bot that only passes a cookie-level challenge.
@@ -356,7 +405,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 
-		firewall.Incr(firewall.WindowUnkFps, proxy.Last10SecondTimestamp, tlsFp)
+		firewall.Incr(firewall.WindowUnkFps, nowBucket, tlsFp)
 	}
 
 	//Block user-specified fingerprints
@@ -370,7 +419,12 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	//Demonstration of how to use "susLv". Essentially allows you to challenge specific requests with a higher challenge
 
 	//SyncMap because semi-readonly
-	settingsQuery, _ := domains.DomainsMap.Load(domainName)
+	settingsQuery, ok := domains.DomainsMap.Load(domainName)
+	if !ok {
+		writer.Header().Set("Content-Type", "text/plain")
+		SendResponse("404 Not Found", buffer, writer)
+		return
+	}
 	domainSettings := settingsQuery.(domains.DomainSettings)
 
 	reqUa := request.UserAgent()
@@ -410,7 +464,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	encryptedIP := ""
 	hashedEncryptedIP := ""
 	susLvStr := utils.StageToString(susLv)
-	accessKey := ip + tlsFp + reqUa + proxy.CurrHourStr
+	accessKey := ip + tlsFp + reqUa + proxy.GetCurrHourStr()
 	encryptedCache, encryptedExists := firewall.CacheIps.Load(accessKey + susLvStr)
 
 	if !encryptedExists {
@@ -418,13 +472,13 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		case 0:
 			//whitelisted
 		case 1:
-			encryptedIP = utils.Encrypt(accessKey, proxy.CookieOTP)
+			encryptedIP = utils.Encrypt(accessKey, proxy.GetCookieOTP())
 		case 2:
-			encryptedIP = utils.Encrypt(accessKey, proxy.JSOTP)
+			encryptedIP = utils.Encrypt(accessKey, proxy.GetJSOTP())
 			hashedEncryptedIP = utils.EncryptSha(encryptedIP, "")
 			firewall.CacheIps.Store(encryptedIP, hashedEncryptedIP)
 		case 3:
-			encryptedIP = utils.Encrypt(accessKey, proxy.CaptchaOTP)
+			encryptedIP = utils.Encrypt(accessKey, proxy.GetCaptchaOTP())
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
 			SendResponse("Blocked by LancarSec.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
@@ -442,7 +496,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	//Check if client provided correct verification result
 	if !hasValidChallengeCookie(request, encryptedIP) {
 
-		firewall.Incr(firewall.WindowAccessIpsCookie, proxy.Last10SecondTimestamp, ip)
+		firewall.Incr(firewall.WindowAccessIpsCookie, nowBucket, ip)
 
 		//Respond with verification challenge if client didnt provide correct result/none
 		switch susLv {
@@ -546,7 +600,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	domains.CountersFor(domainName).Bypassed.Add(1)
 	firewall.DataMu.Lock()
 	utils.AddLogs(domains.DomainLog{
-		Time:      proxy.LastSecondTimeFormated,
+		Time:      proxy.GetLastSecondFormatted(),
 		IP:        ip,
 		BrowserFP: browser,
 		BotFP:     botFp,
@@ -575,23 +629,6 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("LancarSec; Lightweight http reverse-proxy. Protected by GNU GENERAL PUBLIC LICENSE Version 2, June 1991", buffer, writer)
 		return
-	}
-
-	// Admin API v1: secret moved from URL path (where it ends up in access
-	// logs, referers, and CDN caches) to a required Admin-Secret header.
-	// Handler only runs if the header matches in constant time.
-	if request.URL.Path == "/_lancarsec/api/v1" {
-		if subtle.ConstantTimeCompare([]byte(request.Header.Get("Admin-Secret")), []byte(proxy.AdminSecret)) == 1 {
-			if api.Process(writer, request, domainData) {
-				return
-			}
-		}
-	}
-
-	if strings.HasPrefix(request.URL.Path, "/_lancarsec/api/v2") {
-		if api.ProcessV2(writer, request) {
-			return
-		}
 	}
 
 	// Strip LancarSec-internal cookies before forwarding so the backend never

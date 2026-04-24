@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
@@ -52,12 +51,7 @@ func Monitor() {
 	PrintMutex.Unlock()
 
 	now := time.Now()
-	proxy.LastSecondTime = now
-	proxy.LastSecondTimeFormated = now.Format("15:04:05")
-	proxy.LastSecondTimestamp = int(now.Unix())
-	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
-	proxy.CurrHour, _, _ = now.Clock()
-	proxy.CurrHourStr = strconv.Itoa(proxy.CurrHour)
+	proxy.SetRuntimeClock(now)
 
 	go commands()
 	go firewall.ClearProxyCache()
@@ -72,8 +66,8 @@ func Monitor() {
 	for {
 		PrintMutex.Lock()
 		tempWidth, tempHeight, _ := term.GetSize(int(os.Stdout.Fd()))
-		proxy.TWidth = tempWidth + 18
 		if tempHeight != proxy.THeight || tempWidth+18 != proxy.TWidth {
+			proxy.TWidth = tempWidth + 18
 			proxy.THeight = tempHeight
 			pHeight := tempHeight - 15
 			if pHeight < 0 {
@@ -132,11 +126,14 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 				Time:     time.Now(),
 				Allowed:  domainData.RequestsBypassedPerSecond,
 				Total:    domainData.RequestsPerSecond,
-				CpuUsage: proxy.CpuUsage,
+				CpuUsage: proxy.GetCPUUsage(),
 			})
 		}
 
-		settingQuery, _ := domains.DomainsMap.Load(domainName)
+		settingQuery, ok := domains.DomainsMap.Load(domainName)
+		if !ok {
+			return
+		}
 		domainSettings := settingQuery.(domains.DomainSettings)
 
 		// Adaptive PoW difficulty: when the domain is actively bypassed,
@@ -173,7 +170,7 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 						Time:     time.Now(),
 						Allowed:  domainData.RequestsBypassedPerSecond,
 						Total:    domainData.RequestsPerSecond,
-						CpuUsage: proxy.CpuUsage,
+						CpuUsage: proxy.GetCPUUsage(),
 					})
 					go utils.SendWebhook(domainData, domainSettings, 0)
 				}
@@ -202,7 +199,7 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 					Time:     time.Now(),
 					Allowed:  domainData.RequestsBypassedPerSecond,
 					Total:    domainData.RequestsPerSecond,
-					CpuUsage: proxy.CpuUsage,
+					CpuUsage: proxy.GetCPUUsage(),
 				})
 				go utils.SendWebhook(domainData, domainSettings, 0)
 			}
@@ -217,45 +214,41 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 
 func printStats() {
 	now := time.Now()
-	proxy.LastSecondTime = now
-	proxy.LastSecondTimeFormated = now.Format("15:04:05")
-	proxy.LastSecondTimestamp = int(now.Unix())
-	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
-	proxy.CurrHour, _, _ = now.Clock()
-	proxy.CurrHourStr = strconv.Itoa(proxy.CurrHour)
+	proxy.SetRuntimeClock(now)
 
 	result, err := cpu.Percent(0, false)
 	switch {
 	case err != nil:
-		proxy.CpuUsage = "ERR"
+		proxy.SetCPUUsage("ERR")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(err.Error()) + " ]")
 	case len(result) > 0:
-		proxy.CpuUsage = fmt.Sprintf("%.2f", result[0])
-		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(proxy.CpuUsage) + " ]")
+		proxy.SetCPUUsage(fmt.Sprintf("%.2f", result[0]))
+		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(proxy.GetCPUUsage()) + " ]")
 	default:
-		proxy.CpuUsage = "ERR_S0"
+		proxy.SetCPUUsage("ERR_S0")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor("100.00 ( Speculated )") + " ]")
 	}
 
 	var ramStats runtime.MemStats
 	runtime.ReadMemStats(&ramStats)
-	proxy.RamUsage = fmt.Sprintf("%.2f", float64(ramStats.Alloc)/float64(ramStats.Sys)*100)
+	proxy.SetRAMUsage(fmt.Sprintf("%.2f", float64(ramStats.Alloc)/float64(ramStats.Sys)*100))
 
 	fmt.Println("")
 
+	watchedDomain := proxy.GetWatchedDomain()
 	firewall.DataMu.RLock()
-	domainData := domains.DomainsData[proxy.WatchedDomain]
+	domainData := domains.DomainsData[watchedDomain]
 	firewall.DataMu.RUnlock()
 
 	switch {
-	case domainData.Stage == 0 && proxy.WatchedDomain != "debug":
-		if proxy.WatchedDomain != "" {
-			fmt.Println("[" + utils.PrimaryColor("!") + "] [ " + utils.PrimaryColor("Domain \""+proxy.WatchedDomain+"\" Not Found") + " ]")
+	case domainData.Stage == 0 && watchedDomain != "debug":
+		if watchedDomain != "" {
+			fmt.Println("[" + utils.PrimaryColor("!") + "] [ " + utils.PrimaryColor("Domain \""+watchedDomain+"\" Not Found") + " ]")
 			fmt.Println("")
 		}
 		fmt.Println("[" + utils.PrimaryColor("Available Domains") + "]")
 		counter := 0
-		for _, dName := range domains.Domains {
+		for _, dName := range domains.LoadDomainNames() {
 			if counter < proxy.MaxLogLength {
 				fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor(dName) + " ]")
 				counter++
@@ -271,7 +264,7 @@ func printStats() {
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("clrlogs") + " ]: " + utils.PrimaryColor("Usage: ") + "clrlogs " + utils.PrimaryColor("Clears all logs for the current domain"))
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("reload") + " ]: " + utils.PrimaryColor("Usage: ") + "reload " + utils.PrimaryColor("Reload your proxy in order for changes in your ") + "config.json " + utils.PrimaryColor("to take effect"))
 	default:
-		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Domain") + " ] > [ " + utils.PrimaryColor(proxy.WatchedDomain) + " ]")
+		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Domain") + " ] > [ " + utils.PrimaryColor(watchedDomain) + " ]")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Stage") + " ] > [ " + utils.PrimaryColor(fmt.Sprint(domainData.Stage)) + " ]")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Stage Locked") + " ] > [ " + utils.PrimaryColor(fmt.Sprint(domainData.StageManuallySet)) + " ]")
 		fmt.Println("")
@@ -279,7 +272,7 @@ func printStats() {
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Bypassed") + " ] > [ " + utils.PrimaryColor(fmt.Sprint(domainData.RequestsBypassedPerSecond)+" r/s") + " ]")
 		fmt.Println("")
 		fmt.Println("[ " + utils.PrimaryColor("Latest Logs") + " ]")
-		utils.ReadLogs(proxy.WatchedDomain)
+		utils.ReadLogs(watchedDomain)
 	}
 
 	utils.MoveInputLine()

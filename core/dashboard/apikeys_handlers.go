@@ -97,6 +97,10 @@ func HandleAPIKeyRevoke(w http.ResponseWriter, r *http.Request, keyID int64) {
 	if s == nil {
 		return
 	}
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	if s.Role != store.RoleSuperAdmin {
 		// Fetch the key to make sure the operator owns it.
 		keys, err := store.ListAPIKeys(r.Context(), s.UserID)

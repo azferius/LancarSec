@@ -172,15 +172,8 @@ func wireRedirect(service, serviceH *http.Server) {
 			return
 		}
 
-		// Bump TotalRequests with an exclusive lock; this is the redirect
-		// path so we don't race with middleware here.
-		firewall.DataMu.Lock()
-		d := domains.DomainsData[r.Host]
-		d.TotalRequests++
-		domains.DomainsData[r.Host] = d
-		firewall.DataMu.Unlock()
-
-		http.Redirect(w, r, "https://"+r.Host+r.URL.Path+r.URL.RawQuery, http.StatusMovedPermanently)
+		domains.CountersFor(r.Host).Total.Add(1)
+		http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
 	})
 	service.SetKeepAlivesEnabled(true)
 	serviceH.Handler = http.HandlerFunc(Middleware)
@@ -189,7 +182,7 @@ func wireRedirect(service, serviceH *http.Server) {
 func runPlusRedirect(service *http.Server, serviceH *http.Server) {
 	service.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firewall.DataMu.RLock()
-		domainData, domainFound := domains.DomainsData[r.Host]
+		_, domainFound := domains.DomainsData[r.Host]
 		firewall.DataMu.RUnlock()
 
 		if !domainFound {
@@ -198,13 +191,8 @@ func runPlusRedirect(service *http.Server, serviceH *http.Server) {
 			return
 		}
 
-		firewall.DataMu.Lock()
-		domainData = domains.DomainsData[r.Host]
-		domainData.TotalRequests++
-		domains.DomainsData[r.Host] = domainData
-		firewall.DataMu.Unlock()
-
-		http.Redirect(w, r, "https://"+r.Host+r.URL.Path+r.URL.RawQuery, http.StatusMovedPermanently)
+		domains.CountersFor(r.Host).Total.Add(1)
+		http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
 	})
 
 	service.SetKeepAlivesEnabled(true)

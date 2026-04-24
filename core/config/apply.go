@@ -8,6 +8,7 @@ import (
 	"lancarsec/core/firewall"
 	"lancarsec/core/proxy"
 	"lancarsec/core/transport"
+	"lancarsec/core/trusted"
 	"lancarsec/core/utils"
 	"net/http/httputil"
 	"net/url"
@@ -59,6 +60,9 @@ func Apply(mode Mode) {
 	applyProxyFields(mode)
 	applyTimeouts()
 	applyRateLimits()
+	if err := trusted.Load(); err != nil {
+		panic("[ " + utils.PrimaryColor("!") + " ] [ Error Loading Trusted Proxy CIDRs: " + utils.PrimaryColor(err.Error()) + " ]")
+	}
 
 	if mode == ModeStartup {
 		fmt.Println("Loading Fingerprints ...")
@@ -67,16 +71,22 @@ func Apply(mode Mode) {
 		loadFingerprintMap("global/fingerprints/malicious_fingerprints.json", firewall.StoreForbidden)
 	}
 
-	domains.Domains = []string{}
-	for i := range domains.LoadConfig().Domains {
-		buildDomain(&domains.LoadConfig().Domains[i])
+	cfg = domains.LoadConfig()
+	domainNames := make([]string, 0, len(cfg.Domains))
+	activeDomains := map[string]struct{}{}
+	for i := range cfg.Domains {
+		domainNames = append(domainNames, cfg.Domains[i].Name)
+		activeDomains[cfg.Domains[i].Name] = struct{}{}
+		buildDomain(&cfg.Domains[i])
 	}
+	domains.StoreDomainNames(domainNames)
+	pruneRemovedDomains(activeDomains)
 
 	// Publish blocklists (global + per-domain) to the firewall package so
 	// the middleware hot path can evaluate lock-free via atomic.Pointer.
 	perDomainBlock := map[string][]domains.BlockEntry{}
 	perDomainPath := map[string][]domains.PathRateLimit{}
-	for _, d := range domains.LoadConfig().Domains {
+	for _, d := range cfg.Domains {
 		if len(d.Blocklist) > 0 {
 			perDomainBlock[d.Name] = d.Blocklist
 		}
@@ -100,7 +110,7 @@ func Apply(mode Mode) {
 		}
 	}
 
-	if len(domains.Domains) == 0 {
+	if len(domainNames) == 0 {
 		if mode == ModeStartup {
 			AddDomain()
 			Apply(ModeStartup)
@@ -108,8 +118,8 @@ func Apply(mode Mode) {
 		return
 	}
 
-	if mode == ModeStartup || proxy.WatchedDomain == "" {
-		proxy.WatchedDomain = domains.Domains[0]
+	if mode == ModeStartup || proxy.GetWatchedDomain() == "" {
+		proxy.SetWatchedDomain(domainNames[0])
 	}
 }
 
@@ -195,8 +205,6 @@ func applyRateLimits() {
 }
 
 func buildDomain(d *domains.Domain) {
-	domains.Domains = append(domains.Domains, d.Name)
-
 	firewallRules := make([]domains.Rule, 0, len(d.FirewallRules))
 	for idx, fwRule := range d.FirewallRules {
 		rule, err := gofilter.NewFilter(fwRule.Expression)
@@ -208,8 +216,9 @@ func buildDomain(d *domains.Domain) {
 
 	dProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: d.Scheme, Host: d.Backend})
 	dProxy.Transport = &transport.RoundTripper{}
+	verifyBackendTLS := backendTLSVerify(d)
 	transport.Register(d.Name, transport.Config{
-		BackendTLSVerify: d.BackendTLSVerify,
+		BackendTLSVerify: &verifyBackendTLS,
 		MaxIdleConns:     d.MaxIdleConns,
 		MaxConnsPerHost:  d.MaxConnsPerHost,
 	})
@@ -247,16 +256,46 @@ func buildDomain(d *domains.Domain) {
 	if d.Stage2Difficulty == 0 {
 		d.Stage2Difficulty = 5
 	}
+	if d.Stage2Difficulty < 0 {
+		d.Stage2Difficulty = 5
+	}
+	if d.Stage2Difficulty > firewall.MaxDifficulty {
+		d.Stage2Difficulty = firewall.MaxDifficulty
+	}
 
 	firewall.DataMu.Lock()
 	defer firewall.DataMu.Unlock()
-	domains.DomainsData[d.Name] = domains.DomainData{
-		Name:             d.Name,
-		Stage:            1,
-		Stage2Difficulty: d.Stage2Difficulty,
-		LastLogs:         []domains.DomainLog{},
-		RequestLogger:    []domains.RequestLog{},
+	dd, exists := domains.DomainsData[d.Name]
+	if !exists {
+		dd = domains.DomainData{
+			Stage:         1,
+			LastLogs:      []domains.DomainLog{},
+			RequestLogger: []domains.RequestLog{},
+		}
 	}
+	dd.Name = d.Name
+	dd.Stage2Difficulty = d.Stage2Difficulty
+	if dd.Stage <= 0 {
+		dd.Stage = 1
+	}
+	if dd.LastLogs == nil {
+		dd.LastLogs = []domains.DomainLog{}
+	}
+	if dd.RequestLogger == nil {
+		dd.RequestLogger = []domains.RequestLog{}
+	}
+	domains.DomainsData[d.Name] = dd
+}
+
+func backendTLSVerify(d *domains.Domain) bool {
+	verify := true
+	if d.BackendTLSVerify != nil {
+		verify = *d.BackendTLSVerify
+	}
+	if d.BackendTLSInsecure {
+		verify = false
+	}
+	return verify
 }
 
 func registerDebugDomain() {
@@ -269,4 +308,28 @@ func registerDebugDomain() {
 		LastLogs:      []domains.DomainLog{},
 		RequestLogger: []domains.RequestLog{},
 	}
+}
+
+func pruneRemovedDomains(active map[string]struct{}) {
+	domains.DomainsMap.Range(func(k, _ any) bool {
+		name, ok := k.(string)
+		if !ok || name == "debug" {
+			return true
+		}
+		if _, keep := active[name]; !keep {
+			domains.DomainsMap.Delete(k)
+		}
+		return true
+	})
+
+	firewall.DataMu.Lock()
+	for name := range domains.DomainsData {
+		if name == "debug" {
+			continue
+		}
+		if _, keep := active[name]; !keep {
+			delete(domains.DomainsData, name)
+		}
+	}
+	firewall.DataMu.Unlock()
 }

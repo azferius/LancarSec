@@ -21,9 +21,11 @@ func generateOTPSecrets() {
 
 	for {
 		bucket := time.Now().UTC().Format("2006-01-02-15")
-		proxy.CookieOTP = utils.EncryptSha(proxy.CookieSecret, bucket)
-		proxy.JSOTP = utils.EncryptSha(proxy.JSSecret, bucket)
-		proxy.CaptchaOTP = utils.EncryptSha(proxy.CaptchaSecret, bucket)
+		proxy.SetOTP(
+			utils.EncryptSha(proxy.CookieSecret, bucket),
+			utils.EncryptSha(proxy.JSSecret, bucket),
+			utils.EncryptSha(proxy.CaptchaSecret, bucket),
+		)
 
 		// Sleep until the next hour boundary, not a fixed 1 h, so all
 		// instances rotate in lockstep regardless of startup time.

@@ -14,11 +14,11 @@ func ClearProxyCache() {
 	defer pnc.PanicHndl()
 
 	for {
-		cpuUsage, err := strconv.ParseFloat(proxy.CpuUsage, 32)
+		cpuUsage, err := strconv.ParseFloat(proxy.GetCPUUsage(), 32)
 		if err != nil {
 			cpuUsage = 0
 		}
-		memUsage, err := strconv.ParseFloat(proxy.RamUsage, 32)
+		memUsage, err := strconv.ParseFloat(proxy.GetRAMUsage(), 32)
 		if err != nil {
 			memUsage = 0
 		}

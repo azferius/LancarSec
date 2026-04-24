@@ -104,6 +104,8 @@ A successful request will carry a `LancarSec-Proxy` response header.
 | `name` | string | The hostname being proxied (e.g. `example.com`). |
 | `scheme` | string | `http` or `https`. HTTP is faster and cheaper if the backend is co-located. |
 | `backend` | string | Backend host, optionally `host:port`. |
+| `backend_tls_verify` | bool | Optional legacy override for HTTPS upstream verification. Defaults to `true` when omitted. |
+| `backend_tls_insecure` | bool | Set to `true` only for trusted self-signed/local HTTPS backends. |
 | `certificate` / `key` | string | Paths to the TLS cert and key. Ignored in Cloudflare mode. |
 | `webhook` | map | Discord webhook + per-state messages. |
 

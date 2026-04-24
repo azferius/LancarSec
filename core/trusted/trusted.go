@@ -48,6 +48,10 @@ func Load() error {
 			}
 			parsed = append(parsed, cidr)
 		}
+		if err := scanner.Err(); err != nil {
+			file.Close()
+			return err
+		}
 		file.Close()
 	}
 

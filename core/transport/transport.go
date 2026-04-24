@@ -13,11 +13,10 @@ import (
 )
 
 // Config holds per-domain transport knobs. Zero values fall back to sensible
-// defaults. BackendTLSVerify=true enables proper certificate verification for
-// upstream connections; by default this is off (preserves prior behavior for
-// self-signed local backends).
+// defaults. BackendTLSVerify defaults to true when nil; pass false only for
+// trusted self-signed local backends.
 type Config struct {
-	BackendTLSVerify bool
+	BackendTLSVerify *bool
 	MaxIdleConns     int
 	MaxConnsPerHost  int
 	DialTimeout      time.Duration
@@ -51,6 +50,10 @@ func Register(domain string, cfg Config) {
 	if maxConns == 0 {
 		maxConns = 10
 	}
+	verifyBackendTLS := true
+	if cfg.BackendTLSVerify != nil {
+		verifyBackendTLS = *cfg.BackendTLSVerify
+	}
 
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -60,7 +63,7 @@ func Register(domain string, cfg Config) {
 			}).DialContext(ctx, network, addr)
 		},
 		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: !cfg.BackendTLSVerify},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: !verifyBackendTLS},
 		IdleConnTimeout:     idleTimeout,
 		MaxIdleConns:        maxIdle,
 		MaxConnsPerHost:     maxConns,

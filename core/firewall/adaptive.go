@@ -47,8 +47,14 @@ func DifficultyFor(domain string, base int) int {
 	if base <= 0 {
 		base = 5
 	}
+	if base > MaxDifficulty {
+		base = MaxDifficulty
+	}
 	cur := perDomainDifficulty.Load().(map[string]int)
 	if v, ok := cur[domain]; ok && v > 0 {
+		if v > MaxDifficulty {
+			return MaxDifficulty
+		}
 		return v
 	}
 	return base
@@ -70,6 +76,12 @@ func DifficultyFor(domain string, base int) int {
 const MaxDifficulty = 8
 
 func AdaptDifficulty(domain string, base int, bypassing bool, bypassRPS, bypassStage1 int) int {
+	if base <= 0 {
+		base = 5
+	}
+	if base > MaxDifficulty {
+		base = MaxDifficulty
+	}
 	if !bypassing || bypassRPS <= 0 {
 		return base
 	}

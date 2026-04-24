@@ -122,8 +122,7 @@ func HandlePage(tab string) http.HandlerFunc {
 			return
 		}
 
-		allDomains := domainList()
-		list, err := store.AccessibleDomains(r.Context(), s.Role, s.UserID, allDomains)
+		list, err := accessibleDomainsFor(r, s)
 		if err != nil {
 			http.Error(w, "access lookup failed", http.StatusInternalServerError)
 			return
@@ -139,6 +138,10 @@ func HandlePage(tab string) http.HandlerFunc {
 		// rolls up numbers from domains they're already allowed to see —
 		// when we filter the backend we'll sum only accessible domains).
 		if !IsGlobal(domain) {
+			if !domainExists(domain) {
+				http.NotFound(w, r)
+				return
+			}
 			allowed, err := store.HasAccess(r.Context(), s.Role, s.UserID, domain, store.PermView)
 			if err != nil || !allowed {
 				forbid(w, "view permission required for "+domain)
@@ -160,6 +163,9 @@ func HandlePage(tab string) http.HandlerFunc {
 		case "analytics":
 			t = tmplAnalytics
 		case "settings":
+			if !requireSuperAdmin(w, s) {
+				return
+			}
 			t = tmplSettings
 		case "blocklist":
 			t = tmplBlocklist
@@ -245,17 +251,29 @@ func domainListWithGlobal() []string {
 	return append([]string{AllDomainsSentinel}, list...)
 }
 
+func accessibleDomainsFor(r *http.Request, s *store.Session) ([]string, error) {
+	return store.AccessibleDomains(r.Context(), s.Role, s.UserID, domainList())
+}
+
+func domainExists(domain string) bool {
+	firewall.DataMu.RLock()
+	_, ok := domains.DomainsData[domain]
+	firewall.DataMu.RUnlock()
+	return ok
+}
+
 // ------------- API handlers (JSON) -------------
 
 // statsFor returns the live state snapshot for a domain. When domain is the
 // AllDomainsSentinel, delegates to aggregateStats for the global rollup.
 // Shared by the overview page JSON poll and the SSE stream.
-func statsFor(domain string) map[string]any {
+func statsFor(domain string, allowedDomains []string) map[string]any {
 	if IsGlobal(domain) {
-		return aggregateStats()
+		return aggregateStats(allowedDomains)
 	}
 	firewall.DataMu.RLock()
 	d := domains.DomainsData[domain]
+	logs := append([]domains.DomainLog(nil), d.LastLogs...)
 	firewall.DataMu.RUnlock()
 
 	ctr := domains.CountersFor(domain)
@@ -270,11 +288,11 @@ func statsFor(domain string) map[string]any {
 		"peak_rps":      d.PeakRequestsPerSecond,
 		"total":         ctr.Total.Load(),
 		"bypassed":      ctr.Bypassed.Load(),
-		"cpu":           proxy.CpuUsage,
-		"ram":           proxy.RamUsage,
+		"cpu":           proxy.GetCPUUsage(),
+		"ram":           proxy.GetRAMUsage(),
 		"bypass_attack": d.BypassAttack,
 		"raw_attack":    d.RawAttack,
-		"logs":          serializeLogs(d.LastLogs),
+		"logs":          serializeLogs(logs),
 	}
 }
 
@@ -299,13 +317,28 @@ func serializeLogs(logs []domains.DomainLog) []map[string]any {
 // HTTP-poll to SSE keeps the round-trip count bounded under an open
 // dashboard without needing WebSocket upgrade logic.
 func HandleStream(w http.ResponseWriter, r *http.Request) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
 	domain := r.URL.Query().Get("domain")
 	if domain == "" {
 		http.Error(w, "missing domain", http.StatusBadRequest)
+		return
+	}
+	var allowedDomains []string
+	if IsGlobal(domain) {
+		var err error
+		allowedDomains, err = accessibleDomainsFor(r, s)
+		if err != nil {
+			http.Error(w, "access lookup failed", http.StatusInternalServerError)
+			return
+		}
+	} else if !requireView(w, r, s, domain) {
+		return
+	}
+	if !IsGlobal(domain) && !domainExists(domain) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -322,7 +355,7 @@ func HandleStream(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	send := func() {
-		payload, err := json.Marshal(statsFor(domain))
+		payload, err := json.Marshal(statsFor(domain, allowedDomains))
 		if err != nil {
 			return
 		}
@@ -342,17 +375,34 @@ func HandleStream(w http.ResponseWriter, r *http.Request) {
 
 // HandleStatsJSON is a plain JSON fallback for clients that can't use SSE
 // (test tools, curl, anything without EventSource).
-func HandleStatsJSON(w http.ResponseWriter, r *http.Request) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+func HandleStatsJSON(w http.ResponseWriter, r *http.Request, domain string) {
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
-	domain := r.URL.Query().Get("domain")
 	if domain == "" {
-		http.Error(w, "missing domain", http.StatusBadRequest)
+		domain = r.URL.Query().Get("domain")
+		if domain == "" {
+			http.Error(w, "missing domain", http.StatusBadRequest)
+			return
+		}
+	}
+	var allowedDomains []string
+	if IsGlobal(domain) {
+		var err error
+		allowedDomains, err = accessibleDomainsFor(r, s)
+		if err != nil {
+			http.Error(w, "access lookup failed", http.StatusInternalServerError)
+			return
+		}
+	} else if !requireView(w, r, s, domain) {
 		return
 	}
-	writeJSON(w, statsFor(domain))
+	if !IsGlobal(domain) && !domainExists(domain) {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, statsFor(domain, allowedDomains))
 }
 
 // HandleRules GET returns the current rule set for a domain; POST appends a
@@ -471,20 +521,33 @@ func HandleLogsDelete(w http.ResponseWriter, r *http.Request, domain string) {
 
 // HandleAnalytics returns the RequestLogger samples for charting.
 func HandleAnalytics(w http.ResponseWriter, r *http.Request, domain string) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
 	if IsGlobal(domain) {
-		writeJSON(w, aggregateAnalytics())
+		allowedDomains, err := accessibleDomainsFor(r, s)
+		if err != nil {
+			http.Error(w, "access lookup failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, aggregateAnalytics(allowedDomains))
+		return
+	}
+	if !requireView(w, r, s, domain) {
+		return
+	}
+	if !domainExists(domain) {
+		http.Error(w, "unknown domain", http.StatusNotFound)
 		return
 	}
 	firewall.DataMu.RLock()
 	d := domains.DomainsData[domain]
+	samplesRaw := append([]domains.RequestLog(nil), d.RequestLogger...)
 	firewall.DataMu.RUnlock()
 
-	samples := make([]map[string]any, 0, len(d.RequestLogger))
-	for _, s := range d.RequestLogger {
+	samples := make([]map[string]any, 0, len(samplesRaw))
+	for _, s := range samplesRaw {
 		cpuF, _ := strconv.ParseFloat(s.CpuUsage, 64)
 		samples = append(samples, map[string]any{
 			"t":       s.Time.Format("15:04:05"),
@@ -506,8 +569,15 @@ func HandleAnalytics(w http.ResponseWriter, r *http.Request, domain string) {
 // HandleSettings returns a redacted view of the live configuration for the
 // settings page. Secret material is replaced with the string "•••••".
 func HandleSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	if !requireSuperAdmin(w, s) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	cfg := domains.LoadConfig()

@@ -200,7 +200,7 @@ func serveDomainAPI(w http.ResponseWriter, r *http.Request, rest string) bool {
 		HandleAnalytics(w, r, domain)
 		return true
 	case "stats":
-		HandleStatsJSON(w, r)
+		HandleStatsJSON(w, r, domain)
 		return true
 	}
 	http.NotFound(w, r)

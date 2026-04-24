@@ -10,6 +10,11 @@ import (
 // use LoadConfig(); writers (config.Apply) use StoreConfig. This replaces
 // direct reads of the Config global, which raced with reload.
 var configPtr atomic.Pointer[Configuration]
+var domainNames atomic.Value
+
+func init() {
+	domainNames.Store([]string{})
+}
 
 // LoadConfig returns the currently active configuration. Never nil once the
 // startup path has completed; before that it returns nil and callers should
@@ -24,6 +29,17 @@ func LoadConfig() *Configuration {
 func StoreConfig(c *Configuration) {
 	configPtr.Store(c)
 	Config = c // keep the legacy global in sync for any holdouts
+}
+
+func StoreDomainNames(names []string) {
+	cp := append([]string(nil), names...)
+	domainNames.Store(cp)
+	Domains = cp // keep the legacy global in sync for any holdouts
+}
+
+func LoadDomainNames() []string {
+	names := domainNames.Load().([]string)
+	return append([]string(nil), names...)
 }
 
 func Get(domain string) (DomainSettings, error) {

@@ -18,8 +18,8 @@ func InitPlaceholders(msg string, domainData domains.DomainData, domain string) 
 	msg = strings.ReplaceAll(msg, "{{domain.name}}", domain)
 	msg = strings.ReplaceAll(msg, "{{attack.start}}", domainData.RequestLogger[0].Time.Format("15:04:05"))
 	msg = strings.ReplaceAll(msg, "{{attack.end}}", domainData.RequestLogger[len(domainData.RequestLogger)-1].Time.Format("15:04:05"))
-	msg = strings.ReplaceAll(msg, "{{proxy.cpu}}", proxy.CpuUsage)
-	msg = strings.ReplaceAll(msg, "{{proxy.ram}}", proxy.RamUsage)
+	msg = strings.ReplaceAll(msg, "{{proxy.cpu}}", proxy.GetCPUUsage())
+	msg = strings.ReplaceAll(msg, "{{proxy.ram}}", proxy.GetRAMUsage())
 
 	return msg
 }

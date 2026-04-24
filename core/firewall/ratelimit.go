@@ -68,7 +68,8 @@ func EvaluateRatelimit() {
 		CountersMu.Lock()
 		// Pre-initialize the next 120 seconds of buckets so the hot path can
 		// write without allocating.
-		for i := proxy.Last10SecondTimestamp; i < proxy.Last10SecondTimestamp+120; i += 10 {
+		last10 := proxy.GetLast10SecondTimestamp()
+		for i := last10; i < last10+120; i += 10 {
 			if WindowAccessIps[i] == nil {
 				WindowAccessIps[i] = map[string]int{}
 			}
@@ -85,7 +86,7 @@ func EvaluateRatelimit() {
 		UnkFps = rebuildCounter(WindowUnkFps)
 		CountersMu.Unlock()
 
-		proxy.Initialised = true
+		proxy.SetInitialised(true)
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -94,8 +95,9 @@ func EvaluateRatelimit() {
 // Caller must hold Mutex for writes.
 func rebuildCounter(windows map[int]map[string]int) map[string]int {
 	result := map[string]int{}
+	now := proxy.GetLastSecondTimestamp()
 	for windowTime, bucket := range windows {
-		if trimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+		if trimTime(windowTime)+proxy.RatelimitWindow < now {
 			delete(windows, windowTime)
 			continue
 		}

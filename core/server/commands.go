@@ -38,8 +38,9 @@ func commands() {
 
 		details := strings.Split(scanner.Text(), " ")
 
+		watchedDomain := proxy.GetWatchedDomain()
 		firewall.DataMu.RLock()
-		domainData := domains.DomainsData[proxy.WatchedDomain]
+		domainData := domains.DomainsData[watchedDomain]
 		firewall.DataMu.RUnlock()
 		helpMode = false
 
@@ -81,15 +82,15 @@ func handleStageCommand(details []string, domainData domains.DomainData) {
 		domainData.StageManuallySet = true
 	}
 	firewall.DataMu.Lock()
-	domains.DomainsData[proxy.WatchedDomain] = domainData
+	domains.DomainsData[proxy.GetWatchedDomain()] = domainData
 	firewall.DataMu.Unlock()
 }
 
 func handleDomainCommand(details []string) {
 	if len(details) < 2 {
-		proxy.WatchedDomain = ""
+		proxy.SetWatchedDomain("")
 	} else {
-		proxy.WatchedDomain = details[1]
+		proxy.SetWatchedDomain(details[1])
 	}
 	repaintLoadingPrompt()
 }
@@ -105,8 +106,9 @@ func handleAddCommand() {
 func handleClrlogsCommand() {
 	screen.Clear()
 	screen.MoveTopLeft()
-	if proxy.WatchedDomain == "" {
-		for _, domain := range domains.Domains {
+	watchedDomain := proxy.GetWatchedDomain()
+	if watchedDomain == "" {
+		for _, domain := range domains.LoadDomainNames() {
 			firewall.DataMu.Lock()
 			utils.ClearLogs(domain)
 			firewall.DataMu.Unlock()
@@ -114,9 +116,9 @@ func handleClrlogsCommand() {
 		fmt.Println("[ " + utils.PrimaryColor("Clearing Logs All Domains ") + " ] ...")
 	} else {
 		firewall.DataMu.Lock()
-		utils.ClearLogs(proxy.WatchedDomain)
+		utils.ClearLogs(watchedDomain)
 		firewall.DataMu.Unlock()
-		fmt.Println("[ " + utils.PrimaryColor("Clearing Logs For "+proxy.WatchedDomain) + " ] ...")
+		fmt.Println("[ " + utils.PrimaryColor("Clearing Logs For "+watchedDomain) + " ] ...")
 	}
 	fmt.Println("\033[" + fmt.Sprint(12+proxy.MaxLogLength) + ";1H")
 	fmt.Print("[ " + utils.PrimaryColor("Command") + " ]: \033[s")

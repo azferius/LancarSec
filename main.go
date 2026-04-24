@@ -47,7 +47,7 @@ func main() {
 
 	fmt.Println("Initialising ...")
 	go server.Monitor()
-	for !proxy.Initialised {
+	for !proxy.IsInitialised() {
 		time.Sleep(500 * time.Millisecond)
 	}
 

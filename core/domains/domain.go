@@ -38,12 +38,13 @@ type Domain struct {
 	DisableBypassStage2 int             `json:"disableBypassStage2"`
 	DisableRawStage2    int             `json:"disableRawStage2"`
 
-	// Per-domain transport knobs. All optional — zero values fall back to the
-	// transport package's defaults. BackendTLSVerify=false preserves the prior
-	// behavior of accepting self-signed upstream certs.
-	BackendTLSVerify bool `json:"backend_tls_verify"`
-	MaxIdleConns     int  `json:"max_idle_conns"`
-	MaxConnsPerHost  int  `json:"max_conns_per_host"`
+	// Per-domain transport knobs. Backend TLS verification is on by default
+	// for https upstreams. Set backend_tls_insecure=true, or legacy
+	// backend_tls_verify=false, only for trusted self-signed local backends.
+	BackendTLSVerify   *bool `json:"backend_tls_verify,omitempty"`
+	BackendTLSInsecure bool  `json:"backend_tls_insecure,omitempty"`
+	MaxIdleConns       int   `json:"max_idle_conns"`
+	MaxConnsPerHost    int   `json:"max_conns_per_host"`
 
 	// Blocklist scoped to this domain. Combined with Proxy.Blocklist at
 	// evaluation time — a hit on either short-circuits the request.
@@ -150,8 +151,8 @@ type PathRateLimit struct {
 // is free-form operator-facing text shown in the dashboard and audit log.
 // Expires (unix seconds) is optional — 0 means permanent.
 type BlockEntry struct {
-	Type    string `json:"type"`           // "ip" | "cidr" | "ua_contains" | "ua_regex" | "asn"
-	Value   string `json:"value"`          // "203.0.113.4" | "10.0.0.0/8" | "curl" | "^Wget/" | "13335"
+	Type    string `json:"type"`  // "ip" | "cidr" | "ua_contains" | "ua_regex" | "asn"
+	Value   string `json:"value"` // "203.0.113.4" | "10.0.0.0/8" | "curl" | "^Wget/" | "13335"
 	Reason  string `json:"reason,omitempty"`
 	Expires int64  `json:"expires,omitempty"`
 	AddedBy string `json:"added_by,omitempty"` // username or "system"
@@ -171,14 +172,14 @@ type Proxy struct {
 	// fingerprinting attackers can't trivially read the installed version.
 	// Default false keeps the header (useful for debugging); flip to true
 	// in production.
-	HideVersionHeader       bool              `json:"hide_version_header"`
-	AdminSecret             string            `json:"adminsecret"`
-	APISecret               string            `json:"apisecret"`
-	Secrets                 map[string]string `json:"secrets"`
-	Timeout                 TimeoutSettings   `json:"timeout"`
-	RatelimitWindow         int               `json:"ratelimit_time"`
-	Ratelimits              map[string]int    `json:"ratelimits"`
-	Colors                  []string          `json:"colors"`
+	HideVersionHeader bool              `json:"hide_version_header"`
+	AdminSecret       string            `json:"adminsecret"`
+	APISecret         string            `json:"apisecret"`
+	Secrets           map[string]string `json:"secrets"`
+	Timeout           TimeoutSettings   `json:"timeout"`
+	RatelimitWindow   int               `json:"ratelimit_time"`
+	Ratelimits        map[string]int    `json:"ratelimits"`
+	Colors            []string          `json:"colors"`
 
 	// Blocklist is evaluated by middleware before any challenge logic.
 	// Global entries (this slice) apply to every domain; per-domain entries

@@ -11,6 +11,10 @@ func EvalFirewallRule(currDomain domains.DomainSettings, variables gofilter.Mess
 	result := susLv
 	for index, rule := range currDomain.CustomRules {
 		if rule.Filter.Apply(variables) {
+			if rule.Action == "" {
+				fmt.Printf("[ ! ] [ Error Evaluating Rule %d : empty action ]\n", index)
+				continue
+			}
 			//Check if we want to statically set susLv or add to it
 			switch rule.Action[:1] {
 			case "+":

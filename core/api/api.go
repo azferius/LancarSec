@@ -30,6 +30,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 		APIResponse(writer, false, map[string]interface{}{
 			"ERROR": ERR_BODY_READ_FAILED,
 		})
+		return true
 	}
 
 	defer request.Body.Close()
@@ -65,16 +66,16 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 	switch action {
 	case "GET_PROXY_STATS":
 		APIResponse(writer, true, map[string]interface{}{
-			"CPU_USAGE": proxy.CpuUsage,
-			"RAM_USAGE": proxy.RamUsage,
+			"CPU_USAGE": proxy.GetCPUUsage(),
+			"RAM_USAGE": proxy.GetRAMUsage(),
 		})
 	case "GET_PROXY_STATS_CPU_USAGE":
 		APIResponse(writer, true, map[string]interface{}{
-			"CPU_USAGE": proxy.CpuUsage,
+			"CPU_USAGE": proxy.GetCPUUsage(),
 		})
 	case "GET_PROXY_STATS_RAM_USAGE":
 		APIResponse(writer, true, map[string]interface{}{
-			"RAM_USAGE": proxy.RamUsage,
+			"RAM_USAGE": proxy.GetRAMUsage(),
 		})
 	case "GET_IP_REQUESTS":
 		firewall.CountersMu.RLock()
@@ -162,7 +163,8 @@ func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/_lancarsec/api/v2/")
+	path := strings.TrimPrefix(r.URL.Path, "/_lancarsec/api/v2")
+	path = strings.TrimPrefix(path, "/")
 	parts := strings.Split(path, "/")
 
 	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
