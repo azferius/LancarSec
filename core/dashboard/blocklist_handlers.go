@@ -6,6 +6,7 @@ import (
 
 	"lancarsec/core/config"
 	"lancarsec/core/domains"
+	"lancarsec/core/store"
 )
 
 // HandleBlocklist GET returns the active blocklist for a scope (global or a
@@ -13,22 +14,27 @@ import (
 // expires}. After mutate, a config.Apply(ModeReload) is triggered so the
 // change takes effect live.
 func HandleBlocklist(w http.ResponseWriter, r *http.Request, scope string) {
-	user, ok := IsAuthenticated(r)
-	if !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
+		if !requireView(w, r, s, scope) {
+			return
+		}
 		writeJSON(w, map[string]any{"scope": scope, "entries": loadBlockEntries(scope)})
 	case http.MethodPost:
+		if !requireManage(w, r, s, scope) {
+			return
+		}
 		var body domains.BlockEntry
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		body.AddedBy = user
+		body.AddedBy = s.Username
 		if err := validateBlockEntry(body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -38,6 +44,7 @@ func HandleBlocklist(w http.ResponseWriter, r *http.Request, scope string) {
 			return
 		}
 		config.Apply(config.ModeReload)
+		store.LogEvent(r.Context(), s.Username, s.UserID, "block_add", scopeForAudit(scope), clientIP(r), body)
 		writeJSON(w, map[string]any{"ok": true})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -46,8 +53,11 @@ func HandleBlocklist(w http.ResponseWriter, r *http.Request, scope string) {
 
 // HandleBlockDelete removes a block entry by index at the named scope.
 func HandleBlockDelete(w http.ResponseWriter, r *http.Request, scope string, index int) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	if !requireManage(w, r, s, scope) {
 		return
 	}
 	if err := deleteBlockAt(scope, index); err != nil {
@@ -55,7 +65,18 @@ func HandleBlockDelete(w http.ResponseWriter, r *http.Request, scope string, ind
 		return
 	}
 	config.Apply(config.ModeReload)
+	store.LogEvent(r.Context(), s.Username, s.UserID, "block_delete", scopeForAudit(scope), clientIP(r), map[string]any{"index": index})
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// scopeForAudit turns the blocklist scope string into a clean value for the
+// audit log's domain column: "global" / __all collapse to empty so the
+// filter can match global rows uniformly.
+func scopeForAudit(scope string) string {
+	if scope == "global" || scope == AllDomainsSentinel {
+		return ""
+	}
+	return scope
 }
 
 func loadBlockEntries(scope string) []domains.BlockEntry {

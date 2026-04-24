@@ -48,6 +48,7 @@ type layoutData struct {
 	Domains     []string
 	User        string
 	UserInitial string
+	Role        string
 }
 
 type loginData struct {

@@ -108,26 +108,42 @@ func HandleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandlePage renders one of the dashboard tabs. tab must be one of
-// "overview", "rules", "logs", "analytics", "settings".
+// "overview", "rules", "logs", "analytics", "settings", "blocklist".
+// Enforces RBAC: domain list in the sidebar is filtered to what the user can
+// actually see, and a selected scope the user has no view on becomes a 403.
 func HandlePage(tab string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, ok := IsAuthenticated(r)
-		if !ok {
-			http.Redirect(w, r, "/_lancarsec/login", http.StatusFound)
+		s := requireSession(w, r)
+		if s == nil {
+			return
+		}
+
+		allDomains := domainList()
+		list, err := store.AccessibleDomains(r.Context(), s.Role, s.UserID, allDomains)
+		if err != nil {
+			http.Error(w, "access lookup failed", http.StatusInternalServerError)
 			return
 		}
 
 		domain := r.URL.Query().Get("domain")
-		list := domainList()
 		if domain == "" {
-			// Default to the global view so the operator lands on the
-			// cross-domain overview rather than being silently pinned to
-			// one configured domain.
 			http.Redirect(w, r, "/_lancarsec/dashboard/"+tab+"?domain="+AllDomainsSentinel, http.StatusFound)
 			return
 		}
 
-		data := pageData(titleFor(tab), tab, domain, user, list)
+		// Gate the scope. Global aggregate is visible to everyone (it only
+		// rolls up numbers from domains they're already allowed to see —
+		// when we filter the backend we'll sum only accessible domains).
+		if !IsGlobal(domain) {
+			allowed, err := store.HasAccess(r.Context(), s.Role, s.UserID, domain, store.PermView)
+			if err != nil || !allowed {
+				forbid(w, "view permission required for "+domain)
+				return
+			}
+		}
+
+		data := pageData(titleFor(tab), tab, domain, s.Username, list)
+		data.Role = s.Role
 
 		var t *template.Template
 		switch tab {
@@ -314,10 +330,11 @@ func HandleStatsJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleRules GET returns the current rule set for a domain; POST appends a
-// new rule; the DELETE-via-URL variant removes by index.
+// new rule; the DELETE-via-URL variant removes by index. GET needs view,
+// POST needs manage.
 func HandleRules(w http.ResponseWriter, r *http.Request, domain string) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
 	settingsVal, exists := domains.DomainsMap.Load(domain)
@@ -328,8 +345,14 @@ func HandleRules(w http.ResponseWriter, r *http.Request, domain string) {
 	settings := settingsVal.(domains.DomainSettings)
 	switch r.Method {
 	case http.MethodGet:
+		if !requireView(w, r, s, domain) {
+			return
+		}
 		writeJSON(w, map[string]any{"rules": settings.RawCustomRules})
 	case http.MethodPost:
+		if !requireManage(w, r, s, domain) {
+			return
+		}
 		var newRule domains.JsonRule
 		if err := json.NewDecoder(r.Body).Decode(&newRule); err != nil {
 			http.Error(w, "bad body", http.StatusBadRequest)
@@ -340,6 +363,7 @@ func HandleRules(w http.ResponseWriter, r *http.Request, domain string) {
 			return
 		}
 		config.Apply(config.ModeReload)
+		store.LogEvent(r.Context(), s.Username, s.UserID, "rule_add", domain, clientIP(r), newRule)
 		writeJSON(w, map[string]any{"ok": true})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -348,10 +372,13 @@ func HandleRules(w http.ResponseWriter, r *http.Request, domain string) {
 
 // HandleRuleDelete removes a rule by position (0-indexed), persists the
 // config, then triggers a reload so the change is applied live without a
-// restart.
+// restart. Manage permission required.
 func HandleRuleDelete(w http.ResponseWriter, r *http.Request, domain string, index int) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	if !requireManage(w, r, s, domain) {
 		return
 	}
 	if err := deleteRuleAt(domain, index); err != nil {
@@ -359,14 +386,19 @@ func HandleRuleDelete(w http.ResponseWriter, r *http.Request, domain string, ind
 		return
 	}
 	config.Apply(config.ModeReload)
+	store.LogEvent(r.Context(), s.Username, s.UserID, "rule_delete", domain, clientIP(r), map[string]any{"index": index})
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 // HandleStage locks/unlocks the stage for a domain from the Overview page.
-// Posting {"stage": 0} resumes auto; 1-3 force-locks.
+// Posting {"stage": 0} resumes auto; 1-3 force-locks. Manage permission
+// required.
 func HandleStage(w http.ResponseWriter, r *http.Request, domain string) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	if !requireManage(w, r, s, domain) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -389,15 +421,20 @@ func HandleStage(w http.ResponseWriter, r *http.Request, domain string) {
 	}
 	domains.DomainsData[domain] = d
 	firewall.DataMu.Unlock()
+	store.LogEvent(r.Context(), s.Username, s.UserID, "stage_force", domain, clientIP(r), map[string]any{"stage": d.Stage, "locked": d.StageManuallySet})
 	writeJSON(w, map[string]any{"ok": true, "stage": d.Stage})
 }
 
-// HandleLogsDelete clears the log tail for one domain.
+// HandleLogsDelete clears the log tail for one domain. Manage permission.
 func HandleLogsDelete(w http.ResponseWriter, r *http.Request, domain string) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
 		return
 	}
+	if !requireManage(w, r, s, domain) {
+		return
+	}
+	store.LogEvent(r.Context(), s.Username, s.UserID, "logs_clear", domain, clientIP(r), nil)
 	firewall.DataMu.Lock()
 	d := domains.DomainsData[domain]
 	d.LastLogs = nil
@@ -481,10 +518,13 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleReload triggers a hot config reload. Posts only, auth required.
+// HandleReload triggers a hot config reload. Superadmin only.
 func HandleReload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := IsAuthenticated(r); !ok {
-		w.WriteHeader(http.StatusUnauthorized)
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	if !requireSuperAdmin(w, s) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -492,6 +532,7 @@ func HandleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config.Apply(config.ModeReload)
+	store.LogEvent(r.Context(), s.Username, s.UserID, "config_reload", "", clientIP(r), nil)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
