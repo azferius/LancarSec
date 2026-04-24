@@ -2,95 +2,242 @@
 <div class="page-header">
     <div class="page-title">
         <h1>Settings</h1>
-        <p>Active proxy configuration. Edit <code>config.json</code> on disk and use <strong>Reload</strong>.</p>
+        <p>Active proxy configuration. Edit <code>config.json</code> on disk and apply a hot reload from here.</p>
     </div>
     <div class="page-actions">
-        <button class="btn primary" onclick="reloadConfig()">Reload config</button>
+        <button class="btn" id="downloadBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download
+        </button>
+        <button class="btn primary" id="reloadBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/></svg>
+            Reload config
+        </button>
     </div>
 </div>
 
-<section class="grid">
+<div class="btn-group" id="tabs" style="margin:16px 0 18px;width:fit-content">
+    <button class="active" data-t="proxy">Proxy</button>
+    <button data-t="timeouts">Timeouts</button>
+    <button data-t="limits">Rate limits</button>
+    <button data-t="domains">Domains</button>
+    <button data-t="raw">Raw</button>
+</div>
+
+<!-- ==================== PROXY ==================== -->
+<section class="grid tab-pane" data-p="proxy">
     <div class="card half-card">
-        <div class="card-header"><h2>Proxy mode</h2></div>
+        <div class="card-header"><div><h2>Deployment mode</h2></div></div>
         <dl class="kv">
-            <dt>Cloudflare</dt><dd id="s_cf">—</dd>
-            <dt>Full SSL</dt><dd id="s_fullssl">—</dd>
-            <dt>Enforce origin</dt><dd id="s_enforce">—</dd>
-            <dt>Hide version header</dt><dd id="s_hideh">—</dd>
+            <dt>Cloudflare</dt><dd><span class="tag" id="s_cf">—</span></dd>
+            <dt>Full SSL</dt><dd><span class="tag" id="s_fullssl">—</span></dd>
+            <dt>Enforce origin</dt><dd><span class="tag" id="s_enforce">—</span></dd>
+            <dt>Hide version header</dt><dd><span class="tag" id="s_hideh">—</span></dd>
         </dl>
     </div>
     <div class="card half-card">
-        <div class="card-header"><h2>Timeouts</h2></div>
+        <div class="card-header"><div><h2>Version & runtime</h2></div></div>
         <dl class="kv">
-            <dt>Idle</dt><dd id="s_tidle">—</dd>
-            <dt>Read</dt><dd id="s_tread">—</dd>
-            <dt>Write</dt><dd id="s_twrite">—</dd>
-            <dt>Read header</dt><dd id="s_treadh">—</dd>
+            <dt>LancarSec</dt><dd>v1.0</dd>
+            <dt>Configured domains</dt><dd id="s_domcount">—</dd>
+            <dt>Operators</dt><dd id="s_operators">—</dd>
+            <dt>Dashboard port</dt><dd>:80 (CF) / :443 (Origin)</dd>
         </dl>
     </div>
 </section>
 
-<section class="grid">
-    <div class="card half-card">
-        <div class="card-header"><h2>Rate limits</h2><p>Per-IP window: <span id="s_window">—</span>s</p></div>
+<!-- ==================== TIMEOUTS ==================== -->
+<section class="grid tab-pane" data-p="timeouts" style="display:none">
+    <div class="card full-card">
+        <div class="card-header"><div><h2>HTTP timeouts</h2><p>Values in seconds. Applied to all listeners.</p></div></div>
         <dl class="kv">
-            <dt>Requests</dt><dd id="s_rreq">—</dd>
+            <dt>Idle keep-alive</dt><dd id="s_tidle">—</dd>
+            <dt>Read (headers + body)</dt><dd id="s_tread">—</dd>
+            <dt>Write (response)</dt><dd id="s_twrite">—</dd>
+            <dt>Read header only</dt><dd id="s_treadh">—</dd>
+        </dl>
+    </div>
+</section>
+
+<!-- ==================== RATE LIMITS ==================== -->
+<section class="grid tab-pane" data-p="limits" style="display:none">
+    <div class="card full-card">
+        <div class="card-header"><div><h2>Global per-IP rate limits</h2><p>Per-IP counters over the rolling window. Per-path rules (see Rules page) layer on top.</p></div></div>
+        <dl class="kv">
+            <dt>Window length</dt><dd><span id="s_window">—</span> seconds</dd>
+            <dt>Requests (total)</dt><dd id="s_rreq">—</dd>
             <dt>Unknown fingerprint</dt><dd id="s_runk">—</dd>
             <dt>Challenge failures</dt><dd id="s_rchal">—</dd>
-            <dt>No requests sent</dt><dd id="s_rnone">—</dd>
+            <dt>Idle TCP (no request sent)</dt><dd id="s_rnone">—</dd>
         </dl>
-    </div>
-    <div class="card half-card">
-        <div class="card-header"><h2>Domains registered</h2></div>
-        <table>
-            <thead><tr><th>Name</th><th>Backend</th><th>Scheme</th></tr></thead>
-            <tbody id="s_domains"></tbody>
-        </table>
     </div>
 </section>
 
-<section class="grid">
+<!-- ==================== DOMAINS ==================== -->
+<section class="grid tab-pane" data-p="domains" style="display:none">
     <div class="card full-card">
-        <div class="card-header"><h2>Raw configuration</h2><p>Sensitive fields (secrets, keys) are redacted before rendering.</p></div>
+        <div class="card-header"><div><h2>Protected domains</h2><p>Add / remove via <code>config.json</code>. The dashboard picks up changes after a reload.</p></div></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Name</th><th>Backend</th><th style="width:80px">Scheme</th><th style="width:120px">TLS verify</th></tr></thead>
+                <tbody id="s_domains"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== RAW ==================== -->
+<section class="grid tab-pane" data-p="raw" style="display:none">
+    <div class="card full-card">
+        <div class="card-header">
+            <div><h2>Raw configuration</h2><p>Secrets (<code>adminsecret</code>, <code>apisecret</code>, per-domain <code>key</code>) are redacted before render.</p></div>
+            <button class="copy-btn" id="copyRaw">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+            </button>
+        </div>
         <pre class="code" id="s_raw">Loading…</pre>
     </div>
 </section>
+
+<!-- Reload confirmation -->
+<div class="modal-backdrop" id="reloadModal" style="display:none">
+    <div class="modal">
+        <h3>Reload configuration?</h3>
+        <p>LancarSec re-reads <code>config.json</code>, rebuilds per-domain transports, recompiles firewall + blocklist rules, and publishes the new tables atomically. In-flight requests keep working.</p>
+        <div class="modal-actions">
+            <button class="btn" id="cancelReload">Cancel</button>
+            <button class="btn primary" id="confirmReload">Reload now</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
 {{end}}
 
 {{define "pagescript"}}
 <script>
+var configCache = null;
+
 function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2600);
+}
+
+function boolTag(id, on) {
+    var el = document.getElementById(id);
+    el.textContent = on ? 'enabled' : 'disabled';
+    el.className = 'tag ' + (on ? 'tag-browser' : 'tag-neutral');
+}
+
 function load() {
     fetch('/_lancarsec/api/dashboard/settings')
         .then(function (r) { return r.json(); })
         .then(function (d) {
-            document.getElementById('s_cf').textContent = d.cloudflare;
-            document.getElementById('s_fullssl').textContent = d.cloudflare_full_ssl;
-            document.getElementById('s_enforce').textContent = d.cloudflare_enforce_origin;
-            document.getElementById('s_hideh').textContent = d.hide_version_header;
+            configCache = d;
+            boolTag('s_cf', d.cloudflare);
+            boolTag('s_fullssl', d.cloudflare_full_ssl);
+            boolTag('s_enforce', d.cloudflare_enforce_origin);
+            boolTag('s_hideh', d.hide_version_header);
+
             document.getElementById('s_tidle').textContent = d.timeout_idle + 's';
             document.getElementById('s_tread').textContent = d.timeout_read + 's';
             document.getElementById('s_twrite').textContent = d.timeout_write + 's';
             document.getElementById('s_treadh').textContent = d.timeout_readheader + 's';
+
             document.getElementById('s_window').textContent = d.ratelimit_window;
-            document.getElementById('s_rreq').textContent = d.rl_requests;
-            document.getElementById('s_runk').textContent = d.rl_unknown_fingerprint;
-            document.getElementById('s_rchal').textContent = d.rl_challenge_failures;
-            document.getElementById('s_rnone').textContent = d.rl_no_requests;
-            document.getElementById('s_raw').textContent = d.raw;
+            document.getElementById('s_rreq').textContent = (d.rl_requests || 0).toLocaleString();
+            document.getElementById('s_runk').textContent = (d.rl_unknown_fingerprint || 0).toLocaleString();
+            document.getElementById('s_rchal').textContent = (d.rl_challenge_failures || 0).toLocaleString();
+            document.getElementById('s_rnone').textContent = (d.rl_no_requests || 0).toLocaleString();
+
+            document.getElementById('s_domcount').textContent = (d.domains || []).length;
+            document.getElementById('s_operators').textContent = '—';
+
             var tbody = document.getElementById('s_domains');
-            tbody.innerHTML = '';
-            (d.domains || []).forEach(function (x) {
-                var tr = document.createElement('tr');
-                tr.setAttribute('data-searchable', '');
-                tr.innerHTML = '<td>' + esc(x.name) + '</td><td>' + esc(x.backend) + '</td><td>' + esc(x.scheme) + '</td>';
-                tbody.appendChild(tr);
-            });
+            if (!(d.domains || []).length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty">No domains configured.</td></tr>';
+            } else {
+                tbody.innerHTML = '';
+                d.domains.forEach(function (x) {
+                    var tr = document.createElement('tr');
+                    tr.setAttribute('data-searchable', '');
+                    tr.innerHTML = '<td style="font-family:Inter,sans-serif;font-weight:500">' + esc(x.name) + '</td>' +
+                        '<td style="font-family:var(--mono)">' + esc(x.backend) + '</td>' +
+                        '<td><span class="tag tag-neutral">' + esc(x.scheme) + '</span></td>' +
+                        '<td><span style="color:var(--text-dim);font-size:11px">via config</span></td>';
+                    tbody.appendChild(tr);
+                });
+            }
+            document.getElementById('s_raw').textContent = d.raw || '';
+        })
+        .catch(function () { toast('Failed to load settings', 'error'); });
+
+    // Operator count — superadmin only, best-effort.
+    fetch('/_lancarsec/api/dashboard/users', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { if (!r.ok) return null; return r.json(); })
+        .then(function (d) { if (d && d.users) document.getElementById('s_operators').textContent = d.users.length; });
+}
+
+// Tab switcher
+document.querySelectorAll('#tabs button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#tabs button').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var tab = btn.getAttribute('data-t');
+        document.querySelectorAll('.tab-pane').forEach(function (p) {
+            p.style.display = p.getAttribute('data-p') === tab ? 'grid' : 'none';
         });
-}
-function reloadConfig() {
-    fetch('/_lancarsec/api/dashboard/reload', {method: 'POST'}).then(function () { location.reload(); });
-}
+    });
+});
+
+// Copy raw
+document.getElementById('copyRaw').addEventListener('click', function () {
+    navigator.clipboard.writeText(document.getElementById('s_raw').textContent).then(function () {
+        var btn = document.getElementById('copyRaw');
+        btn.classList.add('copied');
+        setTimeout(function () { btn.classList.remove('copied'); }, 1200);
+        toast('Copied to clipboard', 'success');
+    });
+});
+
+// Download
+document.getElementById('downloadBtn').addEventListener('click', function () {
+    if (!configCache) return;
+    var blob = new Blob([configCache.raw], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'lancarsec-config-' + Date.now() + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+});
+
+// Reload with confirmation
+document.getElementById('reloadBtn').addEventListener('click', function () {
+    document.getElementById('reloadModal').style.display = 'grid';
+});
+document.getElementById('cancelReload').addEventListener('click', function () {
+    document.getElementById('reloadModal').style.display = 'none';
+});
+document.getElementById('confirmReload').addEventListener('click', function () {
+    document.getElementById('reloadModal').style.display = 'none';
+    var btn = document.getElementById('reloadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Reloading…';
+    fetch('/_lancarsec/api/dashboard/reload', { method: 'POST' })
+        .then(function (r) { if (!r.ok) throw r; toast('Config reloaded', 'success'); setTimeout(load, 300); })
+        .catch(function () { toast('Reload failed (superadmin only)', 'error'); })
+        .finally(function () {
+            btn.disabled = false;
+            btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/></svg> Reload config';
+        });
+});
+
 load();
 </script>
 {{end}}

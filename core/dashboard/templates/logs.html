@@ -2,71 +2,252 @@
 <div class="page-header">
     <div class="page-title">
         <h1>Logs</h1>
-        <p>Forwarded requests tail for <strong>{{.Domain}}</strong>. Use the top search to filter.</p>
+        <p id="pageSub">Forwarded request tail. Use <kbd style="background:rgba(148,163,184,.12);border:1px solid var(--border);padding:1px 5px;border-radius:3px;font-family:var(--mono);font-size:10px">⌘K</kbd> to filter.</p>
     </div>
     <div class="page-actions">
-        <button class="btn" onclick="location.reload()">Refresh</button>
-        <button class="btn danger" onclick="clearLogs()">Clear logs</button>
+        <button class="btn" id="pauseBtn" title="Pause live stream (P)">
+            <svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            <span id="pauseLabel">Pause</span>
+        </button>
+        <button class="btn" id="autoscrollBtn" title="Toggle auto-scroll to newest (S)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><polyline points="19 12 12 19 5 12"/></svg>
+            <span id="autoscrollLabel">Auto-scroll on</span>
+        </button>
+        <button class="btn" id="exportBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export CSV</button>
+        <button class="btn danger" id="clearBtn">Clear</button>
     </div>
 </div>
-<div class="last-updated"><span class="dot"></span><span id="logsStatus">Streaming live</span></div>
 
-<div class="card full-card">
-    <table>
-        <thead><tr><th>Time</th><th>IP</th><th>Engine</th><th>Bot</th><th>JA4 / Fingerprint</th><th>Path</th><th>User-Agent</th></tr></thead>
-        <tbody id="logs"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
-    </table>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0 18px">
+    <div class="btn-group" id="typeFilter">
+        <button class="active" data-f="all">All</button>
+        <button data-f="browser">Browsers</button>
+        <button data-f="bot">Known bots</button>
+        <button data-f="unknown">Unknown</button>
+    </div>
+    <div style="flex:1;min-width:240px;position:relative">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--text-dim)"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="logSearch" type="text" placeholder="Filter by IP, path, UA, fingerprint…" style="padding-left:32px">
+    </div>
+    <div class="last-updated" id="statusBar" style="margin:0"><span class="dot"></span><span id="liveStatus">Connecting…</span></div>
 </div>
+
+<div class="card full-card" style="padding:0">
+    <div class="table-wrap" id="logWrap" style="max-height:calc(100vh - 320px);overflow-y:auto">
+        <table>
+            <thead>
+                <tr id="logHeader">
+                    <th style="width:90px">Time</th>
+                    <th style="width:140px">IP</th>
+                    <th style="width:110px">Engine</th>
+                    <th style="width:100px">Bot</th>
+                    <th style="width:160px">Fingerprint</th>
+                    <th style="min-width:200px">Path</th>
+                    <th>User-Agent</th>
+                </tr>
+            </thead>
+            <tbody id="logs"><tr><td colspan="7" class="empty">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Waiting for traffic…
+            </td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
 {{end}}
 
 {{define "pagescript"}}
 <script>
 var DOMAIN = {{.Domain}};
+var IS_GLOBAL = DOMAIN === '__all';
+var paused = false;
+var autoScroll = true;
+var currentFilter = 'all';
+var searchQuery = '';
+var rows = []; // unified ring of seen log rows, keyed by time+ip+path
+var seen = {};
+var MAX_ROWS = 500;
+var es = null;
+
+if (IS_GLOBAL) {
+    document.getElementById('pageSub').innerHTML = 'All domains, most recent first. <kbd style="background:rgba(148,163,184,.12);border:1px solid var(--border);padding:1px 5px;border-radius:3px;font-family:var(--mono);font-size:10px">⌘K</kbd> to filter on this page.';
+    document.getElementById('logHeader').insertAdjacentHTML('afterbegin', '<th style="width:150px">Domain</th>');
+}
 
 function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
-function tagClass(e) { if (!e) return 'tag-unknown'; if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser'; return 'tag-bot'; }
+function tagClass(e, bot) {
+    if (bot) return 'tag-bot';
+    if (!e) return 'tag-unknown';
+    if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser';
+    return 'tag-bot';
+}
+function rowKey(l) { return (l.domain || '') + '|' + l.time + '|' + l.ip + '|' + l.path; }
 
-function renderLogs(logs) {
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2600);
+}
+
+// =============== Filter ===============
+document.querySelectorAll('#typeFilter button').forEach(function (b) {
+    b.addEventListener('click', function () {
+        document.querySelectorAll('#typeFilter button').forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        currentFilter = b.getAttribute('data-f');
+        renderRows();
+    });
+});
+document.getElementById('logSearch').addEventListener('input', function (e) {
+    searchQuery = e.target.value.toLowerCase();
+    renderRows();
+});
+
+// =============== Pause / Autoscroll ===============
+document.getElementById('pauseBtn').addEventListener('click', togglePause);
+document.getElementById('autoscrollBtn').addEventListener('click', toggleAutoscroll);
+document.addEventListener('keydown', function (e) {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    if (e.key === 'p' || e.key === 'P') togglePause();
+    if (e.key === 's' || e.key === 'S') toggleAutoscroll();
+});
+function togglePause() {
+    paused = !paused;
+    document.getElementById('pauseLabel').textContent = paused ? 'Resume' : 'Pause';
+    document.getElementById('pauseIcon').outerHTML = paused
+        ? '<svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
+        : '<svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+    document.getElementById('liveStatus').textContent = paused ? 'Paused' : 'Streaming live · 1 Hz';
+    document.getElementById('statusBar').classList.toggle('stale', paused);
+}
+function toggleAutoscroll() {
+    autoScroll = !autoScroll;
+    document.getElementById('autoscrollLabel').textContent = 'Auto-scroll ' + (autoScroll ? 'on' : 'off');
+}
+
+// =============== Clear / Export ===============
+document.getElementById('clearBtn').addEventListener('click', function () {
+    if (IS_GLOBAL) {
+        if (!confirm('Clear logs for every protected domain? Cannot be undone.')) return;
+        // Fire clear per domain.
+        (lastDomains || []).forEach(function (d) {
+            fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(d) + '/logs', { method: 'DELETE' });
+        });
+    } else {
+        if (!confirm('Clear logs for ' + DOMAIN + '?')) return;
+        fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/logs', { method: 'DELETE' });
+    }
+    rows = []; seen = {}; renderRows();
+    toast('Logs cleared', 'success');
+});
+
+document.getElementById('exportBtn').addEventListener('click', function () {
+    var visible = filteredRows();
+    if (!visible.length) { toast('No rows to export', 'error'); return; }
+    var header = IS_GLOBAL
+        ? ['domain', 'time', 'ip', 'engine', 'bot', 'fingerprint', 'path', 'user_agent']
+        : ['time', 'ip', 'engine', 'bot', 'fingerprint', 'path', 'user_agent'];
+    function quote(v) { v = (v == null ? '' : v) + ''; return '"' + v.replace(/"/g, '""') + '"'; }
+    var csv = header.join(',') + '\n' + visible.map(function (r) {
+        return header.map(function (k) { return quote(r[k]); }).join(',');
+    }).join('\n');
+    var blob = new Blob([csv], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'lancarsec-logs-' + DOMAIN + '-' + Date.now() + '.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Exported ' + visible.length + ' rows', 'success');
+});
+
+// =============== Render ===============
+function filteredRows() {
+    return rows.filter(function (r) {
+        if (currentFilter === 'browser' && (tagClass(r.engine) !== 'tag-browser')) return false;
+        if (currentFilter === 'bot' && !(r.bot || /curl|postman|python|requests|aio-http|wget|checkhost/i.test(r.engine || ''))) return false;
+        if (currentFilter === 'unknown' && r.engine) return false;
+        if (searchQuery) {
+            var hay = [r.domain, r.ip, r.path, r.user_agent, r.fingerprint, r.engine, r.bot].join(' ').toLowerCase();
+            if (hay.indexOf(searchQuery) === -1) return false;
+        }
+        return true;
+    });
+}
+
+function renderRows() {
+    var visible = filteredRows();
     var tbody = document.getElementById('logs');
-    if (!logs || !logs.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty">No recent requests.</td></tr>';
+    if (!visible.length) {
+        tbody.innerHTML = '<tr><td colspan="' + (IS_GLOBAL ? 8 : 7) + '" class="empty">No matching requests.</td></tr>';
         return;
     }
     tbody.innerHTML = '';
-    logs.slice().reverse().forEach(function (l) {
+    visible.forEach(function (r) {
         var tr = document.createElement('tr');
         tr.setAttribute('data-searchable', '');
-        tr.innerHTML =
-            '<td>' + esc(l.time) + '</td>' +
-            '<td class="ip">' + esc(l.ip) + '</td>' +
-            '<td><span class="tag ' + tagClass(l.engine) + '">' + esc(l.engine || 'UNK') + '</span></td>' +
-            '<td>' + esc(l.bot || '—') + '</td>' +
-            '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + esc(l.fingerprint || '—') + '</td>' +
-            '<td>' + esc(l.path) + '</td>' +
-            '<td>' + esc(l.user_agent || '—') + '</td>';
+        var fpShort = (r.fingerprint || '').slice(0, 28);
+        if (r.fingerprint && r.fingerprint.length > 28) fpShort += '…';
+        var cells = '';
+        if (IS_GLOBAL) cells += '<td style="font-family:Inter,sans-serif;color:#93c5fd">' + esc(r.domain || '—') + '</td>';
+        cells += '<td>' + esc(r.time) + '</td>' +
+            '<td class="ip">' + esc(r.ip) + '</td>' +
+            '<td><span class="tag ' + tagClass(r.engine, r.bot) + '">' + esc(r.engine || 'UNK') + '</span></td>' +
+            '<td>' + (r.bot ? '<span class="tag tag-bot">' + esc(r.bot) + '</span>' : '—') + '</td>' +
+            '<td title="' + esc(r.fingerprint || '') + '" style="color:var(--text-muted)">' + esc(fpShort || '—') + '</td>' +
+            '<td style="font-family:var(--mono);max-width:none;white-space:normal">' + esc(r.path) + '</td>' +
+            '<td title="' + esc(r.user_agent || '') + '">' + esc(r.user_agent || '—') + '</td>';
+        tr.innerHTML = cells;
         tbody.appendChild(tr);
     });
+    if (autoScroll) {
+        var wrap = document.getElementById('logWrap');
+        wrap.scrollTop = 0;
+    }
 }
-function clearLogs() {
-    if (!confirm('Clear all logs for ' + DOMAIN + '?')) return;
-    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/logs', {method: 'DELETE'})
-        .then(function () { renderLogs([]); });
+
+function ingest(newLogs) {
+    for (var i = newLogs.length - 1; i >= 0; i--) {
+        var l = newLogs[i];
+        var k = rowKey(l);
+        if (seen[k]) continue;
+        seen[k] = true;
+        rows.unshift(l);
+    }
+    if (rows.length > MAX_ROWS) {
+        var dropped = rows.splice(MAX_ROWS);
+        dropped.forEach(function (r) { delete seen[rowKey(r)]; });
+    }
+    renderRows();
 }
-function connectSSE() {
-    var es = new EventSource('/_lancarsec/api/dashboard/stream?domain=' + encodeURIComponent(DOMAIN));
+
+// =============== SSE ===============
+var lastDomains = [];
+function connect() {
+    if (es) try { es.close(); } catch (_) {}
+    es = new EventSource('/_lancarsec/api/dashboard/stream?domain=' + encodeURIComponent(DOMAIN));
     es.addEventListener('stats', function (e) {
+        if (paused) return;
         try {
             var data = JSON.parse(e.data);
-            renderLogs(data.logs || []);
+            if (data.breakdown) lastDomains = data.breakdown.map(function (d) { return d.domain; });
+            ingest(data.logs || []);
         } catch (_) {}
     });
-    es.onerror = function () {
-        document.getElementById('logsStatus').textContent = 'Reconnecting…';
-        es.close();
-        setTimeout(connectSSE, 1500);
+    es.onopen = function () {
+        if (!paused) document.getElementById('liveStatus').textContent = 'Streaming live · 1 Hz';
+        document.getElementById('statusBar').classList.toggle('stale', paused);
     };
-    es.onopen = function () { document.getElementById('logsStatus').textContent = 'Streaming live'; };
+    es.onerror = function () {
+        document.getElementById('liveStatus').textContent = 'Disconnected — retrying…';
+        document.getElementById('statusBar').classList.toggle('stale', true);
+        try { es.close(); } catch (_) {}
+        setTimeout(connect, 2000);
+    };
 }
-connectSSE();
+connect();
 </script>
 {{end}}

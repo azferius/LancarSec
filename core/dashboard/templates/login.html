@@ -6,48 +6,231 @@
     <meta name="robots" content="noindex,nofollow">
     <title>Sign in · LancarSec</title>
     <style>{{.CSS}}
-body { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
-.login-card { width: 100%; max-width: 400px; background: var(--surface-1); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); padding: 40px 32px; box-shadow: 0 20px 60px -20px rgba(0,0,0,.6); }
-h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; color: var(--text-bright); }
-p.lead { margin: 0 0 28px; font-size: 14px; color: var(--text-muted); }
-.field { margin-bottom: 16px; }
-button.primary { width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white;
-  border: none; border-radius: 8px; font-weight: 500; font-size: 14px; cursor: pointer; margin-top: 12px; font-family: inherit; }
-button.primary:hover { box-shadow: 0 4px 16px rgba(59,130,246,.35); }
-.failure { margin-top: 16px; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); color: #fca5a5;
-  padding: 14px 16px; border-radius: 10px; font-size: 13px; }
-.footer-row { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); }
-.footer-row a { color: var(--text-muted); text-decoration: none; }
+body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    min-height: 100vh;
+}
+.login-wrap {
+    width: 100%;
+    max-width: 400px;
+}
+.login-card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 36px 32px 28px;
+    box-shadow: var(--shadow-lg);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+h1 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text-bright);
+    letter-spacing: -.015em;
+}
+p.lead {
+    margin: 0 0 24px;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.55;
+}
+.field { margin-bottom: 14px; }
+.input-row { position: relative; }
+.input-row .reveal {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    color: var(--text-dim);
+    border-radius: 5px;
+    transition: color .15s var(--ease-out), background .15s var(--ease-out);
+}
+.input-row .reveal:hover { color: var(--text-bright); background: rgba(148,163,184,.08); }
+.input-row .reveal svg { width: 15px; height: 15px; }
+.caps-warn {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--warn);
+}
+.caps-warn.show { display: inline-flex; }
+button.primary {
+    width: 100%;
+    padding: 11px 16px;
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 14px;
+    cursor: pointer;
+    margin-top: 8px;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: transform .08s var(--ease-snap), box-shadow .15s var(--ease-out);
+    box-shadow: 0 1px 0 rgba(255,255,255,.15) inset, 0 2px 8px -2px rgba(59,130,246,.45);
+}
+button.primary:hover { box-shadow: 0 1px 0 rgba(255,255,255,.2) inset, 0 6px 20px -4px rgba(59,130,246,.5); }
+button.primary:active { transform: translateY(1px); }
+button.primary:disabled {
+    opacity: .7;
+    cursor: not-allowed;
+}
+.failure {
+    margin-top: 16px;
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-border);
+    color: #fca5a5;
+    padding: 12px 14px;
+    border-radius: 9px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    animation: shake .4s var(--ease-snap);
+}
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4px); }
+    75% { transform: translateX(4px); }
+}
+.failure svg { flex-shrink: 0; width: 16px; height: 16px; margin-top: 1px; }
+.footer-row {
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+.footer-row a { color: var(--text-muted); text-decoration: none; transition: color .15s var(--ease-out); }
+.footer-row a:hover { color: var(--text-bright); }
+.hero-brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 24px;
+}
+.hero-logo {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--accent);
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -.02em;
+    box-shadow: 0 8px 24px -4px rgba(59,130,246,.5), inset 0 1px 0 rgba(255,255,255,.15);
+}
+.hero-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-bright);
+    letter-spacing: -.01em;
+}
+.hero-sub {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+}
     </style>
 </head>
 <body>
-    <main class="login-card">
-        <div class="brand" style="border:none;padding:0 0 24px;margin:0 0 16px;">
-            <div class="brand-logo">LS</div>
-            <div class="brand-text">
-                <div class="brand-name">LancarSec</div>
-                <div class="brand-sub">Operator Dashboard</div>
+    <div class="login-wrap">
+        <div class="hero-brand">
+            <div class="hero-logo">LS</div>
+            <div>
+                <div class="hero-name">LancarSec</div>
+                <div class="hero-sub">Operator Console</div>
             </div>
         </div>
-        <h1>Sign in</h1>
-        <p class="lead">Use the operator credentials from <code>dashboard.json</code>.</p>
-        <form method="POST" action="/_lancarsec/login" autocomplete="off">
-            <div class="field">
-                <label for="username">Username</label>
-                <input id="username" name="username" type="text" placeholder="operator" required autofocus>
+        <div class="login-card">
+            <h1>Sign in</h1>
+            <p class="lead">Use the operator credentials stored in <code>lancarsec.db</code>. First-run password is printed to the server log.</p>
+            <form method="POST" action="/_lancarsec/login" autocomplete="off" id="loginForm">
+                <div class="field">
+                    <label for="username">Username</label>
+                    <input id="username" name="username" type="text" placeholder="operator" required autofocus autocomplete="username" spellcheck="false">
+                </div>
+                <div class="field">
+                    <label for="password">Password</label>
+                    <div class="input-row">
+                        <input id="password" name="password" type="password" placeholder="••••••••" required autocomplete="current-password">
+                        <span class="reveal" id="reveal" title="Show password">
+                            <svg id="eyeOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </span>
+                    </div>
+                    <span class="caps-warn" id="capsWarn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M12 2L2 22h20L12 2z"/></svg>
+                        Caps Lock is on
+                    </span>
+                </div>
+                <button type="submit" class="primary" id="submitBtn">
+                    <span id="btnLabel">Sign in</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </button>
+            </form>
+            {{if .Error}}
+            <div class="failure">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span>{{.Error}}</span>
             </div>
-            <div class="field">
-                <label for="password">Password</label>
-                <input id="password" name="password" type="password" placeholder="••••••••" required>
+            {{end}}
+            <div class="footer-row">
+                <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
+                <span>v1.0</span>
             </div>
-            <button type="submit" class="primary">Sign in</button>
-        </form>
-        {{if .Error}}<div class="failure">✗ {{.Error}}</div>{{end}}
-        <div class="footer-row">
-            <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
-            <span>v1.0</span>
         </div>
-    </main>
+    </div>
+
+    <script>
+        // Caps Lock indicator on password field.
+        var pw = document.getElementById('password');
+        var warn = document.getElementById('capsWarn');
+        pw.addEventListener('keyup', function (e) { warn.classList.toggle('show', e.getModifierState && e.getModifierState('CapsLock')); });
+        pw.addEventListener('keydown', function (e) { warn.classList.toggle('show', e.getModifierState && e.getModifierState('CapsLock')); });
+        pw.addEventListener('blur', function () { warn.classList.remove('show'); });
+
+        // Password reveal toggle.
+        var revealBtn = document.getElementById('reveal');
+        revealBtn.addEventListener('click', function () {
+            var isHidden = pw.type === 'password';
+            pw.type = isHidden ? 'text' : 'password';
+            revealBtn.title = isHidden ? 'Hide password' : 'Show password';
+            document.getElementById('eyeOn').outerHTML = isHidden
+                ? '<svg id="eyeOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+                : '<svg id="eyeOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+        });
+
+        // Loading state on submit so the double-click rush doesn't fire twice.
+        var form = document.getElementById('loginForm');
+        var btn = document.getElementById('submitBtn');
+        form.addEventListener('submit', function () {
+            btn.disabled = true;
+            document.getElementById('btnLabel').textContent = 'Signing in…';
+        });
+    </script>
 </body>
 </html>

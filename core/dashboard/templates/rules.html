@@ -2,97 +2,400 @@
 <div class="page-header">
     <div class="page-title">
         <h1>Firewall Rules</h1>
-        <p>Custom gofilter expressions for <strong>{{.Domain}}</strong>. Evaluated top to bottom.</p>
+        <p id="pageSub">Custom match rules evaluated top-to-bottom against every request. {{if eq .Domain "__all"}}Pick a specific domain from the sidebar to edit rules.{{else}}Scoped to <strong>{{.Domain}}</strong>.{{end}}</p>
     </div>
     <div class="page-actions">
-        <button class="btn primary" onclick="document.getElementById('addForm').style.display='block'">+ Add rule</button>
+        {{if ne .Domain "__all"}}
+        <button class="btn" id="openExpertBtn" title="Switch to raw expression entry">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Expert mode
+        </button>
+        <button class="btn primary" id="openAdd">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New rule
+        </button>
+        {{end}}
     </div>
 </div>
 
-<div id="addForm" class="card" style="display:none;margin-bottom:20px;">
-    <div class="card-header"><h2>New rule</h2></div>
-    <div style="display:grid;grid-template-columns:1fr 140px;gap:12px;">
-        <div>
-            <label>Expression</label>
-            <textarea id="ruleExpr" placeholder='(http.path eq "/wp-admin" and ip.engine eq "")'></textarea>
-        </div>
-        <div>
-            <label>Action</label>
-            <input id="ruleAction" type="text" placeholder="3 or +1">
-        </div>
+{{if eq .Domain "__all"}}
+<div class="card full-card" style="margin-top:16px">
+    <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/></svg>
+        Firewall rules are per-domain. Select a specific hostname from the sidebar to view or edit its rules.
     </div>
-    <div style="margin-top:12px;display:flex;gap:8px;">
-        <button class="btn primary" onclick="addRule()">Save rule</button>
-        <button class="btn" onclick="document.getElementById('addForm').style.display='none'">Cancel</button>
-    </div>
-    <p style="color:var(--text-muted);font-size:12px;margin:12px 0 0;">
-        Action: <code>0</code>=allow, <code>1</code>=cookie, <code>2</code>=JS PoW, <code>3</code>=captcha, <code>4+</code>=block. Prefix with <code>+</code> or <code>-</code> to mutate susLv instead of pinning.
-    </p>
 </div>
+{{else}}
+
+<section class="grid" style="margin-top:16px">
+    <div class="card">
+        <div class="stat-label">Total rules</div>
+        <div class="stat-value" id="st_total">—</div>
+        <div class="stat-trend">active for this domain</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Allow / bypass</div>
+        <div class="stat-value" id="st_allow" style="color:#6ee7b7">—</div>
+        <div class="stat-trend">action = 0</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Challenge</div>
+        <div class="stat-value" id="st_chal" style="color:#fbbf24">—</div>
+        <div class="stat-trend">action = 1, 2, 3</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Block / mutate</div>
+        <div class="stat-value" id="st_block" style="color:#fca5a5">—</div>
+        <div class="stat-trend">action ≥ 4 or ±N</div>
+    </div>
+</section>
 
 <div class="card full-card">
-    <table>
-        <thead><tr><th style="width:60px">#</th><th>Expression</th><th style="width:100px">Action</th><th style="width:80px"></th></tr></thead>
-        <tbody id="rulesBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
-    </table>
+    <div class="card-header">
+        <div><h2>Rule set</h2><p>Evaluation stops on the first rule whose action pins a numeric level (0-4). Additive rules (<code>+N</code>, <code>-N</code>) stack and keep evaluation going.</p></div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th style="width:60px">Order</th><th>Expression</th><th style="width:120px">Action</th><th style="width:80px"></th></tr></thead>
+            <tbody id="rulesBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
 </div>
+
+<!-- ================== BUILDER MODAL ================== -->
+<div class="modal-backdrop" id="addModal" style="display:none">
+    <div class="modal" style="width:min(720px, calc(100% - 32px));max-height:90vh;overflow-y:auto">
+        <h3>New firewall rule</h3>
+        <p>Combine conditions with AND / OR. Each condition selects a field, an operator, and a value. The resulting gofilter expression preview updates live.</p>
+
+        <div id="conditions"></div>
+
+        <button class="btn" id="addCond" style="margin:4px 0 16px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add condition
+        </button>
+
+        <div class="field">
+            <label>Action when matched</label>
+            <div id="actionPicker" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));gap:6px">
+                <button type="button" class="btn" data-a="0">Allow (0)</button>
+                <button type="button" class="btn" data-a="1">Cookie (1)</button>
+                <button type="button" class="btn" data-a="2">JS PoW (2)</button>
+                <button type="button" class="btn" data-a="3">Captcha (3)</button>
+                <button type="button" class="btn danger" data-a="4">Block (4)</button>
+                <button type="button" class="btn" data-a="+1">+1 susLv</button>
+                <button type="button" class="btn" data-a="+2">+2 susLv</button>
+                <button type="button" class="btn" data-a="-1">-1 susLv</button>
+            </div>
+            <div class="field-hint">Static numbers stop evaluation. <code>+N</code> / <code>-N</code> mutate the suspicion level and let lower rules keep matching.</div>
+        </div>
+
+        <div class="field">
+            <label>Expression preview</label>
+            <pre class="code" id="exprPreview" style="margin:0"></pre>
+            <div class="field-hint">This is what gets stored. Switch to Expert mode if you need syntax the builder can't express.</div>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn" id="cancelAdd">Cancel</button>
+            <button class="btn primary" id="saveAdd">Save rule</button>
+        </div>
+    </div>
+</div>
+
+<!-- ================== EXPERT MODE MODAL ================== -->
+<div class="modal-backdrop" id="expertModal" style="display:none">
+    <div class="modal" style="width:min(640px, calc(100% - 32px))">
+        <h3>Expert rule (raw expression)</h3>
+        <p>Full gofilter syntax. The visual builder covers most cases; this is for nested parens, complex <code>matches</code> regexes, and operators the builder doesn't surface.</p>
+        <div class="field">
+            <label>Expression</label>
+            <textarea id="e_expr" style="min-height:140px" spellcheck="false" placeholder='(http.path matches "^/admin/" and ip.engine eq "") or ip.fingerprint eq "known-bad"'></textarea>
+            <div class="field-hint">Fields: <code>ip.src</code> <code>ip.engine</code> <code>ip.bot</code> <code>ip.fingerprint</code> <code>ip.ja4</code> <code>http.path</code> <code>http.method</code> <code>http.user_agent</code> <code>http.host</code> <code>http.query</code> <code>proxy.stage</code> — ops: <code>eq ne gt lt ge le contains matches</code> · <code>and or not</code>.</div>
+        </div>
+        <div class="field">
+            <label>Action</label>
+            <input id="e_action" type="text" placeholder="3 or +1">
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelExpert">Cancel</button>
+            <button class="btn primary" id="saveExpert">Save raw rule</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
 {{end}}
 
 {{define "pagescript"}}
 <script>
 var DOMAIN = {{.Domain}};
+{{if ne .Domain "__all"}}
+// ==================== Builder state ====================
+var FIELDS = [
+    { id: 'ip.src', label: 'Client IP', kind: 'ip', ops: ['eq', 'ne'] },
+    { id: 'ip.engine', label: 'Browser engine', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.bot', label: 'Bot identifier', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.fingerprint', label: 'TLS fingerprint', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja4', label: 'JA4 hash', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.http_requests', label: 'HTTP req (2m)', kind: 'int', ops: ['eq', 'ne', 'gt', 'lt', 'ge', 'le'] },
+    { id: 'http.host', label: 'Host header', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'http.method', label: 'HTTP method', kind: 'string', ops: ['eq', 'ne'] },
+    { id: 'http.path', label: 'Request path', kind: 'string', ops: ['eq', 'ne', 'contains', 'matches'] },
+    { id: 'http.query', label: 'Query string', kind: 'string', ops: ['eq', 'ne', 'contains', 'matches'] },
+    { id: 'http.user_agent', label: 'User-Agent (lower)', kind: 'string', ops: ['eq', 'ne', 'contains', 'matches'] },
+    { id: 'http.cookie', label: 'Cookie header', kind: 'string', ops: ['contains', 'matches'] },
+    { id: 'http.version', label: 'HTTP version', kind: 'string', ops: ['eq', 'ne'] },
+    { id: 'proxy.stage', label: 'Current stage', kind: 'int', ops: ['eq', 'ne', 'ge', 'le'] },
+    { id: 'proxy.cloudflare', label: 'Cloudflare mode', kind: 'bool', ops: ['eq'] },
+    { id: 'proxy.attack', label: 'Under attack', kind: 'bool', ops: ['eq'] },
+    { id: 'proxy.bypass_attack', label: 'Bypass attack', kind: 'bool', ops: ['eq'] },
+    { id: 'proxy.rps', label: 'Total r/s', kind: 'int', ops: ['gt', 'lt', 'ge', 'le'] }
+];
+var OP_LABEL = { eq: 'equals', ne: 'not equal', gt: '> greater', lt: '< less', ge: '≥ greater/equal', le: '≤ less/equal', contains: 'contains', matches: 'matches regex' };
+var conditions = [];
+var selectedAction = null;
 
-function loadRules() {
-    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules')
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmt(n) { return (n || 0).toLocaleString(); }
+
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2800);
+}
+
+function fieldByID(id) { for (var i = 0; i < FIELDS.length; i++) if (FIELDS[i].id === id) return FIELDS[i]; return null; }
+
+function renderConditions() {
+    var root = document.getElementById('conditions');
+    if (!conditions.length) {
+        root.innerHTML = '<div style="padding:16px;background:rgba(15,23,42,.4);border:1px dashed var(--border);border-radius:8px;color:var(--text-dim);font-size:12px;text-align:center;margin-bottom:10px">Add at least one condition to build a rule.</div>';
+        updatePreview();
+        return;
+    }
+    root.innerHTML = '';
+    conditions.forEach(function (c, idx) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'display:grid;grid-template-columns:60px 1fr 120px 1fr 40px;gap:8px;align-items:center;margin-bottom:8px';
+        if (idx === 0) {
+            wrap.innerHTML = '<div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;font-weight:600">IF</div>';
+        } else {
+            wrap.innerHTML = '<select class="joinSel" data-i="' + idx + '" style="padding:6px 8px"><option value="and"' + (c.join === 'and' ? ' selected' : '') + '>AND</option><option value="or"' + (c.join === 'or' ? ' selected' : '') + '>OR</option></select>';
+        }
+        var fieldSel = '<select class="fieldSel" data-i="' + idx + '">' + FIELDS.map(function (f) {
+            return '<option value="' + f.id + '"' + (f.id === c.field ? ' selected' : '') + '>' + f.label + ' <span style="opacity:.5">' + f.id + '</span></option>';
+        }).join('') + '</select>';
+        var field = fieldByID(c.field) || FIELDS[0];
+        var opSel = '<select class="opSel" data-i="' + idx + '">' + field.ops.map(function (o) {
+            return '<option value="' + o + '"' + (o === c.op ? ' selected' : '') + '>' + OP_LABEL[o] + '</option>';
+        }).join('') + '</select>';
+        var valueInput;
+        if (field.kind === 'bool') {
+            valueInput = '<select class="valSel" data-i="' + idx + '"><option value="true"' + (c.value === 'true' ? ' selected' : '') + '>true</option><option value="false"' + (c.value === 'false' ? ' selected' : '') + '>false</option></select>';
+        } else if (field.kind === 'int') {
+            valueInput = '<input class="valSel" data-i="' + idx + '" type="number" value="' + esc(c.value || '') + '">';
+        } else {
+            valueInput = '<input class="valSel" data-i="' + idx + '" type="text" value="' + esc(c.value || '') + '" placeholder="value" spellcheck="false">';
+        }
+        wrap.innerHTML += fieldSel + opSel + valueInput + '<button class="btn danger small" data-rm="' + idx + '" title="Remove" style="padding:4px 8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>';
+        root.appendChild(wrap);
+    });
+    // Wire listeners.
+    root.querySelectorAll('[data-rm]').forEach(function (b) {
+        b.addEventListener('click', function () { conditions.splice(+b.getAttribute('data-rm'), 1); renderConditions(); });
+    });
+    root.querySelectorAll('.joinSel, .fieldSel, .opSel, .valSel').forEach(function (el) {
+        el.addEventListener('change', function () {
+            var i = +el.getAttribute('data-i');
+            if (el.classList.contains('joinSel')) conditions[i].join = el.value;
+            else if (el.classList.contains('fieldSel')) {
+                conditions[i].field = el.value;
+                // Reset op to first valid for the new field.
+                var f = fieldByID(el.value);
+                conditions[i].op = f.ops[0];
+                conditions[i].value = f.kind === 'bool' ? 'true' : '';
+                renderConditions();
+            } else if (el.classList.contains('opSel')) conditions[i].op = el.value;
+            else if (el.classList.contains('valSel')) conditions[i].value = el.value;
+            updatePreview();
+        });
+        el.addEventListener('input', function () {
+            if (el.classList.contains('valSel')) {
+                conditions[+el.getAttribute('data-i')].value = el.value;
+                updatePreview();
+            }
+        });
+    });
+    updatePreview();
+}
+
+function buildExpression() {
+    if (!conditions.length) return '';
+    return conditions.map(function (c, i) {
+        var f = fieldByID(c.field);
+        var raw = c.value;
+        var literal;
+        if (f.kind === 'int') literal = raw === '' ? '0' : raw;
+        else if (f.kind === 'bool') literal = raw;
+        else if (f.kind === 'ip') literal = raw; // gofilter parses IP literals without quotes
+        else literal = '"' + (raw || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+        var clause = '(' + c.field + ' ' + c.op + ' ' + literal + ')';
+        return i === 0 ? clause : ' ' + c.join + ' ' + clause;
+    }).join('');
+}
+function updatePreview() {
+    var expr = buildExpression();
+    var pre = document.getElementById('exprPreview');
+    pre.textContent = expr || '// add a condition to see the expression';
+    pre.style.color = expr ? 'var(--text)' : 'var(--text-dim)';
+}
+
+document.getElementById('addCond').addEventListener('click', function () {
+    var f = FIELDS[0];
+    conditions.push({
+        join: 'and',
+        field: f.id,
+        op: f.ops[0],
+        value: f.kind === 'bool' ? 'true' : ''
+    });
+    renderConditions();
+});
+
+// Action picker
+document.querySelectorAll('#actionPicker button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#actionPicker button').forEach(function (x) {
+            x.style.outline = '';
+        });
+        btn.style.outline = '2px solid var(--accent-solid)';
+        btn.style.outlineOffset = '2px';
+        selectedAction = btn.getAttribute('data-a');
+    });
+});
+
+// Modal wiring
+document.getElementById('openAdd').addEventListener('click', function () {
+    conditions = [];
+    selectedAction = null;
+    document.querySelectorAll('#actionPicker button').forEach(function (x) { x.style.outline = ''; });
+    renderConditions();
+    document.getElementById('addModal').style.display = 'grid';
+});
+document.getElementById('cancelAdd').addEventListener('click', function () {
+    document.getElementById('addModal').style.display = 'none';
+});
+document.getElementById('saveAdd').addEventListener('click', function () {
+    var expr = buildExpression();
+    if (!expr) { toast('Add at least one condition', 'error'); return; }
+    if (!selectedAction) { toast('Pick an action', 'error'); return; }
+    postRule(expr, selectedAction);
+});
+
+// Expert mode
+document.getElementById('openExpertBtn').addEventListener('click', function () {
+    document.getElementById('expertModal').style.display = 'grid';
+});
+document.getElementById('cancelExpert').addEventListener('click', function () {
+    document.getElementById('expertModal').style.display = 'none';
+});
+document.getElementById('saveExpert').addEventListener('click', function () {
+    var e = document.getElementById('e_expr').value.trim();
+    var a = document.getElementById('e_action').value.trim();
+    if (!e || !a) { toast('Expression and action are required', 'error'); return; }
+    postRule(e, a);
+    document.getElementById('expertModal').style.display = 'none';
+});
+
+function postRule(expression, action) {
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expression: expression, action: action })
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); toast('Rule saved', 'success'); document.getElementById('addModal').style.display = 'none'; return load(); })
+    .catch(function (e) { toast('Save failed: ' + (e.message || e), 'error'); });
+}
+
+// ==================== List ====================
+function actionTag(a) {
+    if (a === '0') return 'tag-browser';
+    if (a === '1' || a === '2' || a === '3') return 'tag-bot';
+    if (a.charAt(0) === '+' || a.charAt(0) === '-') return 'tag-neutral';
+    return 'tag-unknown';
+}
+function actionLabel(a) {
+    if (a === '0') return 'Allow (0)';
+    if (a === '1') return 'Cookie (1)';
+    if (a === '2') return 'JS PoW (2)';
+    if (a === '3') return 'Captcha (3)';
+    if (a.charAt(0) === '+' || a.charAt(0) === '-') return 'susLv ' + a;
+    return 'Block (' + a + ')';
+}
+
+function load() {
+    return fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules')
         .then(function (r) { return r.json(); })
-        .then(function (data) {
+        .then(function (d) {
+            var rules = d.rules || [];
             var tbody = document.getElementById('rulesBody');
-            if (!data.rules || !data.rules.length) {
-                tbody.innerHTML = '<tr><td colspan="4" class="empty">No custom rules for this domain yet.</td></tr>';
+            if (!rules.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty">No custom rules yet. Click <strong>New rule</strong> to build one.</td></tr>';
+                document.getElementById('st_total').textContent = '0';
+                document.getElementById('st_allow').textContent = '0';
+                document.getElementById('st_chal').textContent = '0';
+                document.getElementById('st_block').textContent = '0';
                 return;
             }
+            var counts = { allow: 0, chal: 0, block: 0 };
             tbody.innerHTML = '';
-            data.rules.forEach(function (r, i) {
+            rules.forEach(function (r, i) {
+                if (r.action === '0') counts.allow++;
+                else if (r.action === '1' || r.action === '2' || r.action === '3') counts.chal++;
+                else counts.block++;
                 var tr = document.createElement('tr');
                 tr.setAttribute('data-searchable', '');
                 tr.innerHTML =
-                    '<td>' + (i + 1) + '</td>' +
-                    '<td style="max-width:none;white-space:normal;">' + esc(r.expression) + '</td>' +
-                    '<td><span class="tag ' + actionTag(r.action) + '">' + esc(r.action) + '</span></td>' +
-                    '<td><button class="btn danger" onclick="deleteRule(' + i + ')">Delete</button></td>';
+                    '<td style="color:var(--text-dim);font-weight:600">' + (i + 1) + '</td>' +
+                    '<td style="font-family:var(--mono);max-width:none;white-space:normal;word-break:break-word">' + esc(r.expression) + '</td>' +
+                    '<td><span class="tag ' + actionTag(r.action) + '">' + actionLabel(r.action) + '</span></td>' +
+                    '<td><button class="btn danger small" data-del="' + i + '">Delete</button></td>';
                 tbody.appendChild(tr);
+            });
+            document.getElementById('st_total').textContent = fmt(rules.length);
+            document.getElementById('st_allow').textContent = fmt(counts.allow);
+            document.getElementById('st_chal').textContent = fmt(counts.chal);
+            document.getElementById('st_block').textContent = fmt(counts.block);
+            tbody.querySelectorAll('[data-del]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var idx = +btn.getAttribute('data-del');
+                    if (!confirm('Delete rule ' + (idx + 1) + '?')) return;
+                    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules/' + idx, { method: 'DELETE' })
+                        .then(function () { toast('Rule deleted', 'success'); load(); })
+                        .catch(function () { toast('Delete failed', 'error'); });
+                });
             });
         })
         .catch(function () {
             document.getElementById('rulesBody').innerHTML = '<tr><td colspan="4" class="empty">Failed to load rules.</td></tr>';
         });
 }
-function actionTag(a) {
-    if (a === '0') return 'tag-browser';
-    if (a === '1' || a === '2') return 'tag-bot';
-    return 'tag-unknown';
-}
-function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
-function addRule() {
-    var expr = document.getElementById('ruleExpr').value.trim();
-    var act = document.getElementById('ruleAction').value.trim();
-    if (!expr || !act) return;
-    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({expression: expr, action: act})
-    }).then(function () {
-        document.getElementById('ruleExpr').value = '';
-        document.getElementById('ruleAction').value = '';
-        document.getElementById('addForm').style.display = 'none';
-        loadRules();
-    });
-}
-function deleteRule(i) {
-    if (!confirm('Delete rule ' + (i + 1) + '?')) return;
-    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules/' + i, {method: 'DELETE'})
-        .then(loadRules);
-}
-loadRules();
+load();
+
+// Close modals on backdrop / Esc
+document.querySelectorAll('.modal-backdrop').forEach(function (bd) {
+    bd.addEventListener('click', function (e) { if (e.target === bd) bd.style.display = 'none'; });
+});
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+        document.getElementById('addModal').style.display = 'none';
+        document.getElementById('expertModal').style.display = 'none';
+    }
+});
+{{end}}
 </script>
 {{end}}
