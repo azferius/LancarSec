@@ -139,6 +139,18 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 		settingQuery, _ := domains.DomainsMap.Load(domainName)
 		domainSettings := settingQuery.(domains.DomainSettings)
 
+		// Adaptive PoW difficulty: when the domain is actively bypassed,
+		// bump the Stage 2 difficulty so each attacker-client pays more
+		// CPU for a pass. Normal visitors during idle traffic get the
+		// configured base, so there's no UX regression.
+		firewall.SetDifficulty(domainName, firewall.AdaptDifficulty(
+			domainName,
+			domainData.Stage2Difficulty,
+			domainData.BypassAttack,
+			domainData.RequestsBypassedPerSecond,
+			domainSettings.BypassStage1,
+		))
+
 		if !domainData.BypassAttack && !domainData.RawAttack && domainData.BufferCooldown > 0 {
 			domainData.BufferCooldown--
 			if domainData.BufferCooldown == 0 {

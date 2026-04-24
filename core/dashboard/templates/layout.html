@@ -85,8 +85,23 @@
             </div>
             <div class="topbar-right">
                 <span class="status-chip"><span class="dot"></span> Operational</span>
-                <form method="POST" action="/_lancarsec/logout" style="margin:0"><button class="logout-link" type="submit">Sign out</button></form>
-                <div class="avatar" title="{{.User}}">{{.UserInitial}}</div>
+                <div class="dropdown" id="userMenu" style="position:relative">
+                    <button class="avatar" title="{{.User}}" id="userTrigger" style="border:none;padding:0" aria-haspopup="true">{{.UserInitial}}</button>
+                    <div class="dropdown-menu" style="min-width:200px;right:0;left:auto;top:calc(100% + 8px)">
+                        <div style="padding:10px 12px;border-bottom:1px solid var(--border);margin-bottom:4px">
+                            <div style="font-weight:500;color:var(--text-bright);font-size:13px">{{.User}}</div>
+                            <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-top:2px">{{.Role}}</div>
+                        </div>
+                        <button class="dropdown-item" id="openChangePw" style="width:100%;border:none;background:none;text-align:left;font-family:inherit;cursor:pointer">
+                            <span style="font-family:Inter,sans-serif">Change password</span>
+                        </button>
+                        <form method="POST" action="/_lancarsec/logout" style="margin:0">
+                            <button class="dropdown-item" type="submit" style="width:100%;border:none;background:none;text-align:left;font-family:inherit;cursor:pointer;color:#fca5a5">
+                                <span style="font-family:Inter,sans-serif">Sign out</span>
+                            </button>
+                        </form>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="content">{{template "content" .}}</div>
@@ -96,6 +111,31 @@
         </footer>
     </main>
 </div>
+<div class="modal-backdrop" id="changePwModal" style="display:none">
+    <div class="modal">
+        <h3>Change your password</h3>
+        <p>You'll stay signed in on this device. Other sessions (if any) continue until they expire.</p>
+        <div class="field">
+            <label>Current password</label>
+            <input id="cp_current" type="password" autocomplete="current-password">
+        </div>
+        <div class="field">
+            <label>New password</label>
+            <input id="cp_new" type="password" autocomplete="new-password">
+            <div class="field-hint">Minimum 8 characters. Hashed with bcrypt cost 12 before storage.</div>
+        </div>
+        <div class="field">
+            <label>Confirm new password</label>
+            <input id="cp_confirm" type="password" autocomplete="new-password">
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelChangePw">Cancel</button>
+            <button class="btn primary" id="saveChangePw">Change password</button>
+        </div>
+    </div>
+</div>
+<div id="toastRootLayout"></div>
+
 <script>
 document.addEventListener('keydown', function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -113,6 +153,67 @@ if (gs) {
         });
     });
 }
+
+// User menu dropdown
+var userMenu = document.getElementById('userMenu');
+document.getElementById('userTrigger').addEventListener('click', function (e) {
+    e.stopPropagation();
+    userMenu.classList.toggle('open');
+});
+document.addEventListener('click', function (e) {
+    if (!userMenu.contains(e.target)) userMenu.classList.remove('open');
+});
+
+// Change password modal
+function layoutToast(msg, kind) {
+    var root = document.getElementById('toastRootLayout');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2600);
+}
+
+document.getElementById('openChangePw').addEventListener('click', function () {
+    userMenu.classList.remove('open');
+    document.getElementById('cp_current').value = '';
+    document.getElementById('cp_new').value = '';
+    document.getElementById('cp_confirm').value = '';
+    document.getElementById('changePwModal').style.display = 'grid';
+    document.getElementById('cp_current').focus();
+});
+document.getElementById('cancelChangePw').addEventListener('click', function () {
+    document.getElementById('changePwModal').style.display = 'none';
+});
+document.getElementById('changePwModal').addEventListener('click', function (e) {
+    if (e.target.id === 'changePwModal') document.getElementById('cancelChangePw').click();
+});
+document.getElementById('saveChangePw').addEventListener('click', function () {
+    var cur = document.getElementById('cp_current').value;
+    var n = document.getElementById('cp_new').value;
+    var c = document.getElementById('cp_confirm').value;
+    if (!cur || !n) { layoutToast('Both fields are required', 'error'); return; }
+    if (n.length < 8) { layoutToast('New password must be at least 8 characters', 'error'); return; }
+    if (n !== c) { layoutToast('Passwords do not match', 'error'); return; }
+    var btn = document.getElementById('saveChangePw');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Changing…';
+    fetch('/_lancarsec/api/dashboard/self/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current: cur, new: n })
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); return r.json(); })
+    .then(function () {
+        layoutToast('Password updated', 'success');
+        document.getElementById('cancelChangePw').click();
+    })
+    .catch(function (e) { layoutToast('Failed: ' + (e.message || 'server error'), 'error'); })
+    .finally(function () {
+        btn.disabled = false;
+        btn.innerHTML = 'Change password';
+    });
+});
 </script>
 {{block "pagescript" .}}{{end}}
 </body>

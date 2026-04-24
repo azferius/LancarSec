@@ -3,9 +3,19 @@ package firewall
 import (
 	"crypto/tls"
 	"strings"
+	"sync/atomic"
 
 	"lancarsec/core/tlsparse"
 )
+
+// handshakes is a simple counter the server package reads via
+// HandshakeCount() to feed the Prometheus metrics endpoint. Kept here so
+// we don't have to plumb the counter through the tls.Config callback.
+var handshakes atomic.Int64
+
+// HandshakeCount exposes the handshake counter; called from core/server
+// via the Prometheus scrape endpoint.
+func HandshakeCount() int64 { return handshakes.Load() }
 
 var (
 	// KnownFingerprints / BotFingerprints / ForbiddenFingerprints are
@@ -35,6 +45,7 @@ func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	}
 
 	remoteAddr := clientHello.Conn.RemoteAddr().String()
+	handshakes.Add(1) // counted for the Prometheus endpoint
 	legacy := buildLegacyFingerprint(clientHello)
 	Connections.Store(remoteAddr, legacy)
 

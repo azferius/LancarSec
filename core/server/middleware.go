@@ -126,16 +126,28 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
+	// Prometheus scrape endpoint — lives outside /api/dashboard so a
+	// scraper can hit it without juggling the dashboard session/Bearer
+	// flow. Optionally gated by LANCARSEC_METRICS_TOKEN env var.
+	if request.URL.Path == "/_lancarsec/metrics" {
+		ServeMetrics(writer, request)
+		return
+	}
+
 	if !domainFound {
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("404 Not Found", buffer, writer)
 		return
 	}
 
+	IncrRequest()
+
 	// Reject CONNECT outright. httputil.ReverseProxy would otherwise tunnel
 	// it, turning LancarSec into an open HTTP proxy for attackers hopping to
 	// arbitrary destinations.
 	if request.Method == http.MethodConnect {
+		IncrConnectReject()
+		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
 		writer.WriteHeader(http.StatusMethodNotAllowed)
 		SendResponse("CONNECT not allowed", buffer, writer)
@@ -180,6 +192,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// blocklist result.
 	asn := firewall.ResolveASN(resolvedIP)
 	if decision := firewall.Evaluate(resolvedIP, request.UserAgent(), asn, domainName); decision.Hit {
+		IncrBlocklistHit()
+		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
 		writer.WriteHeader(http.StatusForbidden)
 		reason := decision.Entry.Reason
@@ -196,11 +210,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// state when the path actually matches a configured pattern, so domains
 	// without path rules pay zero compute.
 	if pd := firewall.EvaluatePath(domainName, request.Method, request.URL.Path, resolvedIP, proxy.LastSecondTimestamp, proxy.RatelimitWindow); pd.Hit {
-		if pd.Action == "challenge" {
-			// Fall through to the existing challenge pipeline by pinning
-			// susLv high later. For simplicity we just block for now and
-			// revisit when we wire adaptive PoW.
-		}
+		IncrPathLimitHit()
+		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
 		writer.Header().Set("Retry-After", "60")
 		writer.WriteHeader(http.StatusTooManyRequests)
@@ -319,6 +330,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	//Ratelimit faster if client repeatedly fails the verification challenge (feel free to play around with the threshhold)
 	if ipCountCookie > proxy.FailChallengeRatelimit {
+		IncrRateLimitHit()
+		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("Blocked by LancarSec.\nYou have been ratelimited. (R1)", buffer, writer)
 		return
@@ -326,6 +339,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	//Ratelimit spamming Ips (feel free to play around with the threshhold)
 	if ipCount > proxy.IPRatelimit {
+		IncrRateLimitHit()
+		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("Blocked by LancarSec.\nYou have been ratelimited. (R2)", buffer, writer)
 		return
@@ -334,6 +349,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	//Ratelimit fingerprints that don't belong to major browsers
 	if browser == "" {
 		if fpCount > proxy.FPRatelimit {
+			IncrRateLimitHit()
+			IncrBlocked()
 			writer.Header().Set("Content-Type", "text/plain")
 			SendResponse("Blocked by LancarSec.\nYou have been ratelimited. (R3)", buffer, writer)
 			return
@@ -441,13 +458,18 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			http.Redirect(writer, request, request.URL.RequestURI(), http.StatusFound)
 			return
 		case 2:
-			publicSalt := encryptedIP[:len(encryptedIP)-domainData.Stage2Difficulty]
+			// Effective difficulty is the configured base, optionally
+			// bumped by the monitor's adaptive logic in response to a
+			// live bypass attack.
+			difficulty := firewall.DifficultyFor(domainName, domainData.Stage2Difficulty)
+			publicSalt := encryptedIP[:len(encryptedIP)-difficulty]
+			IncrChallengeJS()
 			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 			writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 			writer.Header().Set("X-Content-Type-Options", "nosniff")
 			writer.Header().Set("X-Frame-Options", "DENY")
 			writer.Header().Set("Referrer-Policy", "no-referrer")
-			SendResponse(renderJSChallenge(publicSalt, hashedEncryptedIP, domainData.Stage2Difficulty), buffer, writer)
+			SendResponse(renderJSChallenge(publicSalt, hashedEncryptedIP, difficulty), buffer, writer)
 			return
 		case 3:
 			secretPart := encryptedIP[:6]
@@ -503,6 +525,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 				firewall.StoreCaptcha(secretPart, captchaData, maskData)
 			}
 
+			IncrChallengeCAP()
 			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 			writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 			writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -519,6 +542,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	// Atomic Bypassed counter (no lock). Log append still needs DataMu because
 	// it mutates a shared slice inside DomainsData.
+	IncrForwarded()
 	domains.CountersFor(domainName).Bypassed.Add(1)
 	firewall.DataMu.Lock()
 	utils.AddLogs(domains.DomainLog{
