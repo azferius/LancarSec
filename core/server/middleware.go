@@ -175,7 +175,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			resolvedIP = cf
 		}
 	}
-	if decision := firewall.Evaluate(resolvedIP, request.UserAgent(), "", domainName); decision.Hit {
+	// ASN resolution is O(1) when the GeoLite2 DB is loaded; returns empty
+	// when it isn't, which falls through cleanly without polluting the
+	// blocklist result.
+	asn := firewall.ResolveASN(resolvedIP)
+	if decision := firewall.Evaluate(resolvedIP, request.UserAgent(), asn, domainName); decision.Hit {
 		writer.Header().Set("Content-Type", "text/plain")
 		writer.WriteHeader(http.StatusForbidden)
 		reason := decision.Entry.Reason
@@ -577,6 +581,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	request.Header.Add("proxy-tls-fp", tlsFp)
 	request.Header.Add("proxy-tls-ja4", ja4)
 	request.Header.Add("proxy-tls-name", browser+botFp)
+	if asn != "" {
+		request.Header.Add("proxy-client-asn", asn)
+	}
 
 	domainSettings.DomainProxy.ServeHTTP(writer, request)
 }

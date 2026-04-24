@@ -1,0 +1,236 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>API keys</h1>
+        <p>Programmatic credentials for scripts and CI. Pass as <code>Authorization: Bearer lsk_…</code> to any <code>/_lancarsec/api/*</code> endpoint.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn primary" id="openCreate">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+            Generate key
+        </button>
+    </div>
+</div>
+
+<section class="grid" style="margin-top:16px">
+    <div class="card">
+        <div class="stat-label">Total keys</div>
+        <div class="stat-value" id="st_total">—</div>
+        <div class="stat-trend">across all users</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Active</div>
+        <div class="stat-value" id="st_active" style="color:#6ee7b7">—</div>
+        <div class="stat-trend">usable right now</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Revoked</div>
+        <div class="stat-value" id="st_revoked" style="color:#fca5a5">—</div>
+        <div class="stat-trend">kept for audit</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Last used</div>
+        <div class="stat-value" id="st_lastUsed" style="font-size:18px">—</div>
+        <div class="stat-trend">any key, most recent hit</div>
+    </div>
+</section>
+
+<div class="card full-card">
+    <div class="card-header">
+        <div><h2>Issued keys</h2><p>Revoke preserves the row so the audit log still shows who created it and when it was used.</p></div>
+        <div class="btn-group" id="keyFilter">
+            <button class="active" data-f="all">All</button>
+            <button data-f="active">Active</button>
+            <button data-f="revoked">Revoked</button>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th style="width:90px"></th></tr></thead>
+            <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Create modal -->
+<div class="modal-backdrop" id="newModal" style="display:none">
+    <div class="modal">
+        <h3>Generate API key</h3>
+        <p>The key is shown exactly once after generation. Store it in a password manager or your CI secret store immediately.</p>
+        <div class="field">
+            <label>Label</label>
+            <input id="k_name" type="text" placeholder="e.g. github-actions, prod-monitor" maxlength="80">
+            <div class="field-hint">Shown in the list and in audit rows. Can't be changed later.</div>
+        </div>
+        <div class="field">
+            <label>Scopes (optional)</label>
+            <input id="k_scopes" type="text" placeholder="e.g. read:stats, manage:rules" maxlength="120">
+            <div class="field-hint">Free-form label for now — scope-based authorization will land with the next RBAC pass.</div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelCreate">Cancel</button>
+            <button class="btn primary" id="saveCreate">Generate</button>
+        </div>
+    </div>
+</div>
+
+<!-- Reveal modal -->
+<div class="modal-backdrop" id="revealModal" style="display:none">
+    <div class="modal">
+        <h3>Key generated</h3>
+        <p style="color:#fbbf24"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;vertical-align:middle;margin-right:4px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Copy this key now. It cannot be retrieved later.</p>
+        <div class="field">
+            <div class="input-row">
+                <input id="revealed" type="text" readonly style="font-family:var(--mono);font-size:12px">
+                <span class="reveal" id="copyReveal" title="Copy to clipboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </span>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn primary" id="doneReveal">I've saved it</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var KEYS = [], FILTER = 'all';
+
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmtTs(ts) { if (!ts) return '—'; return new Date(ts * 1000).toLocaleString(); }
+function relTime(ts) {
+    if (!ts) return 'never';
+    var diff = Math.floor(Date.now() / 1000) - ts;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+}
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2600);
+}
+
+function render() {
+    var visible = KEYS;
+    if (FILTER === 'active') visible = KEYS.filter(function (k) { return !k.revoked; });
+    if (FILTER === 'revoked') visible = KEYS.filter(function (k) { return k.revoked; });
+    var tbody = document.getElementById('rows');
+    if (!visible.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No keys' + (FILTER === 'all' ? ' yet. Click <strong>Generate key</strong>.' : ' matching this filter.') + '</td></tr>';
+    } else {
+        tbody.innerHTML = '';
+        visible.forEach(function (k) {
+            var tr = document.createElement('tr');
+            tr.setAttribute('data-searchable', '');
+            var statusTag = k.revoked
+                ? '<span class="tag tag-unknown">Revoked</span>'
+                : '<span class="tag tag-browser">Active</span>';
+            var lastUsed = k.last_used_at ? relTime(k.last_used_at) : '<span style="color:var(--text-dim)">never</span>';
+            tr.innerHTML =
+                '<td style="font-family:Inter,sans-serif;font-weight:500">' + esc(k.name) + (k.scopes ? ' <span style="color:var(--text-dim);font-size:11px;font-weight:400">· ' + esc(k.scopes) + '</span>' : '') + '</td>' +
+                '<td>' + esc(k.username) + '</td>' +
+                '<td style="font-family:var(--mono);color:#93c5fd">lsk_' + esc(k.prefix) + '_…</td>' +
+                '<td>' + fmtTs(k.created_at) + '</td>' +
+                '<td title="' + (k.last_used_at ? esc(fmtTs(k.last_used_at)) : '') + '">' + lastUsed + '</td>' +
+                '<td>' + statusTag + '</td>' +
+                '<td>' + (k.revoked ? '' : '<button class="btn danger small" data-rv="' + k.id + '">Revoke</button>') + '</td>';
+            tbody.appendChild(tr);
+        });
+        tbody.querySelectorAll('[data-rv]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var id = +btn.getAttribute('data-rv');
+                if (!confirm('Revoke this key? Any script using it will start failing immediately.')) return;
+                fetch('/_lancarsec/api/dashboard/apikeys/' + id, { method: 'POST' })
+                    .then(function (r) { if (!r.ok) throw r; toast('Key revoked', 'success'); load(); })
+                    .catch(function () { toast('Revoke failed', 'error'); });
+            });
+        });
+    }
+
+    // Stats
+    var active = KEYS.filter(function (k) { return !k.revoked; }).length;
+    var lastTs = 0;
+    KEYS.forEach(function (k) { if (k.last_used_at > lastTs) lastTs = k.last_used_at; });
+    document.getElementById('st_total').textContent = KEYS.length.toLocaleString();
+    document.getElementById('st_active').textContent = active.toLocaleString();
+    document.getElementById('st_revoked').textContent = (KEYS.length - active).toLocaleString();
+    document.getElementById('st_lastUsed').textContent = lastTs ? relTime(lastTs) : 'never';
+}
+
+function load() {
+    fetch('/_lancarsec/api/dashboard/apikeys', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { KEYS = d.keys || []; render(); })
+        .catch(function () { toast('Failed to load keys', 'error'); });
+}
+
+document.querySelectorAll('#keyFilter button').forEach(function (b) {
+    b.addEventListener('click', function () {
+        document.querySelectorAll('#keyFilter button').forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        FILTER = b.getAttribute('data-f');
+        render();
+    });
+});
+
+document.getElementById('openCreate').addEventListener('click', function () {
+    document.getElementById('k_name').value = '';
+    document.getElementById('k_scopes').value = '';
+    document.getElementById('newModal').style.display = 'grid';
+    document.getElementById('k_name').focus();
+});
+document.getElementById('cancelCreate').addEventListener('click', function () {
+    document.getElementById('newModal').style.display = 'none';
+});
+document.getElementById('saveCreate').addEventListener('click', function () {
+    var name = document.getElementById('k_name').value.trim();
+    var scopes = document.getElementById('k_scopes').value.trim();
+    if (!name) { toast('Label is required', 'error'); return; }
+    fetch('/_lancarsec/api/dashboard/apikeys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, scopes: scopes })
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); return r.json(); })
+    .then(function (d) {
+        document.getElementById('newModal').style.display = 'none';
+        document.getElementById('revealed').value = d.plaintext;
+        document.getElementById('revealModal').style.display = 'grid';
+        load();
+    })
+    .catch(function (e) { toast('Failed: ' + (e.message || e), 'error'); });
+});
+
+document.getElementById('doneReveal').addEventListener('click', function () {
+    document.getElementById('revealModal').style.display = 'none';
+    document.getElementById('revealed').value = '';
+});
+document.getElementById('copyReveal').addEventListener('click', function () {
+    var input = document.getElementById('revealed');
+    input.select();
+    navigator.clipboard.writeText(input.value).then(function () { toast('Copied', 'success'); });
+});
+
+// Close modals on backdrop / Esc
+document.querySelectorAll('.modal-backdrop').forEach(function (bd) {
+    bd.addEventListener('click', function (e) { if (e.target === bd) bd.style.display = 'none'; });
+});
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+        document.getElementById('newModal').style.display = 'none';
+        document.getElementById('revealModal').style.display = 'none';
+    }
+});
+
+load();
+</script>
+{{end}}

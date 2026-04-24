@@ -1,0 +1,287 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Path rate limits</h1>
+        <p id="pageSub">{{if eq .Domain "__all"}}Path-scoped rate limits are per-domain. Pick a specific domain from the sidebar.{{else}}Tight caps on hot endpoints for <strong>{{.Domain}}</strong>. Layered on top of the global per-IP rate limit.{{end}}</p>
+    </div>
+    <div class="page-actions">
+        {{if ne .Domain "__all"}}
+        <button class="btn primary" id="openAdd">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New limit
+        </button>
+        {{end}}
+    </div>
+</div>
+
+{{if eq .Domain "__all"}}
+<div class="card full-card" style="margin-top:16px">
+    <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        Choose a specific domain from the sidebar to manage its path rate limits.
+    </div>
+</div>
+{{else}}
+
+<section class="grid" style="margin-top:16px">
+    <div class="card">
+        <div class="stat-label">Total rules</div>
+        <div class="stat-value" id="st_total">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Prefix matchers</div>
+        <div class="stat-value" id="st_prefix" style="color:#93c5fd">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Regex / glob</div>
+        <div class="stat-value" id="st_regex" style="color:#fbbf24">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Tightest cap</div>
+        <div class="stat-value" id="st_tightest" style="font-size:20px">—</div>
+        <div class="stat-trend">requests per window</div>
+    </div>
+</section>
+
+<div class="card full-card">
+    <div class="card-header">
+        <div><h2>Active limits</h2><p>Evaluated top-to-bottom. First match wins. Rules under their limit pass through silently; over-limit requests get 429 with <code>Retry-After</code>.</p></div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:56px">#</th>
+                    <th style="width:90px">Method</th>
+                    <th>Match</th>
+                    <th style="width:110px">Limit</th>
+                    <th style="width:100px">Window</th>
+                    <th style="width:100px">Burst</th>
+                    <th style="width:110px">Action</th>
+                    <th style="width:80px"></th>
+                </tr>
+            </thead>
+            <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Add modal -->
+<div class="modal-backdrop" id="addModal" style="display:none">
+    <div class="modal" style="width:min(560px, calc(100% - 32px));max-height:90vh;overflow-y:auto">
+        <h3>New path rate limit</h3>
+        <p>Sliding-window per-IP rate limit scoped to a path pattern. Matches start fast (prefix), then exact, then glob, then regex.</p>
+
+        <div class="field">
+            <label>Match kind</label>
+            <div class="btn-group" id="kindPicker" style="width:100%">
+                <button data-k="prefix" class="active" style="flex:1">Prefix</button>
+                <button data-k="exact" style="flex:1">Exact</button>
+                <button data-k="path" style="flex:1">Glob</button>
+                <button data-k="regex" style="flex:1">Regex</button>
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Pattern</label>
+            <input id="val" type="text" spellcheck="false" autocomplete="off" placeholder="/login">
+            <div class="field-hint" id="valHint">Any path starting with this literal matches — e.g. <code>/api/</code> covers <code>/api/v1/users</code>.</div>
+        </div>
+
+        <div class="field-row">
+            <div>
+                <label>Method (optional)</label>
+                <select id="method">
+                    <option value="">any</option>
+                    <option>GET</option>
+                    <option>POST</option>
+                    <option>PUT</option>
+                    <option>PATCH</option>
+                    <option>DELETE</option>
+                    <option>HEAD</option>
+                    <option>OPTIONS</option>
+                </select>
+            </div>
+            <div>
+                <label>Action on hit</label>
+                <select id="action">
+                    <option value="block">Block (429)</option>
+                    <option value="challenge">Challenge</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="field-row">
+            <div>
+                <label>Limit (requests)</label>
+                <input id="limit" type="number" min="1" step="1" placeholder="20">
+            </div>
+            <div>
+                <label>Window (seconds)</label>
+                <input id="window" type="number" min="10" step="10" placeholder="60">
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Burst bypass (optional)</label>
+            <input id="burst" type="number" min="0" step="1" placeholder="0">
+            <div class="field-hint">Allow a short spike of this many requests before enforcing the window cap. Useful for sprites, polling heartbeats.</div>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn" id="cancelAdd">Cancel</button>
+            <button class="btn primary" id="saveAdd">Save limit</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var DOMAIN = {{.Domain}};
+{{if ne .Domain "__all"}}
+var SELECTED_KIND = 'prefix';
+var ENTRIES = [];
+
+var kindHints = {
+    prefix: 'Any path starting with this literal matches — e.g. <code>/api/</code> covers <code>/api/v1/users</code>.',
+    exact: 'Only the exact path matches — e.g. <code>/login</code> does NOT cover <code>/login/</code>.',
+    path: 'Shell-style glob, one segment per <code>*</code> — e.g. <code>/api/*/users</code>.',
+    regex: 'Go regexp — e.g. <code>^/admin/(users|orders)/</code>.'
+};
+var kindPlaceholder = {
+    prefix: '/login',
+    exact: '/login',
+    path: '/api/*/users',
+    regex: '^/admin/'
+};
+
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmt(n) { return (n || 0).toLocaleString(); }
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2600);
+}
+
+function parseKind(match) {
+    var idx = match.indexOf(':');
+    if (idx <= 0) return { kind: 'prefix', pattern: match };
+    var kind = match.substring(0, idx);
+    if (['prefix', 'exact', 'path', 'regex'].indexOf(kind) === -1) return { kind: 'prefix', pattern: match };
+    return { kind: kind, pattern: match.substring(idx + 1) };
+}
+
+function render() {
+    var tbody = document.getElementById('rows');
+    if (!ENTRIES.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No path rate limits yet. Click <strong>New limit</strong> to add one.</td></tr>';
+    } else {
+        tbody.innerHTML = '';
+        ENTRIES.forEach(function (e, i) {
+            var parsed = parseKind(e.match);
+            var tr = document.createElement('tr');
+            tr.setAttribute('data-searchable', '');
+            var actionTag = e.action === 'challenge' ? 'tag-bot' : 'tag-unknown';
+            var actionLabel = e.action === 'challenge' ? 'Challenge' : 'Block (429)';
+            tr.innerHTML =
+                '<td style="color:var(--text-dim);font-weight:600">' + (i + 1) + '</td>' +
+                '<td>' + (e.method ? '<span class="tag tag-neutral">' + esc(e.method) + '</span>' : '<span style="color:var(--text-dim)">any</span>') + '</td>' +
+                '<td style="font-family:var(--mono);max-width:none;white-space:normal"><span class="tag tag-neutral" style="margin-right:6px">' + esc(parsed.kind) + '</span>' + esc(parsed.pattern) + '</td>' +
+                '<td style="font-variant-numeric:tabular-nums">' + fmt(e.limit) + '</td>' +
+                '<td style="font-variant-numeric:tabular-nums">' + fmt(e.window_seconds || 0) + (e.window_seconds ? 's' : 's <span style="color:var(--text-dim)">(default)</span>') + '</td>' +
+                '<td style="font-variant-numeric:tabular-nums">' + (e.burst_bypass ? '+' + fmt(e.burst_bypass) : '—') + '</td>' +
+                '<td><span class="tag ' + actionTag + '">' + actionLabel + '</span></td>' +
+                '<td><button class="btn danger small" data-del="' + i + '">Delete</button></td>';
+            tbody.appendChild(tr);
+        });
+        tbody.querySelectorAll('[data-del]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var idx = +btn.getAttribute('data-del');
+                if (!confirm('Delete limit ' + (idx + 1) + '?')) return;
+                fetch('/_lancarsec/api/dashboard/pathlimit/' + encodeURIComponent(DOMAIN) + '/' + idx, { method: 'DELETE' })
+                    .then(function (r) { if (!r.ok) throw r; toast('Deleted', 'success'); load(); })
+                    .catch(function () { toast('Delete failed', 'error'); });
+            });
+        });
+    }
+
+    // Stats
+    var prefix = 0, regex = 0, tightest = Number.MAX_SAFE_INTEGER;
+    ENTRIES.forEach(function (e) {
+        var k = parseKind(e.match).kind;
+        if (k === 'prefix' || k === 'exact') prefix++;
+        else regex++;
+        if (e.limit < tightest) tightest = e.limit;
+    });
+    document.getElementById('st_total').textContent = fmt(ENTRIES.length);
+    document.getElementById('st_prefix').textContent = fmt(prefix);
+    document.getElementById('st_regex').textContent = fmt(regex);
+    document.getElementById('st_tightest').textContent = ENTRIES.length ? fmt(tightest) : '—';
+}
+
+function load() {
+    fetch('/_lancarsec/api/dashboard/pathlimit/' + encodeURIComponent(DOMAIN))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { ENTRIES = d.entries || []; render(); })
+        .catch(function () { toast('Failed to load limits', 'error'); });
+}
+
+// Modal
+document.querySelectorAll('#kindPicker button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#kindPicker button').forEach(function (x) { x.classList.remove('active'); });
+        btn.classList.add('active');
+        SELECTED_KIND = btn.getAttribute('data-k');
+        document.getElementById('valHint').innerHTML = kindHints[SELECTED_KIND];
+        document.getElementById('val').placeholder = kindPlaceholder[SELECTED_KIND];
+    });
+});
+
+document.getElementById('openAdd').addEventListener('click', function () {
+    document.getElementById('addModal').style.display = 'grid';
+    document.getElementById('val').focus();
+});
+document.getElementById('cancelAdd').addEventListener('click', function () {
+    document.getElementById('addModal').style.display = 'none';
+    document.getElementById('val').value = '';
+    document.getElementById('limit').value = '';
+    document.getElementById('window').value = '';
+    document.getElementById('burst').value = '';
+});
+
+document.getElementById('saveAdd').addEventListener('click', function () {
+    var pattern = document.getElementById('val').value.trim();
+    var limit = parseInt(document.getElementById('limit').value, 10);
+    if (!pattern) { toast('Pattern is required', 'error'); return; }
+    if (!limit || limit <= 0) { toast('Limit must be > 0', 'error'); return; }
+    var body = {
+        match: SELECTED_KIND + ':' + pattern,
+        method: document.getElementById('method').value,
+        limit: limit,
+        window_seconds: parseInt(document.getElementById('window').value, 10) || 0,
+        burst_bypass: parseInt(document.getElementById('burst').value, 10) || 0,
+        action: document.getElementById('action').value
+    };
+    fetch('/_lancarsec/api/dashboard/pathlimit/' + encodeURIComponent(DOMAIN), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); toast('Limit saved', 'success'); document.getElementById('cancelAdd').click(); load(); })
+    .catch(function (e) { toast('Save failed: ' + (e.message || e), 'error'); });
+});
+
+document.getElementById('addModal').addEventListener('click', function (e) { if (e.target.id === 'addModal') document.getElementById('cancelAdd').click(); });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') document.getElementById('cancelAdd').click(); });
+
+load();
+{{end}}
+</script>
+{{end}}

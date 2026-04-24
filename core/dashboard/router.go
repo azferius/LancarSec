@@ -55,8 +55,25 @@ func Serve(w http.ResponseWriter, r *http.Request) bool {
 	case p == "/_lancarsec/api/dashboard/self/password":
 		HandleSelfPassword(w, r)
 		return true
+	case p == "/_lancarsec/api/dashboard/apikeys":
+		if r.Method == http.MethodGet {
+			HandleAPIKeysList(w, r)
+		} else {
+			HandleAPIKeyCreate(w, r)
+		}
+		return true
+	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/apikeys/"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(p, "/_lancarsec/api/dashboard/apikeys/"), 10, 64)
+		if err != nil {
+			http.Error(w, "bad id", http.StatusBadRequest)
+			return true
+		}
+		HandleAPIKeyRevoke(w, r, id)
+		return true
 	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/blocklist/"):
 		return serveBlockAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/blocklist/"))
+	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/pathlimit/"):
+		return servePathLimitAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/pathlimit/"))
 	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/domain/"):
 		return serveDomainAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/domain/"))
 	}
@@ -83,6 +100,31 @@ func serveUserAPI(w http.ResponseWriter, r *http.Request, rest string) bool {
 	}
 	if parts[1] == "grants" {
 		HandleUserGrant(w, r, id)
+		return true
+	}
+	http.NotFound(w, r)
+	return true
+}
+
+// servePathLimitAPI dispatches /api/dashboard/pathlimit/<domain>[/<index>].
+func servePathLimitAPI(w http.ResponseWriter, r *http.Request, rest string) bool {
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return true
+	}
+	domain := parts[0]
+	if len(parts) == 1 {
+		HandlePathLimits(w, r, domain)
+		return true
+	}
+	if r.Method == http.MethodDelete {
+		idx, err := strconv.Atoi(parts[1])
+		if err != nil {
+			http.Error(w, "bad index", http.StatusBadRequest)
+			return true
+		}
+		HandlePathLimitDelete(w, r, domain, idx)
 		return true
 	}
 	http.NotFound(w, r)

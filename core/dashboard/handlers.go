@@ -31,10 +31,14 @@ func IsAuthenticated(r *http.Request) (string, bool) {
 	return s.Username, true
 }
 
-// SessionFrom returns the full session record so handlers can reason about
-// role / user_id for RBAC decisions. Missing cookie or invalid token yields
-// ok=false; caller should redirect to login.
+// SessionFrom returns the full session record. Accepts either the browser
+// cookie (operator dashboard flow) or an Authorization: Bearer header with
+// an API key (scripts, CI, external automation). This dual-auth keeps the
+// handler code untouched — every page/API still calls SessionFrom.
 func SessionFrom(r *http.Request) (*store.Session, bool) {
+	if s := sessionFromAPIKey(r); s != nil {
+		return s, true
+	}
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return nil, false
@@ -169,6 +173,10 @@ func HandlePage(tab string) http.HandlerFunc {
 				return
 			}
 			t = tmplAudit
+		case "apikeys":
+			t = tmplAPIKeys
+		case "pathlimits":
+			t = tmplPathLim
 		default:
 			http.NotFound(w, r)
 			return
@@ -209,6 +217,10 @@ func titleFor(tab string) string {
 		return "Users & access"
 	case "audit":
 		return "Audit log"
+	case "apikeys":
+		return "API keys"
+	case "pathlimits":
+		return "Path rate limits"
 	}
 	return "Dashboard"
 }
@@ -518,6 +530,7 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 		"cloudflare_full_ssl":       cfg.Proxy.CloudflareFullSSL,
 		"cloudflare_enforce_origin": cfg.Proxy.CloudflareEnforceOrigin,
 		"hide_version_header":       cfg.Proxy.HideVersionHeader,
+		"asn_db_loaded":             firewall.ASNLoaded(),
 		"timeout_idle":              cfg.Proxy.Timeout.Idle,
 		"timeout_read":              cfg.Proxy.Timeout.Read,
 		"timeout_write":             cfg.Proxy.Timeout.Write,

@@ -102,6 +102,43 @@ func deleteBlockAt(scope string, index int) error {
 	return errors.New("scope not found")
 }
 
+// appendPathLimit persists a new PathRateLimit onto a domain. Fields not
+// supplied fall back to zero values, which evaluate to sane defaults in
+// firewall.compilePathLimit.
+func appendPathLimit(domain string, entry domains.PathRateLimit) error {
+	cfg := readConfigFromDisk()
+	if cfg == nil {
+		return errors.New("config missing")
+	}
+	for i := range cfg.Domains {
+		if cfg.Domains[i].Name == domain {
+			cfg.Domains[i].PathRateLimits = append(cfg.Domains[i].PathRateLimits, entry)
+			return writeConfigToDisk(cfg)
+		}
+	}
+	return errors.New("domain not found")
+}
+
+// deletePathLimitAt removes one PathRateLimit by index.
+func deletePathLimitAt(domain string, index int) error {
+	cfg := readConfigFromDisk()
+	if cfg == nil {
+		return errors.New("config missing")
+	}
+	for i := range cfg.Domains {
+		if cfg.Domains[i].Name != domain {
+			continue
+		}
+		list := cfg.Domains[i].PathRateLimits
+		if index < 0 || index >= len(list) {
+			return errors.New("index out of range")
+		}
+		cfg.Domains[i].PathRateLimits = append(list[:index], list[index+1:]...)
+		return writeConfigToDisk(cfg)
+	}
+	return errors.New("domain not found")
+}
+
 // readConfigFromDisk reads config.json into a fresh struct. We don't reuse
 // the in-memory domains.LoadConfig() because we're about to mutate and
 // write back, and serializing a live *Configuration would also emit the

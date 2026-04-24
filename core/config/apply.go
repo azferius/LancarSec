@@ -87,6 +87,12 @@ func Apply(mode Mode) {
 	firewall.RebuildBlocklists(domains.LoadConfig().Proxy.Blocklist, perDomainBlock)
 	firewall.RebuildPathLimits(perDomainPath)
 
+	// GeoLite2-ASN lookup is best-effort. If the .mmdb is missing the
+	// reader stays nil and ASN-typed blocklist entries silently no-op.
+	if err := firewall.LoadASN(); err != nil {
+		fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ Warning: ASN DB load failed: " + err.Error() + " ]")
+	}
+
 	if mode == ModeStartup {
 		registerDebugDomain()
 		if err := VersionCheck(); err != nil {

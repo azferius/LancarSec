@@ -42,7 +42,9 @@
             <dt>Configured domains</dt><dd id="s_domcount">—</dd>
             <dt>Operators</dt><dd id="s_operators">—</dd>
             <dt>Dashboard port</dt><dd>:80 (CF) / :443 (Origin)</dd>
+            <dt>ASN lookup</dt><dd><span class="tag" id="s_asn">—</span></dd>
         </dl>
+        <p style="color:var(--text-dim);font-size:11.5px;margin:12px 0 0;line-height:1.55" id="s_asnHelp"></p>
     </div>
 </section>
 
@@ -158,6 +160,13 @@ function load() {
 
             document.getElementById('s_domcount').textContent = (d.domains || []).length;
             document.getElementById('s_operators').textContent = '—';
+
+            var asnEl = document.getElementById('s_asn');
+            asnEl.textContent = d.asn_db_loaded ? 'loaded' : 'not configured';
+            asnEl.className = 'tag ' + (d.asn_db_loaded ? 'tag-browser' : 'tag-neutral');
+            document.getElementById('s_asnHelp').innerHTML = d.asn_db_loaded
+                ? 'Requests are enriched with the client ASN. Blocklist entries of type <code>asn</code> resolve against the loaded database.'
+                : 'To enable ASN blocklisting and the <code>proxy-client-asn</code> header, place a MaxMind GeoLite2-ASN.mmdb file at <code>global/geoip/GeoLite2-ASN.mmdb</code> and reload.';
 
             var tbody = document.getElementById('s_domains');
             if (!(d.domains || []).length) {
