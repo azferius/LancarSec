@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // The firewall state is guarded by three independent synchronization
@@ -45,14 +46,42 @@ var (
 	// RemoteAddr. Read in middleware to expose as ip.ja4 in firewall rules
 	// and as the proxy-tls-ja4 header to backends.
 	JA4s = sync.Map{}
+
+	// JA3s, JA4Rs, JA4Os carry the additional TLS fingerprint variants
+	// computed alongside JA4 at handshake time. JA3 is the legacy Salesforce
+	// MD5 used by most threat-intel feeds; JA4_R is raw, original-order,
+	// harder to spoof; JA4_O hashes original-order ciphers/extensions
+	// without sorting. All three are exposed to firewall rules and
+	// forwarded to backends as headers, and the blocklist can match any of
+	// them.
+	JA3s  = sync.Map{}
+	JA4Rs = sync.Map{}
+	JA4Os = sync.Map{}
+
+	activeConnections atomic.Int64
+	activeConnKeys    = sync.Map{}
 )
 
 func OnStateChange(conn net.Conn, state http.ConnState) {
+	addr := conn.RemoteAddr().String()
 	switch state {
+	case http.StateNew:
+		if _, loaded := activeConnKeys.LoadOrStore(addr, struct{}{}); !loaded {
+			activeConnections.Add(1)
+		}
 	case http.StateHijacked, http.StateClosed:
-		addr := conn.RemoteAddr().String()
 		Connections.Delete(addr)
 		JA4s.Delete(addr)
+		JA3s.Delete(addr)
+		JA4Rs.Delete(addr)
+		JA4Os.Delete(addr)
 		ClientHellos.Delete(addr)
+		if _, loaded := activeConnKeys.LoadAndDelete(addr); loaded {
+			activeConnections.Add(-1)
+		}
 	}
+}
+
+func ActiveConnectionCount() int64 {
+	return activeConnections.Load()
 }

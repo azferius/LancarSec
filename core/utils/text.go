@@ -26,10 +26,14 @@ func AddLogs(entry domains.DomainLog, domainName string) {
 }
 
 func FormatLogs(log domains.DomainLog) string {
-	if log.BrowserFP != "" || log.BotFP != "" {
-		return "[ " + PrimaryColor(log.Time) + " ] > \033[35m" + log.IP + "\033[0m - \033[32m" + log.BrowserFP + log.BotFP + "\033[0m - " + PrimaryColor(log.Useragent) + " - " + PrimaryColor(log.Path)
+	method := log.Method
+	if method == "" {
+		method = "GET"
 	}
-	return "[ " + PrimaryColor(log.Time) + " ] > \033[35m" + log.IP + "\033[0m - \033[31mUNK (" + log.TLSFP + ")\033[0m - " + PrimaryColor(log.Useragent) + " - " + PrimaryColor(log.Path)
+	if log.BrowserFP != "" || log.BotFP != "" {
+		return "[ " + PrimaryColor(log.Time) + " ] > \033[35m" + log.IP + "\033[0m - " + method + " " + PrimaryColor(log.Path) + " - \033[32m" + log.BrowserFP + log.BotFP + "\033[0m - " + PrimaryColor(log.Useragent)
+	}
+	return "[ " + PrimaryColor(log.Time) + " ] > \033[35m" + log.IP + "\033[0m - " + method + " " + PrimaryColor(log.Path) + " - \033[31mUNK (" + log.TLSFP + ")\033[0m - " + PrimaryColor(log.Useragent)
 }
 
 // Only run in locked thread

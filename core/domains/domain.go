@@ -77,11 +77,16 @@ type DomainSettings struct {
 type DomainLog struct {
 	Time      string
 	IP        string
+	Country   string
 	BrowserFP string
 	BotFP     string
 	TLSFP     string
 	Useragent string
+	Method    string
 	Path      string
+	Protocol  string
+	Status    int
+	Size      int
 }
 
 type DomainData struct {

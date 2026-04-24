@@ -80,6 +80,13 @@ func rejectDirectOrigin(w http.ResponseWriter, r *http.Request, buffer *bytes.Bu
 	return true
 }
 
+func requestProtocol(r *http.Request) string {
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.Contains(strings.ToLower(r.Header.Get("Cf-Visitor")), "https") {
+		return "HTTPS"
+	}
+	return "HTTP"
+}
+
 // hasValidChallengeCookie checks the request's cookies for a LancarSec
 // challenge token whose value exactly matches the stage-specific encryptedIP.
 // Stage 1/2/3 use cookie names ending with "_1__lSec_v", "_2__lSec_v", or
@@ -598,17 +605,6 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// it mutates a shared slice inside DomainsData.
 	IncrForwarded()
 	domains.CountersFor(domainName).Bypassed.Add(1)
-	firewall.DataMu.Lock()
-	utils.AddLogs(domains.DomainLog{
-		Time:      proxy.GetLastSecondFormatted(),
-		IP:        ip,
-		BrowserFP: browser,
-		BotFP:     botFp,
-		TLSFP:     tlsFp,
-		Useragent: reqUa,
-		Path:      request.RequestURI,
-	}, domainName)
-	firewall.DataMu.Unlock()
 
 	//Reserved proxy-paths
 
@@ -646,5 +642,23 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		request.Header.Add("proxy-client-asn", asn)
 	}
 
-	domainSettings.DomainProxy.ServeHTTP(writer, request)
+	rec := &responseMetricsWriter{ResponseWriter: writer}
+	domainSettings.DomainProxy.ServeHTTP(rec, request)
+
+	firewall.DataMu.Lock()
+	utils.AddLogs(domains.DomainLog{
+		Time:      proxy.GetLastSecondFormatted(),
+		IP:        ip,
+		Country:   strings.ToUpper(request.Header.Get("Cf-Ipcountry")),
+		BrowserFP: browser,
+		BotFP:     botFp,
+		TLSFP:     tlsFp,
+		Useragent: reqUa,
+		Method:    request.Method,
+		Path:      request.RequestURI,
+		Protocol:  requestProtocol(request),
+		Status:    rec.Status(),
+		Size:      rec.Bytes(),
+	}, domainName)
+	firewall.DataMu.Unlock()
 }

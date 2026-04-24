@@ -1,191 +1,334 @@
 {{define "content"}}
-<div class="page-header">
-    <div class="page-title">
-        <h1 id="pageTitle">Overview</h1>
-        <p id="pageSub">Realtime traffic and protection metrics.</p>
-    </div>
-    <div class="page-actions">
-        <button class="btn" id="pauseBtn" title="Pause live updates (P)">
-            <svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-            <span id="pauseLabel">Pause</span>
-        </button>
-    </div>
-</div>
-<div class="last-updated" id="statusBar"><span class="dot"></span><span id="liveStatus">Connecting…</span></div>
+<div class="overview-shell">
+    <section class="threat-strip">
+        <div class="threat-left">
+            <strong>Threat Severity</strong>
+            <span id="threatRangeLabel">Last 10 minutes</span>
+            <div class="severity-items">
+                <span><i class="sev critical"></i>Critical <b id="sev_critical">0</b><svg class="mini-bars" id="sevCriticalBars"></svg></span>
+                <span><i class="sev high"></i>High <b id="sev_high">0</b><svg class="mini-bars" id="sevHighBars"></svg></span>
+                <span><i class="sev medium"></i>Medium <b id="sev_medium">0</b><svg class="mini-bars" id="sevMediumBars"></svg></span>
+                <span><i class="sev low"></i>Low <b id="sev_low">0</b><svg class="mini-bars" id="sevLowBars"></svg></span>
+            </div>
+        </div>
+        <div class="threat-actions">
+            <div class="last-updated" id="statusBar"><span class="dot"></span><span id="liveStatus">Connecting…</span></div>
+            <label class="control-select">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                <select id="timeRange" aria-label="Chart range">
+                    <option value="60">Last 1 minute</option>
+                    <option value="300">Last 5 minutes</option>
+                    <option value="600" selected>Last 10 minutes</option>
+                    <option value="1800">Last 30 minutes</option>
+                </select>
+            </label>
+            <label class="control-select">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+                <select id="refreshInterval" aria-label="Refresh interval">
+                    <option value="1000">1s</option>
+                    <option value="5000">5s</option>
+                    <option value="10000" selected>10s</option>
+                    <option value="30000">30s</option>
+                </select>
+            </label>
+            <button class="btn" id="pauseBtn" title="Pause live updates (P)">
+                <svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                <span id="pauseLabel">Pause</span>
+            </button>
+            <button class="btn active traffic-filter" data-filter="all">All Traffic</button>
+            <button class="btn traffic-filter" data-filter="http">HTTP</button>
+            <button class="btn traffic-filter" data-filter="https">HTTPS</button>
+            <button class="btn traffic-filter" data-filter="bots">Bots</button>
+            <button class="btn icon-only" id="filterPanelBtn" title="Show active filters">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 5h18M6 12h12M10 19h4"/></svg>
+            </button>
+            <button class="btn" id="addFilterBtn">+ Add filter</button>
+        </div>
+    </section>
 
-<!-- ================= STAT CARDS ================= -->
-<section class="grid">
-    <div class="card">
-        <div class="stat-label">Incoming r/s
-            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></div>
+    <section class="metric-grid six">
+        <div class="card metric-card metric-blue">
+            <div class="stat-label"><span>Incoming r/s</span><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 19h16"/></svg></div></div>
+            <div class="stat-value" id="v_rps">—<span class="stat-unit">req/s</span></div>
+            <div class="stat-trend up"><span id="v_total">—</span> lifetime</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><defs><linearGradient id="sparkGrad" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#3b82f6" stop-opacity=".4"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs><path id="spark_rps_fill" class="fill" d=""/><path id="spark_rps" class="line" d=""/></svg>
         </div>
-        <div class="stat-value" id="v_rps">—<span class="stat-unit">req/s</span></div>
-        <div class="stat-trend"><span id="v_total">—</span> lifetime</div>
-        <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none">
-            <defs><linearGradient id="sparkGrad" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#3b82f6" stop-opacity=".4"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs>
-            <path id="spark_rps_fill" class="fill" d=""/>
-            <path id="spark_rps" class="line" d=""/>
-        </svg>
-    </div>
-    <div class="card">
-        <div class="stat-label">Forwarded r/s
-            <div class="stat-icon success"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+        <div class="card metric-card metric-green">
+            <div class="stat-label"><span>Forwarded r/s</span><div class="stat-icon success"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="4 17 10 11 14 15 21 6"/><polyline points="16 6 21 6 21 11"/></svg></div></div>
+            <div class="stat-value" id="v_fwd">—<span class="stat-unit">req/s</span></div>
+            <div class="stat-trend" id="v_fwdpct">— pass rate</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><path id="spark_fwd" class="line" style="stroke:#22c55e" d=""/></svg>
         </div>
-        <div class="stat-value" id="v_fwd">—<span class="stat-unit">req/s</span></div>
-        <div class="stat-trend" id="v_fwdpct">— pass rate</div>
-        <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none">
-            <path id="spark_fwd" class="line" style="stroke:#10b981" d=""/>
-        </svg>
-    </div>
-    <div class="card">
-        <div class="stat-label">Blocked r/s
-            <div class="stat-icon danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></div>
+        <div class="card metric-card metric-purple">
+            <div class="stat-label"><span>CPU usage</span><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4 9h3M4 15h3M17 9h3M17 15h3M9 4v3M15 4v3M9 17v3M15 17v3"/></svg></div></div>
+            <div class="stat-value" id="v_cpu">—<span class="stat-unit">%</span></div>
+            <div class="stat-trend">proxy process</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><path id="spark_cpu" class="line" style="stroke:#a855f7" d=""/></svg>
         </div>
-        <div class="stat-value" id="v_blocked">—<span class="stat-unit">req/s</span></div>
-        <div class="stat-trend"><span id="v_peak">—</span> peak this window</div>
-        <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none">
-            <path id="spark_blocked" class="line" style="stroke:#ef4444" d=""/>
-        </svg>
-    </div>
-    <div class="card">
-        <div class="stat-label">Host resources
-            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg></div>
+        <div class="card metric-card metric-violet">
+            <div class="stat-label"><span>Memory usage</span><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="5" y="7" width="14" height="10" rx="2"/><path d="M8 10h8M8 14h8"/></svg></div></div>
+            <div class="stat-value"><span id="v_mem">—</span><span class="stat-unit">%</span></div>
+            <div class="stat-trend">heap / sys</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><path id="spark_mem" class="line" style="stroke:#8b5cf6" d=""/></svg>
         </div>
-        <div class="stat-value" id="v_cpu">—<span class="stat-unit">% CPU</span></div>
-        <div class="stat-trend"><span id="v_mem">—</span>% memory</div>
-        <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none">
-            <path id="spark_cpu" class="line" style="stroke:#8b5cf6" d=""/>
-        </svg>
-    </div>
-</section>
+        <div class="card metric-card metric-cyan">
+            <div class="stat-label"><span>L4 connections</span><div class="stat-icon cyan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v5M12 12H5v5M12 12h7v5"/></svg></div></div>
+            <div class="stat-value" id="v_l4">0</div>
+            <div class="stat-trend">active sockets</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><path id="spark_l4" class="line" style="stroke:#06b6d4" d=""/></svg>
+        </div>
+        <div class="card metric-card metric-red">
+            <div class="stat-label"><span>Blocked (last 1 min)</span><div class="stat-icon danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z"/><path d="M15 9l-6 6M9 9l6 6"/></svg></div></div>
+            <div class="stat-value" id="v_blocked_min">—</div>
+            <div class="stat-trend down"><span id="v_blocked">—</span> req/s now</div>
+            <svg class="sparkline" viewBox="0 0 200 36" preserveAspectRatio="none"><path id="spark_blocked" class="line" style="stroke:#ef4444" d=""/></svg>
+        </div>
+    </section>
 
-<!-- ================= PER-DOMAIN STAGE CONTROL (single domain) ================= -->
-<section class="grid" id="sec_stage" style="display:none">
-    <div class="card half-card">
-        <div class="card-header">
-            <div><h2>Protection stage</h2><p>Current challenge tier applied to all visitors not matching a custom rule.</p></div>
-        </div>
-        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+    <section class="ops-main">
+        <aside class="card stage-console" id="sec_stage" style="display:none">
+            <div class="stat-label">Protection stage</div>
             <span class="stage-pill" id="v_stagePill">Stage —</span>
-            <span id="v_locked" style="font-size:12px;color:var(--text-dim)"></span>
-        </div>
-        <p style="color:var(--text-muted);font-size:13px;margin:0 0 16px;" id="v_stageDesc">Awaiting data…</p>
-        <div class="btn-group" style="width:100%">
-            <button style="flex:1" data-stage="1">Stage 1 · Cookie</button>
-            <button style="flex:1" data-stage="2">Stage 2 · JS PoW</button>
-            <button style="flex:1" data-stage="3">Stage 3 · Captcha</button>
-            <button style="flex:1" data-stage="0">Auto</button>
-        </div>
-    </div>
-    <div class="card">
-        <div class="stat-label">Peak r/s <span id="peakHint" style="font-size:10px;color:var(--text-dim);font-weight:500;text-transform:none;letter-spacing:0">current window</span></div>
-        <div class="stat-value" id="v_peakBig">—</div>
-    </div>
-    <div class="card">
-        <div class="stat-label">Attack state</div>
-        <div class="stat-value" id="v_attackState" style="font-size:18px">—</div>
-        <div class="stat-trend" id="v_attackHint"></div>
-    </div>
-</section>
+            <p id="v_stageDesc">Awaiting data…</p>
+            <span id="v_locked"></span>
+            <div class="stage-actions">
+                <button class="btn" data-stage="1">Lock Stage</button>
+                <button class="btn" data-stage="2">Force Stage 2</button>
+                <button class="btn" data-stage="3">Force Stage 3</button>
+            </div>
+            <a class="stage-doc" href="/_lancarsec/dashboard/rules?domain={{.Domain}}">Learn about stages</a>
+        </aside>
+        <section class="card traffic-card">
+            <div class="card-header">
+                <div><h2 id="pageTitle">Requests per second</h2><p id="pageSub">Realtime metrics for this scope.</p></div>
+                <div class="chart-legend">
+                    <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Total</span>
+                    <span class="legend-item"><span class="legend-dot" style="background:#22c55e"></span>Forwarded</span>
+                    <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Blocked</span>
+                    <button class="btn small">Line</button>
+                </div>
+            </div>
+            <div class="chart">
+                <svg id="chart" viewBox="0 0 600 260" preserveAspectRatio="none">
+                    <defs><linearGradient id="gTotal" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs>
+                    <g stroke="rgba(90,117,157,.18)" stroke-width="1"><line x1="0" y1="65" x2="600" y2="65"/><line x1="0" y1="130" x2="600" y2="130"/><line x1="0" y1="195" x2="600" y2="195"/><line x1="70" y1="0" x2="70" y2="260"/><line x1="210" y1="0" x2="210" y2="260"/><line x1="350" y1="0" x2="350" y2="260"/><line x1="490" y1="0" x2="490" y2="260"/></g>
+                    <path id="p_total_fill" fill="url(#gTotal)" d=""/>
+                    <path id="p_total" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linejoin="round" d=""/>
+                    <path id="p_fwd" fill="none" stroke="#22c55e" stroke-width="3" stroke-linejoin="round" d=""/>
+                    <path id="p_blocked" fill="none" stroke="#ef4444" stroke-width="3" stroke-linejoin="round" d=""/>
+                </svg>
+            </div>
+        </section>
+        <aside class="card chart-side">
+            <h3>Peak (1 min)</h3>
+            <p><i style="background:#3b82f6"></i><span id="v_peakBig">—</span></p>
+            <p><i style="background:#22c55e"></i><span id="v_peakFwd">—</span></p>
+            <p><i style="background:#ef4444"></i><span id="v_peakBlocked">—</span></p>
+            <h3 id="avgRangeLabel">Average (10 min)</h3>
+            <p><i style="background:#3b82f6"></i><span id="v_avgTotal">—</span></p>
+            <p><i style="background:#22c55e"></i><span id="v_avgFwd">—</span></p>
+            <p><i style="background:#ef4444"></i><span id="v_avgBlocked">—</span></p>
+            <h3>Attack state</h3>
+            <p id="v_attackState">—</p>
+            <small id="v_attackHint"></small>
+        </aside>
+    </section>
 
-<!-- ================= GLOBAL BREAKDOWN (all domains) ================= -->
-<section class="grid" id="sec_breakdown" style="display:none">
-    <div class="card full-card">
+    <section class="grid" id="sec_breakdown" style="display:none">
+        <div class="card full-card">
+            <div class="card-header">
+                <div><h2>Per-domain breakdown</h2><p>All protected hostnames, sorted by current traffic.</p></div>
+                <div class="btn-group" id="sortPicker"><button class="active" data-s="rps">By r/s</button><button data-s="stage">By stage</button><button data-s="name">By name</button></div>
+            </div>
+            <div class="table-wrap">
+                <table><thead><tr><th>Domain</th><th>Stage</th><th>Inc r/s</th><th>Forwarded r/s</th><th>Peak</th><th>Lifetime</th><th>Status</th></tr></thead><tbody id="breakdownBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody></table>
+            </div>
+        </div>
+    </section>
+
+    <section class="card requests-card">
         <div class="card-header">
-            <div><h2>Per-domain breakdown</h2><p>All protected hostnames, sorted by current traffic. Click a row to switch scope.</p></div>
-            <div class="btn-group" id="sortPicker">
-                <button class="active" data-s="rps">By r/s</button>
-                <button data-s="stage">By stage</button>
-                <button data-s="name">By name</button>
+            <div><h2>Latest forwarded requests</h2><p id="logsSub">Tail of the live request log.</p></div>
+            <div class="request-actions">
+                <div class="dropdown columns-dropdown" id="columnsDropdown">
+                    <button class="btn" id="columnsBtn" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>
+                        Columns
+                    </button>
+                    <div class="dropdown-menu columns-menu" id="columnsMenu">
+                        <label><input type="checkbox" data-col-toggle="domain" checked> Domain</label>
+                        <label><input type="checkbox" data-col-toggle="time" checked> Time</label>
+                        <label><input type="checkbox" data-col-toggle="ip" checked> IP address</label>
+                        <label><input type="checkbox" data-col-toggle="country" checked> Country</label>
+                        <label><input type="checkbox" data-col-toggle="engine" checked> Engine</label>
+                        <label><input type="checkbox" data-col-toggle="method" checked> Method</label>
+                        <label><input type="checkbox" data-col-toggle="path" checked> Path</label>
+                        <label><input type="checkbox" data-col-toggle="status" checked> Status</label>
+                        <label><input type="checkbox" data-col-toggle="size" checked> Size</label>
+                        <label><input type="checkbox" data-col-toggle="ua" checked> User-Agent</label>
+                    </div>
+                </div>
+                <button class="btn" id="exportLogs" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M5 21h14"/></svg>
+                    Export
+                </button>
+                <button class="btn danger small" id="clearLogsBtn" type="button">Clear logs</button>
+                <button class="btn icon-only" id="fullscreenBtn" type="button" title="Fullscreen logs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+                </button>
             </div>
         </div>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Domain</th><th style="width:110px">Stage</th><th style="width:110px">Inc r/s</th><th style="width:120px">Forwarded r/s</th><th style="width:110px">Peak</th><th style="width:110px">Lifetime</th><th style="width:120px">Status</th></tr></thead>
-                <tbody id="breakdownBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+                <thead><tr id="logHeader"><th data-col="time">Time</th><th data-col="ip">IP address</th><th data-col="country">Country</th><th data-col="engine">Engine</th><th data-col="method">Method</th><th data-col="path">Path</th><th data-col="status">Status</th><th data-col="size">Size</th><th data-col="ua">User-Agent</th></tr></thead>
+                <tbody id="logs"><tr><td colspan="9" class="empty">Waiting for traffic…</td></tr></tbody>
             </table>
         </div>
-    </div>
-</section>
-
-<!-- ================= LIVE CHART ================= -->
-<section class="grid">
-    <div class="card full-card">
-        <div class="card-header">
-            <div><h2>Traffic shape</h2><p>Last 60 seconds · 1 Hz resolution</p></div>
-            <div class="chart-legend">
-                <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Total</span>
-                <span class="legend-item"><span class="legend-dot" style="background:#10b981"></span>Forwarded</span>
-                <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Blocked</span>
-            </div>
-        </div>
-        <div class="chart">
-            <svg id="chart" viewBox="0 0 600 260" preserveAspectRatio="none">
-                <defs>
-                    <linearGradient id="gTotal" x1="0" x2="0" y1="0" y2="1">
-                        <stop offset="0%" stop-color="#3b82f6" stop-opacity=".3"/>
-                        <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
-                    </linearGradient>
-                </defs>
-                <g stroke="rgba(148,163,184,.08)" stroke-width="1">
-                    <line x1="0" y1="65" x2="600" y2="65"/>
-                    <line x1="0" y1="130" x2="600" y2="130"/>
-                    <line x1="0" y1="195" x2="600" y2="195"/>
-                </g>
-                <path id="p_total_fill" fill="url(#gTotal)" d=""/>
-                <path id="p_total" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linejoin="round" d=""/>
-                <path id="p_fwd" fill="none" stroke="#10b981" stroke-width="2" stroke-linejoin="round" d=""/>
-                <path id="p_blocked" fill="none" stroke="#ef4444" stroke-width="2" stroke-linejoin="round" d=""/>
-            </svg>
-        </div>
-    </div>
-</section>
-
-<!-- ================= RECENT REQUESTS ================= -->
-<section class="grid">
-    <div class="card full-card">
-        <div class="card-header">
-            <div><h2>Recent forwarded requests</h2><p id="logsSub">Tail of the live log ring. Hover a row to expand.</p></div>
-            <a class="btn" id="gotoLogs" href="#">Open Logs →</a>
-        </div>
-        <div class="table-wrap">
-            <table>
-                <thead><tr id="logHeader"><th style="width:90px">Time</th><th style="width:140px">IP</th><th style="width:100px">Engine</th><th style="width:140px">Fingerprint</th><th>Path</th><th>User-Agent</th></tr></thead>
-                <tbody id="logs"><tr><td colspan="6" class="empty">Waiting for traffic…</td></tr></tbody>
-            </table>
-        </div>
-    </div>
-</section>
+    </section>
+</div>
 {{end}}
 
 {{define "pagescript"}}
 <script>
 var DOMAIN = {{.Domain}};
 var IS_GLOBAL = DOMAIN === '__all';
-var HISTORY_LEN = 60;
-var hist = { total: [], fwd: [], blocked: [], cpu: [] };
+var HISTORY_LEN = 600;
+var hist = { total: [], fwd: [], blocked: [], cpu: [], mem: [], l4: [] };
 var breakdownSort = 'rps';
 var paused = false;
 var es = null;
-
-document.getElementById('gotoLogs').href = '/_lancarsec/dashboard/logs?domain=' + encodeURIComponent(DOMAIN);
+var lastData = null;
+var pendingData = null;
+var lastLogs = [];
+var currentTrafficFilter = 'all';
+var textFilter = '';
+var renderIntervalMs = 10000;
+var lastRenderAt = 0;
+var blockedWindow = [];
+var visibleColumns = { domain: IS_GLOBAL, time: true, ip: true, country: true, engine: true, method: true, path: true, status: true, size: true, ua: true };
 
 function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
 function fmt(n) { return (n || 0).toLocaleString(); }
-function tagClass(e) { if (!e) return 'tag-unknown'; if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser'; return 'tag-bot'; }
+function tagClass(e, bot) { if (bot) return 'tag-bot'; if (!e) return 'tag-unknown'; if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser'; return 'tag-bot'; }
+function requestProto(l) { return (l.protocol || 'HTTP').toUpperCase(); }
+function visibleColCount() {
+    var n = 0;
+    Object.keys(visibleColumns).forEach(function (k) { if (visibleColumns[k]) n++; });
+    return Math.max(1, n);
+}
 
 // =============== Page chrome ===============
 if (IS_GLOBAL) {
     document.getElementById('pageTitle').textContent = 'Global overview';
-    document.getElementById('pageSub').innerHTML = 'Aggregate metrics across every protected domain. Rolled up 1 Hz.';
+    document.getElementById('pageSub').innerHTML = 'Aggregate metrics across every protected domain. Rolled up live.';
     document.getElementById('sec_breakdown').style.display = 'grid';
     document.getElementById('sec_stage').style.display = 'none';
-    document.getElementById('logHeader').insertAdjacentHTML('afterbegin', '<th style="width:130px">Domain</th>');
+    document.getElementById('logHeader').insertAdjacentHTML('afterbegin', '<th data-col="domain" style="width:130px">Domain</th>');
 } else {
     document.getElementById('pageTitle').textContent = 'Overview';
     document.getElementById('pageSub').innerHTML = 'Realtime metrics for <strong>' + esc(DOMAIN) + '</strong>.';
     document.getElementById('sec_breakdown').style.display = 'none';
     document.getElementById('sec_stage').style.display = 'grid';
+}
+initControls();
+syncLiveStatus();
+
+// =============== Controls ===============
+function initControls() {
+    var domainToggle = document.querySelector('[data-col-toggle="domain"]');
+    if (domainToggle) {
+        domainToggle.checked = IS_GLOBAL;
+        if (!IS_GLOBAL && domainToggle.closest('label')) domainToggle.closest('label').style.display = 'none';
+    }
+
+    document.getElementById('timeRange').addEventListener('change', function (e) {
+        HISTORY_LEN = Math.max(30, parseInt(e.target.value, 10) || 600);
+        updateRangeLabels();
+        trimHistory();
+        if (lastData) render(lastData);
+    });
+
+    document.getElementById('refreshInterval').addEventListener('change', function (e) {
+        renderIntervalMs = Math.max(1000, parseInt(e.target.value, 10) || 10000);
+        lastRenderAt = 0;
+        syncLiveStatus();
+        if (pendingData && !paused) render(pendingData);
+    });
+
+    document.querySelectorAll('.traffic-filter').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            document.querySelectorAll('.traffic-filter').forEach(function (x) { x.classList.remove('active'); });
+            btn.classList.add('active');
+            currentTrafficFilter = btn.getAttribute('data-filter') || 'all';
+            renderLogs();
+        });
+    });
+
+    document.getElementById('addFilterBtn').addEventListener('click', function () {
+        var q = prompt('Filter by IP, path, method, status, engine, or user-agent:', textFilter);
+        if (q === null) return;
+        textFilter = q.trim();
+        updateFilterLabel();
+        renderLogs();
+    });
+
+    document.getElementById('filterPanelBtn').addEventListener('click', function () {
+        var msg = 'Traffic: ' + currentTrafficFilter.toUpperCase() + '\nText filter: ' + (textFilter || 'none');
+        if (textFilter && confirm(msg + '\n\nClear text filter?')) {
+            textFilter = '';
+            updateFilterLabel();
+            renderLogs();
+            return;
+        }
+        alert(msg);
+    });
+
+    var columnsDropdown = document.getElementById('columnsDropdown');
+    document.getElementById('columnsBtn').addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        columnsDropdown.classList.toggle('open');
+    });
+    document.getElementById('columnsMenu').addEventListener('click', function (e) { e.stopPropagation(); });
+    document.addEventListener('click', function (e) {
+        if (!columnsDropdown.contains(e.target)) columnsDropdown.classList.remove('open');
+    });
+    document.querySelectorAll('[data-col-toggle]').forEach(function (box) {
+        box.addEventListener('change', function () {
+            var col = box.getAttribute('data-col-toggle');
+            visibleColumns[col] = box.checked;
+            applyColumnVisibility();
+        });
+    });
+
+    document.getElementById('exportLogs').addEventListener('click', exportLogs);
+    document.getElementById('clearLogsBtn').addEventListener('click', clearLogs);
+    document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
+    updateRangeLabels();
+    applyColumnVisibility();
+}
+
+function updateRangeLabels() {
+    var sel = document.getElementById('timeRange');
+    var label = sel && sel.selectedOptions.length ? sel.selectedOptions[0].textContent : 'Last 10 minutes';
+    document.getElementById('threatRangeLabel').textContent = label;
+    document.getElementById('avgRangeLabel').textContent = 'Average (' + label.replace(/^Last\s+/i, '') + ')';
+}
+
+function updateFilterLabel() {
+    var btn = document.getElementById('addFilterBtn');
+    btn.textContent = textFilter ? ('Filter: ' + (textFilter.length > 16 ? textFilter.slice(0, 16) + '...' : textFilter)) : '+ Add filter';
+    btn.classList.toggle('active', !!textFilter);
+}
+
+function syncLiveStatus() {
+    if (paused) {
+        document.getElementById('liveStatus').textContent = 'Paused';
+        return;
+    }
+    var opt = document.getElementById('refreshInterval');
+    var label = opt && opt.selectedOptions.length ? opt.selectedOptions[0].textContent : '10s';
+    document.getElementById('liveStatus').textContent = 'Streaming live · ' + label;
 }
 
 // =============== Pause / resume ===============
@@ -200,8 +343,12 @@ function togglePause() {
     document.getElementById('pauseIcon').outerHTML = paused
         ? '<svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
         : '<svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
-    document.getElementById('liveStatus').textContent = paused ? 'Paused' : 'Streaming live · 1 Hz';
+    syncLiveStatus();
     document.getElementById('statusBar').classList.toggle('stale', paused);
+    if (!paused && pendingData) {
+        render(pendingData);
+        lastRenderAt = Date.now();
+    }
 }
 
 // =============== Stage control (single-domain only) ===============
@@ -228,36 +375,44 @@ document.querySelectorAll('#sortPicker button').forEach(function (b) {
 });
 
 // =============== Rendering ===============
-var lastData = null;
-
 function render(data) {
     if (paused) return;
     lastData = data;
+    pendingData = data;
     // Stat cards
     document.getElementById('v_rps').innerHTML = fmt(data.rps) + '<span class="stat-unit">req/s</span>';
     document.getElementById('v_fwd').innerHTML = fmt(data.rps_bypassed) + '<span class="stat-unit">req/s</span>';
     var blocked = (data.rps_blocked != null) ? data.rps_blocked : (data.rps - data.rps_bypassed);
-    document.getElementById('v_blocked').innerHTML = fmt(blocked) + '<span class="stat-unit">req/s</span>';
-    document.getElementById('v_cpu').innerHTML = esc(data.cpu || '0') + '<span class="stat-unit">% CPU</span>';
+    document.getElementById('v_blocked').innerHTML = fmt(blocked) + ' req/s now';
+    document.getElementById('v_cpu').innerHTML = esc(data.cpu || '0') + '<span class="stat-unit">%</span>';
     document.getElementById('v_mem').textContent = esc(data.ram || '0');
     document.getElementById('v_total').textContent = fmt(data.total);
-    document.getElementById('v_peak').textContent = fmt(data.peak_rps);
     var pct = data.rps > 0 ? Math.round((data.rps_bypassed / data.rps) * 100) : 100;
     document.getElementById('v_fwdpct').textContent = pct + '% pass rate';
+    var blockedMinute = updateBlockedWindow(blocked);
+    document.getElementById('v_blocked_min').textContent = fmt(blockedMinute);
+    document.getElementById('v_l4').textContent = fmt(data.l4_connections || 0);
+    updateSeverity(blocked, data);
 
     // Sparklines
     hist.total.push(data.rps);
     hist.fwd.push(data.rps_bypassed);
     hist.blocked.push(blocked);
     hist.cpu.push(parseFloat(data.cpu || '0'));
-    ['total', 'fwd', 'blocked', 'cpu'].forEach(function (k) {
+    hist.mem.push(parseFloat(data.ram || '0'));
+    hist.l4.push(data.l4_connections || 0);
+    ['total', 'fwd', 'blocked', 'cpu', 'mem', 'l4'].forEach(function (k) {
         if (hist[k].length > HISTORY_LEN) hist[k].shift();
     });
     drawSpark('spark_rps', hist.total, 36, 200, true);
     drawSpark('spark_fwd', hist.fwd, 36, 200);
     drawSpark('spark_blocked', hist.blocked, 36, 200);
     drawSpark('spark_cpu', hist.cpu, 36, 200, false, 100);
+    drawSpark('spark_mem', hist.mem, 36, 200, false, 100);
+    drawSpark('spark_l4', hist.l4, 36, 200);
     drawMainChart();
+    updateChartStats(data, blocked);
+    updateAttackState(data);
 
     // Mode-specific
     if (IS_GLOBAL) {
@@ -267,7 +422,71 @@ function render(data) {
     }
 
     // Logs
-    renderLogs(data.logs || []);
+    lastLogs = data.logs || [];
+    renderLogs();
+    syncLiveStatus();
+}
+
+function updateBlockedWindow(blocked) {
+    var now = Date.now();
+    blockedWindow.push({ t: now, v: blocked || 0 });
+    blockedWindow = blockedWindow.filter(function (x) { return now - x.t <= 60000; });
+    return blockedWindow.reduce(function (a, b) { return a + b.v; }, 0);
+}
+
+function trimHistory() {
+    Object.keys(hist).forEach(function (k) {
+        if (hist[k].length > HISTORY_LEN) hist[k] = hist[k].slice(hist[k].length - HISTORY_LEN);
+    });
+}
+
+function updateSeverity(blocked, data) {
+    var stage = data.stage || (data.domains_attacked ? 2 : 1);
+    var critical = stage >= 3 ? Math.ceil(blocked / 10) : 0;
+    var high = stage === 2 ? Math.ceil(blocked / 8) : Math.ceil(blocked / 30);
+    var medium = Math.ceil((data.rps || 0) / 120);
+    var low = Math.ceil((data.rps_bypassed || 0) / 80);
+    document.getElementById('sev_critical').textContent = fmt(critical);
+    document.getElementById('sev_high').textContent = fmt(high);
+    document.getElementById('sev_medium').textContent = fmt(medium);
+    document.getElementById('sev_low').textContent = fmt(low);
+    drawBars('sevCriticalBars', hist.blocked, '#ef4444');
+    drawBars('sevHighBars', hist.blocked.map(function (v) { return Math.round(v * .65); }), '#f97316');
+    drawBars('sevMediumBars', hist.total.map(function (v) { return Math.round(v * .35); }), '#f59e0b');
+    drawBars('sevLowBars', hist.fwd.map(function (v) { return Math.round(v * .25); }), '#22c55e');
+}
+
+function drawBars(id, arr, color) {
+    var svg = document.getElementById(id);
+    if (!svg) return;
+    var values = arr.slice(-18);
+    var max = Math.max(1, Math.max.apply(null, values.concat([1])));
+    var out = '';
+    values.forEach(function (v, i) {
+        var h = Math.max(2, (v / max) * 18);
+        out += '<rect x="' + (i * 4) + '" y="' + (20 - h).toFixed(1) + '" width="2" height="' + h.toFixed(1) + '" rx="1" fill="' + color + '"/>';
+    });
+    svg.setAttribute('viewBox', '0 0 72 20');
+    svg.innerHTML = out;
+}
+
+function updateChartStats(data, blocked) {
+    var avg = function (arr) { return arr.length ? Math.round(arr.reduce(function (a, b) { return a + b; }, 0) / arr.length) : 0; };
+    document.getElementById('v_peakBig').innerHTML = fmt(data.peak_rps || Math.max.apply(null, hist.total.concat([0]))) + ' req/s';
+    document.getElementById('v_peakFwd').textContent = fmt(Math.max.apply(null, hist.fwd.concat([0]))) + ' req/s';
+    document.getElementById('v_peakBlocked').textContent = fmt(Math.max.apply(null, hist.blocked.concat([0]))) + ' req/s';
+    document.getElementById('v_avgTotal').textContent = fmt(avg(hist.total)) + ' req/s';
+    document.getElementById('v_avgFwd').textContent = fmt(avg(hist.fwd)) + ' req/s';
+    document.getElementById('v_avgBlocked').textContent = fmt(avg(hist.blocked)) + ' req/s';
+}
+
+function updateAttackState(data) {
+    var attacking = data.bypass_attack || data.raw_attack || (data.domains_attacked || 0) > 0;
+    var state = data.bypass_attack ? 'Bypassing attack' : data.raw_attack ? 'Raw attack' : attacking ? (data.domains_attacked + ' domains attacked') : 'Idle';
+    var stateEl = document.getElementById('v_attackState');
+    stateEl.textContent = state;
+    stateEl.style.color = state === 'Idle' ? 'var(--success)' : 'var(--danger)';
+    document.getElementById('v_attackHint').textContent = state === 'Idle' ? 'nothing unusual' : 'escalation in progress';
 }
 
 function drawSpark(id, arr, h, w, fill, ceil) {
@@ -315,12 +534,6 @@ function renderStage(data) {
         2: 'JavaScript proof-of-work. Costs CPU for bots, barely noticeable for real browsers.',
         3: 'Visual captcha. Last-resort challenge; request must be solved by a human.'
     }[data.stage] || 'Whitelisted / unknown.';
-    document.getElementById('v_peakBig').innerHTML = fmt(data.peak_rps) + '<span class="stat-unit">/s</span>';
-    var state = data.bypass_attack ? 'Bypassing attack' : data.raw_attack ? 'Raw attack' : 'Idle';
-    var stateEl = document.getElementById('v_attackState');
-    stateEl.textContent = state;
-    stateEl.style.color = state === 'Idle' ? 'var(--success)' : 'var(--danger)';
-    document.getElementById('v_attackHint').textContent = state === 'Idle' ? 'nothing unusual' : 'escalation in progress';
 }
 
 function renderBreakdown(data) {
@@ -359,29 +572,148 @@ function renderBreakdown(data) {
     });
 }
 
-function renderLogs(logs) {
+function formatBytes(n) {
+    n = parseInt(n || 0, 10);
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+}
+
+function statusBadge(status) {
+    var s = parseInt(status || 0, 10);
+    if (!s) return '<span class="status-muted">--</span>';
+    var cls = s >= 500 ? 'status-bad' : s >= 400 ? 'status-warn' : 'status-ok';
+    return '<span class="' + cls + '">' + s + '</span>';
+}
+
+function countryBadge(country) {
+    var c = (country || '').toUpperCase();
+    return '<span class="flag-chip">' + esc(c || '--') + '</span>';
+}
+
+function isBotLog(l) {
+    if (l.bot) return true;
+    if (!l.engine) return false;
+    return !/chromium|firefox|safari|edge|tor/i.test(l.engine);
+}
+
+function matchesLog(l) {
+    var proto = requestProto(l);
+    if (currentTrafficFilter === 'http' && proto !== 'HTTP') return false;
+    if (currentTrafficFilter === 'https' && proto !== 'HTTPS') return false;
+    if (currentTrafficFilter === 'bots' && !isBotLog(l)) return false;
+    if (textFilter) {
+        var hay = [
+            l.domain, l.time, l.ip, l.country, l.engine, l.bot, l.fingerprint,
+            l.user_agent, l.method, l.path, l.protocol, l.status, l.size
+        ].join(' ').toLowerCase();
+        if (hay.indexOf(textFilter.toLowerCase()) === -1) return false;
+    }
+    return true;
+}
+
+function filteredLogs() {
+    return (lastLogs || []).filter(matchesLog).sort(function (a, b) {
+        return String(b.time || '').localeCompare(String(a.time || ''));
+    });
+}
+
+function renderLogs() {
     var tbody = document.getElementById('logs');
+    var logs = filteredLogs();
     if (!logs.length) {
-        tbody.innerHTML = '<tr><td colspan="' + (IS_GLOBAL ? 7 : 6) + '" class="empty">Waiting for traffic…</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="' + visibleColCount() + '" class="empty">No matching requests.</td></tr>';
         return;
     }
     tbody.innerHTML = '';
     logs.slice(0, 12).forEach(function (l) {
         var tr = document.createElement('tr');
         tr.setAttribute('data-searchable', '');
-        var fpShort = (l.fingerprint || '').slice(0, 24);
-        if (l.fingerprint && l.fingerprint.length > 24) fpShort += '…';
+        var engine = l.engine || l.bot || 'UNK';
+        var method = (l.method || 'GET').toUpperCase();
         var html = '';
-        if (IS_GLOBAL) html += '<td style="font-family:Inter,sans-serif">' + esc(l.domain || '—') + '</td>';
-        html += '<td>' + esc(l.time) + '</td>' +
-            '<td class="ip">' + esc(l.ip) + '</td>' +
-            '<td><span class="tag ' + tagClass(l.engine) + '">' + esc(l.engine || 'UNK') + '</span></td>' +
-            '<td title="' + esc(l.fingerprint || '') + '">' + esc(fpShort || '—') + '</td>' +
-            '<td>' + esc(l.path) + '</td>' +
-            '<td>' + esc(l.user_agent || '—') + '</td>';
+        if (IS_GLOBAL) html += '<td data-col="domain" style="font-family:var(--mono)">' + esc(l.domain || '--') + '</td>';
+        html += '<td data-col="time">' + esc(l.time || '--') + '</td>' +
+            '<td data-col="ip" class="ip">' + esc(l.ip || '--') + '</td>' +
+            '<td data-col="country">' + countryBadge(l.country) + '</td>' +
+            '<td data-col="engine"><span class="tag ' + tagClass(l.engine, l.bot) + '">' + esc(engine) + '</span></td>' +
+            '<td data-col="method"><span class="method">' + esc(method) + '</span></td>' +
+            '<td data-col="path">' + esc(l.path || '/') + '</td>' +
+            '<td data-col="status">' + statusBadge(l.status) + '</td>' +
+            '<td data-col="size">' + formatBytes(l.size) + '</td>' +
+            '<td data-col="ua">' + esc(l.user_agent || '--') + '</td>';
         tr.innerHTML = html;
         tbody.appendChild(tr);
     });
+    applyColumnVisibility();
+    var summary = logs.length + ' request' + (logs.length === 1 ? '' : 's');
+    if (textFilter) summary += ' matching "' + textFilter + '"';
+    document.getElementById('logsSub').textContent = summary + ' in the live tail.';
+}
+
+function applyColumnVisibility() {
+    Object.keys(visibleColumns).forEach(function (col) {
+        document.querySelectorAll('[data-col="' + col + '"]').forEach(function (el) {
+            el.classList.toggle('hidden-col', !visibleColumns[col]);
+        });
+    });
+}
+
+function exportLogs() {
+    var rows = filteredLogs();
+    if (!rows.length) {
+        alert('No matching logs to export.');
+        return;
+    }
+    var cols = [
+        ['domain', 'Domain', function (r) { return r.domain || ''; }],
+        ['time', 'Time', function (r) { return r.time || ''; }],
+        ['ip', 'IP address', function (r) { return r.ip || ''; }],
+        ['country', 'Country', function (r) { return r.country || ''; }],
+        ['engine', 'Engine', function (r) { return r.engine || r.bot || 'UNK'; }],
+        ['method', 'Method', function (r) { return r.method || 'GET'; }],
+        ['path', 'Path', function (r) { return r.path || '/'; }],
+        ['status', 'Status', function (r) { return r.status || ''; }],
+        ['size', 'Size', function (r) { return r.size || 0; }],
+        ['ua', 'User-Agent', function (r) { return r.user_agent || ''; }]
+    ].filter(function (c) { return c[0] !== 'domain' || IS_GLOBAL; });
+    function csvCell(v) {
+        v = (v == null ? '' : v) + '';
+        return '"' + v.replace(/"/g, '""') + '"';
+    }
+    var csv = [cols.map(function (c) { return csvCell(c[1]); }).join(',')].concat(rows.map(function (r) {
+        return cols.map(function (c) { return csvCell(c[2](r)); }).join(',');
+    })).join('\n');
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'lancarsec-' + (IS_GLOBAL ? 'all-domains' : DOMAIN) + '-logs.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 500);
+}
+
+function clearLogs() {
+    if (IS_GLOBAL) {
+        alert('Clear logs is available after selecting a specific domain.');
+        return;
+    }
+    if (!confirm('Clear request logs for ' + DOMAIN + '?')) return;
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/logs', { method: 'DELETE' })
+        .then(function (r) { if (!r.ok) throw new Error('request failed'); return r.json(); })
+        .then(function () { lastLogs = []; renderLogs(); })
+        .catch(function () { alert('Failed to clear logs. Check your role permission.'); });
+}
+
+function toggleFullscreen() {
+    var card = document.querySelector('.requests-card');
+    if (!document.fullscreenElement) {
+        if (card.requestFullscreen) card.requestFullscreen();
+    } else if (document.exitFullscreen) {
+        document.exitFullscreen();
+    }
 }
 
 // =============== SSE connection ===============
@@ -389,10 +721,17 @@ function connect() {
     if (es) es.close();
     es = new EventSource('/_lancarsec/api/dashboard/stream?domain=' + encodeURIComponent(DOMAIN));
     es.addEventListener('stats', function (e) {
-        try { render(JSON.parse(e.data)); } catch (_) {}
+        try {
+            pendingData = JSON.parse(e.data);
+            var now = Date.now();
+            if (!paused && (lastRenderAt === 0 || now - lastRenderAt >= renderIntervalMs)) {
+                render(pendingData);
+                lastRenderAt = now;
+            }
+        } catch (_) {}
     });
     es.onopen = function () {
-        if (!paused) document.getElementById('liveStatus').textContent = 'Streaming live · 1 Hz';
+        syncLiveStatus();
         document.getElementById('statusBar').classList.toggle('stale', false);
     };
     es.onerror = function () {

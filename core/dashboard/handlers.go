@@ -278,21 +278,22 @@ func statsFor(domain string, allowedDomains []string) map[string]any {
 
 	ctr := domains.CountersFor(domain)
 	return map[string]any{
-		"domain":        domain,
-		"is_global":     false,
-		"stage":         d.Stage,
-		"stage_locked":  d.StageManuallySet,
-		"rps":           d.RequestsPerSecond,
-		"rps_bypassed":  d.RequestsBypassedPerSecond,
-		"rps_blocked":   d.RequestsPerSecond - d.RequestsBypassedPerSecond,
-		"peak_rps":      d.PeakRequestsPerSecond,
-		"total":         ctr.Total.Load(),
-		"bypassed":      ctr.Bypassed.Load(),
-		"cpu":           proxy.GetCPUUsage(),
-		"ram":           proxy.GetRAMUsage(),
-		"bypass_attack": d.BypassAttack,
-		"raw_attack":    d.RawAttack,
-		"logs":          serializeLogs(logs),
+		"domain":         domain,
+		"is_global":      false,
+		"stage":          d.Stage,
+		"stage_locked":   d.StageManuallySet,
+		"rps":            d.RequestsPerSecond,
+		"rps_bypassed":   d.RequestsBypassedPerSecond,
+		"rps_blocked":    d.RequestsPerSecond - d.RequestsBypassedPerSecond,
+		"peak_rps":       d.PeakRequestsPerSecond,
+		"total":          ctr.Total.Load(),
+		"bypassed":       ctr.Bypassed.Load(),
+		"cpu":            proxy.GetCPUUsage(),
+		"ram":            proxy.GetRAMUsage(),
+		"l4_connections": firewall.ActiveConnectionCount(),
+		"bypass_attack":  d.BypassAttack,
+		"raw_attack":     d.RawAttack,
+		"logs":           serializeLogs(logs),
 	}
 }
 
@@ -302,11 +303,16 @@ func serializeLogs(logs []domains.DomainLog) []map[string]any {
 		out = append(out, map[string]any{
 			"time":        l.Time,
 			"ip":          l.IP,
+			"country":     l.Country,
 			"engine":      l.BrowserFP,
 			"bot":         l.BotFP,
 			"fingerprint": l.TLSFP,
 			"user_agent":  l.Useragent,
+			"method":      l.Method,
 			"path":        l.Path,
+			"protocol":    l.Protocol,
+			"status":      l.Status,
+			"size":        l.Size,
 		})
 	}
 	return out

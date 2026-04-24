@@ -102,6 +102,7 @@ func aggregateStats(list []string) map[string]any {
 		"domains_attacked": domainsAttacked,
 		"cpu":              proxy.GetCPUUsage(),
 		"ram":              proxy.GetRAMUsage(),
+		"l4_connections":   firewall.ActiveConnectionCount(),
 		"breakdown":        breakdown,
 		"logs":             merged,
 	}
@@ -129,11 +130,16 @@ func mergeLogs(entries []domainLogEntry, n int) []map[string]any {
 		out = append(out, map[string]any{
 			"time":        e.log.Time,
 			"ip":          e.log.IP,
+			"country":     e.log.Country,
 			"engine":      e.log.BrowserFP,
 			"bot":         e.log.BotFP,
 			"fingerprint": e.log.TLSFP,
 			"user_agent":  e.log.Useragent,
+			"method":      e.log.Method,
 			"path":        e.log.Path,
+			"protocol":    e.log.Protocol,
+			"status":      e.log.Status,
+			"size":        e.log.Size,
 			"domain":      e.domain,
 		})
 	}

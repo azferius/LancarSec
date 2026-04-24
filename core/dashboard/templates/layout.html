@@ -9,39 +9,103 @@
 </head>
 <body>
 <div class="app">
-    <aside class="sidebar">
-        <div class="brand">
-            <div class="brand-logo">LS</div>
+    <header class="topbar">
+        <a class="brand" href="/_lancarsec/dashboard/overview?domain={{.Domain}}" aria-label="LancarSec overview">
+            <div class="brand-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l8 3v5.5c0 4.7-3.2 7.9-8 9.5-4.8-1.6-8-4.8-8-9.5V6l8-3z"/><path d="M12 7v10"/></svg>
+            </div>
             <div class="brand-text">
                 <div class="brand-name">LancarSec</div>
-                <div class="brand-sub">L7 Protection</div>
+                <div class="brand-sub">L7 DDoS Protection</div>
+            </div>
+        </a>
+        <div class="domain-switcher dropdown" id="domainSwitcher">
+            <button class="domain-trigger" id="domainTrigger" type="button" aria-haspopup="true" aria-expanded="false">
+                <span class="domain-trigger-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+                </span>
+                <span class="domain-trigger-text">
+                    <strong>{{if eq "__all" .Domain}}All domains{{else}}{{.Domain}}{{end}}</strong>
+                    <small>{{if eq "__all" .Domain}}Global aggregate scope{{else}}Protected domain scope{{end}}</small>
+                </span>
+                <svg class="domain-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="dropdown-menu domain-menu">
+                <div class="domain-search">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                    <input id="domainSearch" type="search" placeholder="Search 100+ domains..." autocomplete="off">
+                </div>
+                <div class="domain-list" id="domainList">
+                    <a class="domain-option {{if eq "__all" $.Domain}}active{{end}}" data-domain-option data-domain-search="all domains global aggregate" href="/_lancarsec/dashboard/{{$.Tab}}?domain=__all">
+                        <span>
+                            <strong>All domains</strong>
+                            <small>Aggregate every accessible domain</small>
+                        </span>
+                        <em>Global</em>
+                    </a>
+                    {{range .Domains}}
+                    <a class="domain-option {{if eq . $.Domain}}active{{end}}" data-domain-option data-domain-search="{{.}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain={{.}}">
+                        <span>
+                            <strong>{{.}}</strong>
+                            <small>Protected domain</small>
+                        </span>
+                        <em>Domain</em>
+                    </a>
+                    {{end}}
+                    <div class="domain-empty" id="domainEmpty">No matching domain.</div>
+                </div>
+                {{if eq .Role "superadmin"}}<a class="domain-manage" href="/_lancarsec/dashboard/settings?domain={{.Domain}}">Manage domains and routing</a>{{end}}
             </div>
         </div>
+        <div class="topbar-right">
+            <span class="status-chip"><span class="dot"></span> Operational</span>
+            <div class="dropdown" id="userMenu">
+                <button class="user-trigger" title="{{.User}}" id="userTrigger" aria-haspopup="true">
+                    <span>{{.User}}</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="dropdown-menu">
+                    <div class="dropdown-user">
+                        <div>{{.User}}</div>
+                        <span>{{.Role}}</span>
+                    </div>
+                    <button class="dropdown-item" id="openChangePw">
+                        <span>Change password</span>
+                    </button>
+                    <form method="POST" action="/_lancarsec/logout" style="margin:0">
+                        <button class="dropdown-item danger-text" type="submit">
+                            <span>Sign out</span>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </header>
+    <aside class="sidebar">
         <div class="nav-section">
-            <div class="nav-title">Workspace</div>
             <a class="nav-item {{if eq .Tab "overview"}}active{{end}}" href="/_lancarsec/dashboard/overview?domain={{.Domain}}">
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                 Overview
             </a>
+            <a class="nav-item {{if eq .Tab "analytics"}}active{{end}}" href="/_lancarsec/dashboard/analytics?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>
+                Traffic
+            </a>
+            <a class="nav-item {{if eq .Tab "logs"}}active{{end}}" href="/_lancarsec/dashboard/logs?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="2"/></svg>
+                Requests
+            </a>
             <a class="nav-item {{if eq .Tab "rules"}}active{{end}}" href="/_lancarsec/dashboard/rules?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                Firewall Rules
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z"/><path d="M9 12l2 2 4-5"/></svg>
+                Security
             </a>
             <a class="nav-item {{if eq .Tab "blocklist"}}active{{end}}" href="/_lancarsec/dashboard/blocklist?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z"/><line x1="8" y1="8" x2="16" y2="16"/><line x1="16" y1="8" x2="8" y2="16"/></svg>
                 Blocklist
             </a>
             <a class="nav-item {{if eq .Tab "pathlimits"}}active{{end}}" href="/_lancarsec/dashboard/pathlimits?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                Path limits
-            </a>
-            <a class="nav-item {{if eq .Tab "logs"}}active{{end}}" href="/_lancarsec/dashboard/logs?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                Logs
-            </a>
-            <a class="nav-item {{if eq .Tab "analytics"}}active{{end}}" href="/_lancarsec/dashboard/analytics?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H3v10h6V11zM15 3H9v18h6V3zM21 7h-6v14h6V7z"/></svg>
-                Analytics
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/></svg>
+                Stages
             </a>
             {{if eq .Role "superadmin"}}
             <a class="nav-item {{if eq .Tab "settings"}}active{{end}}" href="/_lancarsec/dashboard/settings?domain={{.Domain}}">
@@ -49,63 +113,23 @@
                 Settings
             </a>
             {{end}}
-        </div>
-        {{if eq .Role "superadmin"}}
-        <div class="nav-section">
-            <div class="nav-title">Administration</div>
+            {{if eq .Role "superadmin"}}
             <a class="nav-item {{if eq .Tab "users"}}active{{end}}" href="/_lancarsec/dashboard/users?domain={{.Domain}}">
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                Users & access
+                Users
             </a>
             <a class="nav-item {{if eq .Tab "audit"}}active{{end}}" href="/_lancarsec/dashboard/audit?domain={{.Domain}}">
-                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                Audit log
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+                Reports
             </a>
             <a class="nav-item {{if eq .Tab "apikeys"}}active{{end}}" href="/_lancarsec/dashboard/apikeys?domain={{.Domain}}">
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                API keys
+                API
             </a>
-        </div>
-        {{end}}
-        <div class="nav-section">
-            <div class="nav-title">Scope</div>
-            <div class="domain-group">
-                <a class="domain-item {{if eq "__all" $.Domain}}active{{end}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain=__all">
-                    <span style="font-family:Inter,sans-serif;font-weight:600">All domains</span>
-                    <span class="domain-stage" style="background:var(--accent-soft);color:#93c5fd">GLOBAL</span>
-                </a>
-                {{range .Domains}}<a class="domain-item {{if eq . $.Domain}}active{{end}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain={{.}}"><span>{{.}}</span></a>{{end}}
-            </div>
+            {{end}}
         </div>
     </aside>
     <main>
-        <div class="topbar">
-            <div class="search">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                <input type="text" placeholder="Filter on this page…" id="globalSearch">
-                <kbd>⌘K</kbd>
-            </div>
-            <div class="topbar-right">
-                <span class="status-chip"><span class="dot"></span> Operational</span>
-                <div class="dropdown" id="userMenu" style="position:relative">
-                    <button class="avatar" title="{{.User}}" id="userTrigger" style="border:none;padding:0" aria-haspopup="true">{{.UserInitial}}</button>
-                    <div class="dropdown-menu" style="min-width:200px;right:0;left:auto;top:calc(100% + 8px)">
-                        <div style="padding:10px 12px;border-bottom:1px solid var(--border);margin-bottom:4px">
-                            <div style="font-weight:500;color:var(--text-bright);font-size:13px">{{.User}}</div>
-                            <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-top:2px">{{.Role}}</div>
-                        </div>
-                        <button class="dropdown-item" id="openChangePw" style="width:100%;border:none;background:none;text-align:left;font-family:inherit;cursor:pointer">
-                            <span style="font-family:Inter,sans-serif">Change password</span>
-                        </button>
-                        <form method="POST" action="/_lancarsec/logout" style="margin:0">
-                            <button class="dropdown-item" type="submit" style="width:100%;border:none;background:none;text-align:left;font-family:inherit;cursor:pointer;color:#fca5a5">
-                                <span style="font-family:Inter,sans-serif">Sign out</span>
-                            </button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </div>
         <div class="content">{{template "content" .}}</div>
         <footer>
             <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
@@ -153,6 +177,45 @@ if (gs) {
         document.querySelectorAll('[data-searchable]').forEach(function (row) {
             row.style.display = row.textContent.toLowerCase().indexOf(q) >= 0 ? '' : 'none';
         });
+    });
+}
+
+// Domain selector dropdown
+var domainSwitcher = document.getElementById('domainSwitcher');
+var domainTrigger = document.getElementById('domainTrigger');
+var domainSearch = document.getElementById('domainSearch');
+var domainEmpty = document.getElementById('domainEmpty');
+if (domainSwitcher && domainTrigger && domainSearch) {
+    domainTrigger.addEventListener('click', function (e) {
+        e.stopPropagation();
+        domainSwitcher.classList.toggle('open');
+        domainTrigger.setAttribute('aria-expanded', domainSwitcher.classList.contains('open') ? 'true' : 'false');
+        if (domainSwitcher.classList.contains('open')) {
+            setTimeout(function () { domainSearch.focus(); domainSearch.select(); }, 0);
+        }
+    });
+    domainSearch.addEventListener('input', function () {
+        var q = domainSearch.value.trim().toLowerCase();
+        var shown = 0;
+        document.querySelectorAll('[data-domain-option]').forEach(function (row) {
+            var hay = row.getAttribute('data-domain-search').toLowerCase();
+            var match = !q || hay.indexOf(q) >= 0;
+            row.style.display = match ? '' : 'none';
+            if (match) shown++;
+        });
+        if (domainEmpty) domainEmpty.style.display = shown ? 'none' : 'block';
+    });
+    document.addEventListener('click', function (e) {
+        if (!domainSwitcher.contains(e.target)) {
+            domainSwitcher.classList.remove('open');
+            domainTrigger.setAttribute('aria-expanded', 'false');
+        }
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+            domainSwitcher.classList.remove('open');
+            domainTrigger.setAttribute('aria-expanded', 'false');
+        }
     });
 }
 
