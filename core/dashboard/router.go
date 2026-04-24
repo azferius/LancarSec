@@ -40,12 +40,53 @@ func Serve(w http.ResponseWriter, r *http.Request) bool {
 	case p == "/_lancarsec/api/dashboard/reload":
 		HandleReload(w, r)
 		return true
+	case p == "/_lancarsec/api/dashboard/users":
+		if r.Method == http.MethodGet {
+			HandleUsersList(w, r)
+		} else {
+			HandleUserCreate(w, r)
+		}
+		return true
+	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/users/"):
+		return serveUserAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/users/"))
+	case p == "/_lancarsec/api/dashboard/audit":
+		HandleAudit(w, r)
+		return true
+	case p == "/_lancarsec/api/dashboard/self/password":
+		HandleSelfPassword(w, r)
+		return true
 	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/blocklist/"):
 		return serveBlockAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/blocklist/"))
 	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/domain/"):
 		return serveDomainAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/domain/"))
 	}
 	return false
+}
+
+// serveUserAPI dispatches /api/dashboard/users/<id>[/grants] — GET/POST on
+// the id root updates the user row; /grants is the domain-access sub-
+// resource (POST grants, DELETE revokes).
+func serveUserAPI(w http.ResponseWriter, r *http.Request, rest string) bool {
+	parts := strings.SplitN(rest, "/", 2)
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "bad user id", http.StatusBadRequest)
+		return true
+	}
+	if len(parts) == 1 {
+		if r.Method == http.MethodDelete {
+			HandleUserDelete(w, r, id)
+			return true
+		}
+		HandleUserUpdate(w, r, id)
+		return true
+	}
+	if parts[1] == "grants" {
+		HandleUserGrant(w, r, id)
+		return true
+	}
+	http.NotFound(w, r)
+	return true
 }
 
 // serveBlockAPI dispatches /api/dashboard/blocklist/<scope>[/<index>] where

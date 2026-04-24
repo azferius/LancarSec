@@ -1,0 +1,345 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Users & access</h1>
+        <p>Operator accounts, roles, and per-domain permissions. Superadmin only.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn primary" id="openNew">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+            New user
+        </button>
+    </div>
+</div>
+
+<section class="grid" style="margin-top:16px;">
+    <div class="card">
+        <div class="stat-label">Users</div>
+        <div class="stat-value" id="st_users">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Superadmins</div>
+        <div class="stat-value" id="st_super">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Admins</div>
+        <div class="stat-value" id="st_admin">—</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Viewers</div>
+        <div class="stat-value" id="st_viewer">—</div>
+    </div>
+</section>
+
+<div class="card full-card">
+    <div class="card-header">
+        <div><h2>Operator accounts</h2><p>Password resets, role changes, and domain grants take effect immediately. Disabled users are signed out of every session.</p></div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>Email</th>
+                    <th>Domains</th>
+                    <th>Last login</th>
+                    <th>Status</th>
+                    <th style="width:180px"></th>
+                </tr>
+            </thead>
+            <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Create modal -->
+<div class="modal-backdrop" id="newModal" style="display:none">
+    <div class="modal" style="width:min(480px, calc(100% - 32px))">
+        <h3>Create user</h3>
+        <p>A plain-text password is required once for creation — it's hashed with bcrypt (cost 12) before storage.</p>
+        <div class="field">
+            <label>Username</label>
+            <input id="n_user" type="text" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+            <label>Email (optional)</label>
+            <input id="n_email" type="email" autocomplete="off">
+        </div>
+        <div class="field">
+            <label>Password</label>
+            <input id="n_pass" type="password">
+            <div class="field-hint">Minimum 8 characters. Operator should change it on first login.</div>
+        </div>
+        <div class="field">
+            <label>Role</label>
+            <div class="btn-group" style="width:100%">
+                <button data-r="viewer" class="active" style="flex:1">Viewer</button>
+                <button data-r="admin" style="flex:1">Admin</button>
+                <button data-r="superadmin" style="flex:1">Superadmin</button>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelNew">Cancel</button>
+            <button class="btn primary" id="saveNew">Create user</button>
+        </div>
+    </div>
+</div>
+
+<!-- Grants modal -->
+<div class="modal-backdrop" id="grantsModal" style="display:none">
+    <div class="modal" style="width:min(540px, calc(100% - 32px))">
+        <h3>Domain access for <span id="g_user"></span></h3>
+        <p>Grants are additive. Removing a row revokes access. Superadmins bypass these grants entirely.</p>
+        <div class="field-row">
+            <div>
+                <label>Domain</label>
+                <select id="g_domain"></select>
+            </div>
+            <div>
+                <label>Permission</label>
+                <select id="g_perm">
+                    <option value="view">View</option>
+                    <option value="manage">Manage</option>
+                </select>
+            </div>
+        </div>
+        <button class="btn primary" style="width:100%;margin-bottom:12px;" id="addGrant">Grant access</button>
+        <div class="table-wrap" style="max-height:220px">
+            <table>
+                <thead><tr><th>Domain</th><th>Permission</th><th style="width:80px"></th></tr></thead>
+                <tbody id="grantRows"></tbody>
+            </table>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="closeGrants">Done</button>
+        </div>
+    </div>
+</div>
+
+<!-- Password reset modal -->
+<div class="modal-backdrop" id="pwModal" style="display:none">
+    <div class="modal" style="width:min(420px, calc(100% - 32px))">
+        <h3>Reset password for <span id="p_user"></span></h3>
+        <p>The operator will need to sign in again after the reset.</p>
+        <div class="field">
+            <label>New password</label>
+            <input id="p_new" type="password">
+            <div class="field-hint">Minimum 8 characters.</div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelPw">Cancel</button>
+            <button class="btn primary" id="savePw">Save password</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var USERS = [];
+var ALL_DOMAINS = {{.Domains}};
+var SELECTED_ROLE = 'viewer';
+var grantUserID = null, pwUserID = null;
+
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmt(n) { return (n || 0).toLocaleString(); }
+function fmtTs(ts) { if (!ts) return '—'; return new Date(ts * 1000).toLocaleString(); }
+function roleClass(r) { return r === 'superadmin' ? 'tag-unknown' : r === 'admin' ? 'tag-bot' : 'tag-browser'; }
+function roleLabel(r) { return { superadmin: 'Superadmin', admin: 'Admin', viewer: 'Viewer' }[r] || r; }
+
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2800);
+}
+
+function render() {
+    var tbody = document.getElementById('rows');
+    if (!USERS.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No users yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    var counts = { superadmin: 0, admin: 0, viewer: 0 };
+    USERS.forEach(function (u) {
+        counts[u.role] = (counts[u.role] || 0) + 1;
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-searchable', '');
+        var domains = (u.domains || []).map(function (d) {
+            return '<span class="tag tag-neutral" style="margin-right:4px">' + esc(d.domain) + '<span style="opacity:.6;margin-left:4px">' + d.permission + '</span></span>';
+        }).join('') || '<span style="color:var(--text-dim)">—</span>';
+        tr.innerHTML =
+            '<td style="font-family:Inter,sans-serif;font-weight:500">' + esc(u.username) + '</td>' +
+            '<td><span class="tag ' + roleClass(u.role) + '">' + roleLabel(u.role) + '</span></td>' +
+            '<td>' + esc(u.email || '—') + '</td>' +
+            '<td style="max-width:none;white-space:normal;font-family:Inter,sans-serif">' + (u.role === 'superadmin' ? '<span style="color:#93c5fd">all domains</span>' : domains) + '</td>' +
+            '<td>' + fmtTs(u.last_login_at) + '</td>' +
+            '<td>' + (u.disabled ? '<span class="tag tag-unknown">Disabled</span>' : '<span class="tag tag-browser">Active</span>') + '</td>' +
+            '<td><div style="display:flex;gap:4px;flex-wrap:wrap">' +
+                '<button class="btn small" data-action="grants" data-id="' + u.id + '">Grants</button>' +
+                '<button class="btn small" data-action="pw" data-id="' + u.id + '" data-user="' + esc(u.username) + '">Password</button>' +
+                (u.disabled
+                    ? '<button class="btn small" data-action="enable" data-id="' + u.id + '">Enable</button>'
+                    : '<button class="btn small danger" data-action="disable" data-id="' + u.id + '">Disable</button>'
+                ) +
+            '</div></td>';
+        tbody.appendChild(tr);
+    });
+    document.getElementById('st_users').textContent = fmt(USERS.length);
+    document.getElementById('st_super').textContent = fmt(counts.superadmin);
+    document.getElementById('st_admin').textContent = fmt(counts.admin);
+    document.getElementById('st_viewer').textContent = fmt(counts.viewer);
+}
+
+function load() {
+    fetch('/_lancarsec/api/dashboard/users', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { USERS = d.users || []; render(); })
+        .catch(function () { toast('Failed to load users', 'error'); });
+}
+
+document.getElementById('rows').addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    var id = parseInt(btn.getAttribute('data-id'), 10);
+    var action = btn.getAttribute('data-action');
+    if (action === 'disable' || action === 'enable') {
+        var disabled = action === 'disable';
+        if (disabled && !confirm('Disable this user? They will be signed out of every session.')) return;
+        fetch('/_lancarsec/api/dashboard/users/' + id, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ disabled: disabled })
+        }).then(function () { toast(disabled ? 'User disabled' : 'User enabled', 'success'); load(); });
+    } else if (action === 'pw') {
+        pwUserID = id;
+        document.getElementById('p_user').textContent = btn.getAttribute('data-user');
+        document.getElementById('pwModal').style.display = 'grid';
+    } else if (action === 'grants') {
+        grantUserID = id;
+        var user = USERS.filter(function (u) { return u.id === id; })[0];
+        if (!user) return;
+        document.getElementById('g_user').textContent = user.username;
+        var sel = document.getElementById('g_domain');
+        sel.innerHTML = '';
+        ALL_DOMAINS.forEach(function (d) {
+            var opt = document.createElement('option');
+            opt.value = d; opt.textContent = d;
+            sel.appendChild(opt);
+        });
+        renderGrantList(user);
+        document.getElementById('grantsModal').style.display = 'grid';
+    }
+});
+
+function renderGrantList(user) {
+    var tbody = document.getElementById('grantRows');
+    if (!user.domains || !user.domains.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty">No grants yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    user.domains.forEach(function (d) {
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td style="font-family:var(--mono)">' + esc(d.domain) + '</td>' +
+            '<td>' + esc(d.permission) + '</td>' +
+            '<td><button class="btn small danger" data-rm="' + esc(d.domain) + '">Revoke</button></td>';
+        tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll('[data-rm]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var dom = btn.getAttribute('data-rm');
+            fetch('/_lancarsec/api/dashboard/users/' + grantUserID + '/grants?domain=' + encodeURIComponent(dom), { method: 'DELETE' })
+                .then(function () { toast('Grant revoked', 'success'); return load(); })
+                .then(function () {
+                    var u = USERS.filter(function (x) { return x.id === grantUserID; })[0];
+                    if (u) renderGrantList(u);
+                });
+        });
+    });
+}
+
+document.getElementById('addGrant').addEventListener('click', function () {
+    var dom = document.getElementById('g_domain').value;
+    var perm = document.getElementById('g_perm').value;
+    fetch('/_lancarsec/api/dashboard/users/' + grantUserID + '/grants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: dom, permission: perm })
+    })
+    .then(function (r) { if (!r.ok) throw r; toast('Access granted', 'success'); return load(); })
+    .then(function () {
+        var u = USERS.filter(function (x) { return x.id === grantUserID; })[0];
+        if (u) renderGrantList(u);
+    })
+    .catch(function () { toast('Grant failed', 'error'); });
+});
+
+document.getElementById('closeGrants').addEventListener('click', function () {
+    document.getElementById('grantsModal').style.display = 'none';
+});
+
+document.getElementById('openNew').addEventListener('click', function () {
+    document.getElementById('newModal').style.display = 'grid';
+    document.getElementById('n_user').focus();
+});
+document.getElementById('cancelNew').addEventListener('click', function () {
+    document.getElementById('newModal').style.display = 'none';
+});
+document.querySelectorAll('#newModal .btn-group button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#newModal .btn-group button').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        SELECTED_ROLE = btn.getAttribute('data-r');
+    });
+});
+document.getElementById('saveNew').addEventListener('click', function () {
+    var u = document.getElementById('n_user').value.trim();
+    var p = document.getElementById('n_pass').value;
+    if (!u || !p) { toast('Username and password are required', 'error'); return; }
+    fetch('/_lancarsec/api/dashboard/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            username: u,
+            email: document.getElementById('n_email').value.trim(),
+            password: p,
+            role: SELECTED_ROLE
+        })
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); return r.json(); })
+    .then(function () {
+        toast('User created', 'success');
+        document.getElementById('newModal').style.display = 'none';
+        document.getElementById('n_user').value = '';
+        document.getElementById('n_email').value = '';
+        document.getElementById('n_pass').value = '';
+        load();
+    })
+    .catch(function (e) { toast('Create failed: ' + (e.message || e), 'error'); });
+});
+
+document.getElementById('cancelPw').addEventListener('click', function () {
+    document.getElementById('pwModal').style.display = 'none';
+});
+document.getElementById('savePw').addEventListener('click', function () {
+    var n = document.getElementById('p_new').value;
+    if (n.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+    fetch('/_lancarsec/api/dashboard/users/' + pwUserID, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: n })
+    })
+    .then(function (r) { if (!r.ok) throw r; toast('Password reset', 'success'); document.getElementById('pwModal').style.display = 'none'; document.getElementById('p_new').value = ''; })
+    .catch(function () { toast('Reset failed', 'error'); });
+});
+
+load();
+</script>
+{{end}}

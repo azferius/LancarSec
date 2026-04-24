@@ -159,6 +159,16 @@ func HandlePage(tab string) http.HandlerFunc {
 			t = tmplSettings
 		case "blocklist":
 			t = tmplBlocklist
+		case "users":
+			if !requireSuperAdmin(w, s) {
+				return
+			}
+			t = tmplUsers
+		case "audit":
+			if !requireSuperAdmin(w, s) {
+				return
+			}
+			t = tmplAudit
 		default:
 			http.NotFound(w, r)
 			return
@@ -195,6 +205,10 @@ func titleFor(tab string) string {
 		return "Analytics"
 	case "settings":
 		return "Settings"
+	case "users":
+		return "Users & access"
+	case "audit":
+		return "Audit log"
 	}
 	return "Dashboard"
 }

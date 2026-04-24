@@ -1,0 +1,129 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Audit log</h1>
+        <p>Every operator mutation — logins, rule changes, blocklist adds, stage forces, user management. Append-only; rows never edited once written.</p>
+    </div>
+</div>
+
+<section style="margin-top:16px;margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+    <div style="min-width:160px">
+        <label>Domain</label>
+        <input id="f_domain" type="text" placeholder="any" spellcheck="false">
+    </div>
+    <div style="min-width:160px">
+        <label>Action</label>
+        <select id="f_action">
+            <option value="">any</option>
+            <option>login</option>
+            <option>logout</option>
+            <option>stage_force</option>
+            <option>rule_add</option>
+            <option>rule_delete</option>
+            <option>block_add</option>
+            <option>block_delete</option>
+            <option>logs_clear</option>
+            <option>config_reload</option>
+            <option>user_create</option>
+            <option>user_update_role</option>
+            <option>user_password_reset</option>
+            <option>user_disable</option>
+            <option>user_enable</option>
+            <option>grant_add</option>
+            <option>grant_revoke</option>
+        </select>
+    </div>
+    <div style="min-width:100px">
+        <label>Limit</label>
+        <select id="f_limit">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+        </select>
+    </div>
+    <button class="btn primary" id="apply">Apply</button>
+    <button class="btn" id="reset">Reset</button>
+</section>
+
+<div class="card full-card">
+    <div class="card-header"><div><h2 id="resultTitle">Events</h2><p id="resultSub">Newest first</p></div></div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th style="width:130px">When</th><th style="width:120px">User</th><th style="width:150px">Action</th><th style="width:140px">Domain</th><th style="width:120px">IP</th><th>Details</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmtTs(ts) { return new Date(ts * 1000).toLocaleString(); }
+function relTime(ts) {
+    var diff = Math.floor(Date.now() / 1000) - ts;
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+}
+function actionTag(a) {
+    if (/delete|disable|revoke/.test(a)) return 'tag-unknown';
+    if (/add|create|grant|reset|force/.test(a)) return 'tag-bot';
+    return 'tag-neutral';
+}
+
+function fetchAudit() {
+    var params = new URLSearchParams();
+    var dom = document.getElementById('f_domain').value.trim();
+    var act = document.getElementById('f_action').value;
+    var limit = document.getElementById('f_limit').value;
+    if (dom) params.set('domain', dom);
+    if (act) params.set('action', act);
+    params.set('limit', limit);
+
+    fetch('/_lancarsec/api/dashboard/audit?' + params.toString(), { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            var events = d.events || [];
+            var tbody = document.getElementById('rows');
+            if (!events.length) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty">No events match.</td></tr>';
+                document.getElementById('resultTitle').textContent = 'Events — 0';
+                return;
+            }
+            tbody.innerHTML = '';
+            events.forEach(function (e) {
+                var tr = document.createElement('tr');
+                tr.setAttribute('data-searchable', '');
+                var details = '';
+                if (e.Details) {
+                    try { details = '<code style="font-size:10.5px">' + esc(JSON.stringify(JSON.parse(e.Details))) + '</code>'; }
+                    catch (_) { details = esc(e.Details); }
+                }
+                tr.innerHTML =
+                    '<td title="' + esc(fmtTs(e.TS)) + '">' + relTime(e.TS) + '</td>' +
+                    '<td style="font-family:Inter,sans-serif">' + esc(e.Username) + '</td>' +
+                    '<td><span class="tag ' + actionTag(e.Action) + '">' + esc(e.Action) + '</span></td>' +
+                    '<td>' + esc(e.Domain || '—') + '</td>' +
+                    '<td class="ip">' + esc(e.IP || '—') + '</td>' +
+                    '<td style="max-width:none;white-space:normal">' + details + '</td>';
+                tbody.appendChild(tr);
+            });
+            document.getElementById('resultTitle').textContent = 'Events — ' + events.length;
+        });
+}
+
+document.getElementById('apply').addEventListener('click', fetchAudit);
+document.getElementById('reset').addEventListener('click', function () {
+    document.getElementById('f_domain').value = '';
+    document.getElementById('f_action').value = '';
+    document.getElementById('f_limit').value = '200';
+    fetchAudit();
+});
+fetchAudit();
+</script>
+{{end}}

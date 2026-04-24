@@ -35,6 +35,12 @@ var settingsTmpl string
 //go:embed templates/blocklist.html
 var blocklistTmpl string
 
+//go:embed templates/users.html
+var usersTmpl string
+
+//go:embed templates/audit.html
+var auditTmpl string
+
 //go:embed templates/login.html
 var loginTmpl string
 
@@ -63,6 +69,8 @@ var (
 	tmplAnalytics *template.Template
 	tmplSettings  *template.Template
 	tmplBlocklist *template.Template
+	tmplUsers     *template.Template
+	tmplAudit     *template.Template
 	tmplLogin     *template.Template
 )
 
@@ -76,6 +84,8 @@ func init() {
 	tmplAnalytics = parse(analyticsTmpl)
 	tmplSettings = parse(settingsTmpl)
 	tmplBlocklist = parse(blocklistTmpl)
+	tmplUsers = parse(usersTmpl)
+	tmplAudit = parse(auditTmpl)
 	tmplLogin = template.Must(template.New("login").Parse(loginTmpl))
 }
 
