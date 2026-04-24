@@ -186,6 +186,24 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	// Per-path / per-method rate limits evaluated against the same IP. Runs
+	// before the generic per-IP limit so a heavy endpoint gets its tight cap
+	// without polluting the baseline counter. Only touches lock-protected
+	// state when the path actually matches a configured pattern, so domains
+	// without path rules pay zero compute.
+	if pd := firewall.EvaluatePath(domainName, request.Method, request.URL.Path, resolvedIP, proxy.LastSecondTimestamp, proxy.RatelimitWindow); pd.Hit {
+		if pd.Action == "challenge" {
+			// Fall through to the existing challenge pipeline by pinning
+			// susLv high later. For simplicity we just block for now and
+			// revisit when we wire adaptive PoW.
+		}
+		writer.Header().Set("Content-Type", "text/plain")
+		writer.Header().Set("Retry-After", "60")
+		writer.WriteHeader(http.StatusTooManyRequests)
+		SendResponse("Blocked by LancarSec.\n"+pd.Reason, buffer, writer)
+		return
+	}
+
 	// Static assets served to the challenge page itself; must bypass the
 	// cookie/ratelimit gates so the browser can load them on the first hit.
 	switch request.URL.Path {

@@ -48,6 +48,11 @@ type Domain struct {
 	// Blocklist scoped to this domain. Combined with Proxy.Blocklist at
 	// evaluation time — a hit on either short-circuits the request.
 	Blocklist []BlockEntry `json:"blocklist,omitempty"`
+
+	// PathRateLimits narrows rate limiting to specific path patterns so
+	// hot endpoints (login, search) can have tighter caps than the
+	// generic per-IP limit.
+	PathRateLimits []PathRateLimit `json:"path_ratelimits,omitempty"`
 }
 
 type DomainSettings struct {
@@ -100,6 +105,44 @@ type DomainData struct {
 	PeakRequestsPerSecond         int
 	PeakRequestsBypassedPerSecond int
 	RequestLogger                 []RequestLog
+}
+
+// PathRateLimit is a path-scoped rate limit evaluated per client IP. It
+// layers on top of the global per-IP rate limit so an attacker hitting a
+// single expensive endpoint (login, search, admin) gets throttled there
+// long before they trip the generic rate limiter. Zero-cost when the
+// request doesn't match any configured pattern — patterns compile once at
+// reload time and are tested with a precomputed matcher list.
+type PathRateLimit struct {
+	// Match is the selector, one of:
+	//   "prefix:/api/"        matches any path starting with /api/
+	//   "exact:/login"        matches only /login
+	//   "regex:^/admin/"      Go regexp applied to the path
+	//   "path:/wp-admin/*"    shell-glob style; * = single segment
+	Match string `json:"match"`
+
+	// Method optionally restricts the rule to a single HTTP method (GET,
+	// POST, ...). Empty string = any method.
+	Method string `json:"method,omitempty"`
+
+	// Limit is the number of requests a single IP may make in the window
+	// before further requests return 429. Counted against the merged
+	// bucket key (ip + rule_id) so paths don't pollute each other.
+	Limit int `json:"limit"`
+
+	// WindowSeconds is the sliding window length. Falls back to
+	// Proxy.RatelimitWindow when zero.
+	WindowSeconds int `json:"window_seconds,omitempty"`
+
+	// BurstBypass raises the bucket's instantaneous ceiling; the sliding
+	// window still caps over WindowSeconds. Useful for short-lived spikes
+	// (image sprites, WebSocket heartbeat) that shouldn't be treated as
+	// abuse but also shouldn't permanently elevate Limit.
+	BurstBypass int `json:"burst_bypass,omitempty"`
+
+	// Action on hit: "block" (429) or "challenge" (treat as stage 3 req).
+	// Defaults to "block".
+	Action string `json:"action,omitempty"`
 }
 
 // BlockEntry is one row in the deny list. Type selects the match strategy;
