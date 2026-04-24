@@ -5,6 +5,7 @@ import (
 	"errors"
 	"lancarsec/core/domains"
 	"os"
+	"time"
 )
 
 // appendRule persists a new firewall rule into config.json for the given
@@ -49,6 +50,56 @@ func deleteRuleAt(domain string, index int) error {
 		return writeConfigToDisk(cfg)
 	}
 	return errors.New("domain not found in config")
+}
+
+// appendBlock persists one new block entry into the configured scope:
+// scope=="global" lands on Proxy.Blocklist, otherwise the named domain's
+// Blocklist slice. AddedAt is stamped now.
+func appendBlock(scope string, entry domains.BlockEntry) error {
+	cfg := readConfigFromDisk()
+	if cfg == nil {
+		return errors.New("config missing")
+	}
+	entry.AddedAt = time.Now().Unix()
+	if scope == "global" || scope == AllDomainsSentinel {
+		cfg.Proxy.Blocklist = append(cfg.Proxy.Blocklist, entry)
+		return writeConfigToDisk(cfg)
+	}
+	for i := range cfg.Domains {
+		if cfg.Domains[i].Name == scope {
+			cfg.Domains[i].Blocklist = append(cfg.Domains[i].Blocklist, entry)
+			return writeConfigToDisk(cfg)
+		}
+	}
+	return errors.New("scope not found")
+}
+
+// deleteBlockAt removes a block entry by index at the given scope. Same
+// scope semantics as appendBlock.
+func deleteBlockAt(scope string, index int) error {
+	cfg := readConfigFromDisk()
+	if cfg == nil {
+		return errors.New("config missing")
+	}
+	if scope == "global" || scope == AllDomainsSentinel {
+		if index < 0 || index >= len(cfg.Proxy.Blocklist) {
+			return errors.New("index out of range")
+		}
+		cfg.Proxy.Blocklist = append(cfg.Proxy.Blocklist[:index], cfg.Proxy.Blocklist[index+1:]...)
+		return writeConfigToDisk(cfg)
+	}
+	for i := range cfg.Domains {
+		if cfg.Domains[i].Name != scope {
+			continue
+		}
+		list := cfg.Domains[i].Blocklist
+		if index < 0 || index >= len(list) {
+			return errors.New("index out of range")
+		}
+		cfg.Domains[i].Blocklist = append(list[:index], list[index+1:]...)
+		return writeConfigToDisk(cfg)
+	}
+	return errors.New("scope not found")
 }
 
 // readConfigFromDisk reads config.json into a fresh struct. We don't reuse

@@ -72,6 +72,16 @@ func Apply(mode Mode) {
 		buildDomain(&domains.LoadConfig().Domains[i])
 	}
 
+	// Publish blocklists (global + per-domain) to the firewall package so
+	// the middleware hot path can evaluate lock-free via atomic.Pointer.
+	perDomainBlock := map[string][]domains.BlockEntry{}
+	for _, d := range domains.LoadConfig().Domains {
+		if len(d.Blocklist) > 0 {
+			perDomainBlock[d.Name] = d.Blocklist
+		}
+	}
+	firewall.RebuildBlocklists(domains.LoadConfig().Proxy.Blocklist, perDomainBlock)
+
 	if mode == ModeStartup {
 		registerDebugDomain()
 		if err := VersionCheck(); err != nil {

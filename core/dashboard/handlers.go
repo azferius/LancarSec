@@ -98,10 +98,11 @@ func HandlePage(tab string) http.HandlerFunc {
 		domain := r.URL.Query().Get("domain")
 		list := domainList()
 		if domain == "" {
-			if len(list) > 0 {
-				http.Redirect(w, r, "/_lancarsec/dashboard/"+tab+"?domain="+list[0], http.StatusFound)
-				return
-			}
+			// Default to the global view so the operator lands on the
+			// cross-domain overview rather than being silently pinned to
+			// one configured domain.
+			http.Redirect(w, r, "/_lancarsec/dashboard/"+tab+"?domain="+AllDomainsSentinel, http.StatusFound)
+			return
 		}
 
 		data := pageData(titleFor(tab), tab, domain, user, list)
@@ -118,6 +119,8 @@ func HandlePage(tab string) http.HandlerFunc {
 			t = tmplAnalytics
 		case "settings":
 			t = tmplSettings
+		case "blocklist":
+			t = tmplBlocklist
 		default:
 			http.NotFound(w, r)
 			return
@@ -146,6 +149,8 @@ func titleFor(tab string) string {
 		return "Overview"
 	case "rules":
 		return "Firewall Rules"
+	case "blocklist":
+		return "Blocklist"
 	case "logs":
 		return "Logs"
 	case "analytics":
@@ -168,29 +173,41 @@ func domainList() []string {
 	return out
 }
 
+// domainListWithGlobal is what the sidebar renders — a pseudo-entry for the
+// aggregate view is prepended so the operator can always pick "All domains"
+// from any page. The sentinel travels through the URL as ?domain=__all.
+func domainListWithGlobal() []string {
+	list := domainList()
+	return append([]string{AllDomainsSentinel}, list...)
+}
+
 // ------------- API handlers (JSON) -------------
 
-// statsFor returns the live state snapshot for a domain. Shared by the
-// overview page JSON poll and the SSE stream.
+// statsFor returns the live state snapshot for a domain. When domain is the
+// AllDomainsSentinel, delegates to aggregateStats for the global rollup.
+// Shared by the overview page JSON poll and the SSE stream.
 func statsFor(domain string) map[string]any {
+	if IsGlobal(domain) {
+		return aggregateStats()
+	}
 	firewall.DataMu.RLock()
 	d := domains.DomainsData[domain]
 	firewall.DataMu.RUnlock()
 
 	ctr := domains.CountersFor(domain)
-	// Rate is approximated via the ctr delta vs checkAttack-maintained
-	// RequestsPerSecond. We return both raw and rolling for the UI to choose.
 	return map[string]any{
-		"domain":       domain,
-		"stage":        d.Stage,
-		"stage_locked": d.StageManuallySet,
-		"rps":          d.RequestsPerSecond,
-		"rps_bypassed": d.RequestsBypassedPerSecond,
-		"peak_rps":     d.PeakRequestsPerSecond,
-		"total":        ctr.Total.Load(),
-		"bypassed":     ctr.Bypassed.Load(),
-		"cpu":          proxy.CpuUsage,
-		"ram":          proxy.RamUsage,
+		"domain":        domain,
+		"is_global":     false,
+		"stage":         d.Stage,
+		"stage_locked":  d.StageManuallySet,
+		"rps":           d.RequestsPerSecond,
+		"rps_bypassed":  d.RequestsBypassedPerSecond,
+		"rps_blocked":   d.RequestsPerSecond - d.RequestsBypassedPerSecond,
+		"peak_rps":      d.PeakRequestsPerSecond,
+		"total":         ctr.Total.Load(),
+		"bypassed":      ctr.Bypassed.Load(),
+		"cpu":           proxy.CpuUsage,
+		"ram":           proxy.RamUsage,
 		"bypass_attack": d.BypassAttack,
 		"raw_attack":    d.RawAttack,
 		"logs":          serializeLogs(d.LastLogs),
@@ -371,6 +388,10 @@ func HandleLogsDelete(w http.ResponseWriter, r *http.Request, domain string) {
 func HandleAnalytics(w http.ResponseWriter, r *http.Request, domain string) {
 	if _, ok := IsAuthenticated(r); !ok {
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if IsGlobal(domain) {
+		writeJSON(w, aggregateAnalytics())
 		return
 	}
 	firewall.DataMu.RLock()

@@ -158,6 +158,34 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		request.Body = http.MaxBytesReader(writer, request.Body, 10<<20)
 	}
 
+	// Blocklist check — IPs / CIDRs / UA patterns published atomically by
+	// config.Apply. Evaluated before any ratelimit/challenge logic so a
+	// confirmed bad actor never consumes a window counter or a PoW worker.
+	// ASN field left blank for now; ASN resolution lands with the future
+	// GeoLite2 integration.
+	peerIP := request.RemoteAddr
+	if h, _, err := net.SplitHostPort(peerIP); err == nil {
+		peerIP = h
+	}
+	// Resolve forwarded IP early for blocklist match — but only trust it
+	// from a trusted proxy, per the realClientIP rules.
+	resolvedIP := peerIP
+	if trusted.IsTrusted(peerIP) {
+		if cf := strings.TrimSpace(request.Header.Get("Cf-Connecting-Ip")); cf != "" {
+			resolvedIP = cf
+		}
+	}
+	if decision := firewall.Evaluate(resolvedIP, request.UserAgent(), "", domainName); decision.Hit {
+		writer.Header().Set("Content-Type", "text/plain")
+		writer.WriteHeader(http.StatusForbidden)
+		reason := decision.Entry.Reason
+		if reason == "" {
+			reason = "listed on " + decision.Entry.Type + " blocklist"
+		}
+		SendResponse("Blocked by LancarSec.\n"+reason, buffer, writer)
+		return
+	}
+
 	// Static assets served to the challenge page itself; must bypass the
 	// cookie/ratelimit gates so the browser can load them on the first hit.
 	switch request.URL.Path {

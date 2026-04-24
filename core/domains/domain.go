@@ -44,6 +44,10 @@ type Domain struct {
 	BackendTLSVerify bool `json:"backend_tls_verify"`
 	MaxIdleConns     int  `json:"max_idle_conns"`
 	MaxConnsPerHost  int  `json:"max_conns_per_host"`
+
+	// Blocklist scoped to this domain. Combined with Proxy.Blocklist at
+	// evaluation time — a hit on either short-circuits the request.
+	Blocklist []BlockEntry `json:"blocklist,omitempty"`
 }
 
 type DomainSettings struct {
@@ -98,6 +102,19 @@ type DomainData struct {
 	RequestLogger                 []RequestLog
 }
 
+// BlockEntry is one row in the deny list. Type selects the match strategy;
+// Value is the operand (IP literal, CIDR, UA substring, or regex). Reason
+// is free-form operator-facing text shown in the dashboard and audit log.
+// Expires (unix seconds) is optional — 0 means permanent.
+type BlockEntry struct {
+	Type    string `json:"type"`           // "ip" | "cidr" | "ua_contains" | "ua_regex" | "asn"
+	Value   string `json:"value"`          // "203.0.113.4" | "10.0.0.0/8" | "curl" | "^Wget/" | "13335"
+	Reason  string `json:"reason,omitempty"`
+	Expires int64  `json:"expires,omitempty"`
+	AddedBy string `json:"added_by,omitempty"` // username or "system"
+	AddedAt int64  `json:"added_at,omitempty"`
+}
+
 type Proxy struct {
 	Cloudflare        bool `json:"cloudflare"`
 	CloudflareFullSSL bool `json:"cloudflare_full_ssl"`
@@ -119,6 +136,11 @@ type Proxy struct {
 	RatelimitWindow         int               `json:"ratelimit_time"`
 	Ratelimits              map[string]int    `json:"ratelimits"`
 	Colors                  []string          `json:"colors"`
+
+	// Blocklist is evaluated by middleware before any challenge logic.
+	// Global entries (this slice) apply to every domain; per-domain entries
+	// live on the Domain struct itself.
+	Blocklist []BlockEntry `json:"blocklist,omitempty"`
 }
 
 type TimeoutSettings struct {

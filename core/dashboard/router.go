@@ -40,10 +40,39 @@ func Serve(w http.ResponseWriter, r *http.Request) bool {
 	case p == "/_lancarsec/api/dashboard/reload":
 		HandleReload(w, r)
 		return true
+	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/blocklist/"):
+		return serveBlockAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/blocklist/"))
 	case strings.HasPrefix(p, "/_lancarsec/api/dashboard/domain/"):
 		return serveDomainAPI(w, r, strings.TrimPrefix(p, "/_lancarsec/api/dashboard/domain/"))
 	}
 	return false
+}
+
+// serveBlockAPI dispatches /api/dashboard/blocklist/<scope>[/<index>] where
+// scope is "global" or a domain name. A trailing integer routes DELETE to the
+// indexed entry; absence of the integer routes GET/POST to the collection.
+func serveBlockAPI(w http.ResponseWriter, r *http.Request, rest string) bool {
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return true
+	}
+	scope := parts[0]
+	if len(parts) == 1 {
+		HandleBlocklist(w, r, scope)
+		return true
+	}
+	if r.Method == http.MethodDelete {
+		idx, err := strconv.Atoi(parts[1])
+		if err != nil {
+			http.Error(w, "bad index", http.StatusBadRequest)
+			return true
+		}
+		HandleBlockDelete(w, r, scope, idx)
+		return true
+	}
+	http.NotFound(w, r)
+	return true
 }
 
 // serveDomainAPI handles the /api/dashboard/domain/<name>/<resource> routes.

@@ -1,0 +1,256 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Blocklist</h1>
+        <p>Deny-first rules evaluated before any ratelimit or challenge. {{if eq .Domain "__all"}}Global scope applies to every protected domain.{{else}}Scoped to <strong>{{.Domain}}</strong>.{{end}}</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn primary" id="openAdd">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add entry
+        </button>
+    </div>
+</div>
+
+<section class="grid" style="margin-top:16px;">
+    <div class="card">
+        <div class="stat-label">Total entries <div class="stat-icon danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></div></div>
+        <div class="stat-value" id="st_total">0</div>
+        <div class="stat-trend">currently active</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">IP / CIDR <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h12M6 12h12M6 16h8"/></svg></div></div>
+        <div class="stat-value" id="st_ip">0</div>
+        <div class="stat-trend">address-based blocks</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">User-Agent <div class="stat-icon warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div></div>
+        <div class="stat-value" id="st_ua">0</div>
+        <div class="stat-trend">UA contains / regex</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">ASN <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div></div>
+        <div class="stat-value" id="st_asn">0</div>
+        <div class="stat-trend">autonomous system numbers</div>
+    </div>
+</section>
+
+<div class="card full-card">
+    <div class="card-header">
+        <div><h2>Active entries</h2><p>Hits short-circuit the request with a 403 before ratelimit or challenge evaluation.</p></div>
+        <div class="btn-group" id="typeFilter">
+            <button class="active" data-f="all">All</button>
+            <button data-f="ip">IP</button>
+            <button data-f="cidr">CIDR</button>
+            <button data-f="asn">ASN</button>
+            <button data-f="ua_contains">UA</button>
+            <button data-f="ua_regex">UA regex</button>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th style="width:56px">#</th><th style="width:110px">Type</th><th>Value</th><th>Reason</th><th style="width:130px">Added by</th><th style="width:120px">Expires</th><th style="width:90px"></th></tr></thead>
+            <tbody id="entries"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Add modal -->
+<div class="modal-backdrop" id="addModal" style="display:none">
+    <div class="modal" style="width:min(520px, calc(100% - 32px))">
+        <h3>Add blocklist entry</h3>
+        <p>All entries in this scope are evaluated on every request. Hits respond 403 with the configured reason.</p>
+        <div class="field">
+            <label>Type</label>
+            <div class="btn-group" id="typePicker" style="width:100%">
+                <button data-t="ip" style="flex:1">IP address</button>
+                <button data-t="cidr" style="flex:1" class="active">CIDR</button>
+                <button data-t="asn" style="flex:1">ASN</button>
+                <button data-t="ua_contains" style="flex:1">UA contains</button>
+                <button data-t="ua_regex" style="flex:1">UA regex</button>
+            </div>
+        </div>
+        <div class="field">
+            <label>Value</label>
+            <input id="val" type="text" spellcheck="false" autocomplete="off">
+            <div class="field-hint" id="valHint">CIDR notation — e.g. <code>10.0.0.0/8</code> or <code>2001:db8::/32</code></div>
+        </div>
+        <div class="field">
+            <label>Reason (optional)</label>
+            <input id="reason" type="text" placeholder="Why this entry exists" maxlength="200">
+        </div>
+        <div class="field">
+            <label>Expires (optional)</label>
+            <input id="expires" type="text" placeholder="e.g. 1h, 24h, 7d — blank for permanent">
+        </div>
+        <div class="modal-actions">
+            <button class="btn" id="cancelAdd">Cancel</button>
+            <button class="btn primary" id="saveAdd">Add entry</button>
+        </div>
+    </div>
+</div>
+
+<div id="toastRoot"></div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var SCOPE = {{.Domain}};
+var CURRENT_FILTER = 'all';
+var ENTRIES = [];
+var SELECTED_TYPE = 'cidr';
+
+var typeHints = {
+    ip: 'Single IP — e.g. <code>203.0.113.4</code> or <code>2001:db8::1</code>',
+    cidr: 'CIDR notation — e.g. <code>10.0.0.0/8</code> or <code>2001:db8::/32</code>',
+    asn: 'Numeric ASN — e.g. <code>13335</code> (Cloudflare) or <code>15169</code> (Google)',
+    ua_contains: 'Case-insensitive substring — e.g. <code>curl</code>, <code>python-requests</code>',
+    ua_regex: 'Go regexp syntax — e.g. <code>^Wget/1\\.</code>'
+};
+var typeLabels = {
+    ip: 'IP', cidr: 'CIDR', asn: 'ASN',
+    ua_contains: 'UA', ua_regex: 'UA regex'
+};
+var typeTag = {
+    ip: 'tag-neutral', cidr: 'tag-neutral', asn: 'tag-neutral',
+    ua_contains: 'tag-bot', ua_regex: 'tag-bot'
+};
+
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function fmt(n) { return (n || 0).toLocaleString(); }
+function formatExpiry(expires) {
+    if (!expires) return '<span style="color:var(--text-dim)">never</span>';
+    var diff = expires - Math.floor(Date.now() / 1000);
+    if (diff <= 0) return '<span style="color:var(--danger)">expired</span>';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+    return Math.floor(diff / 86400) + 'd';
+}
+
+function toast(msg, kind) {
+    var root = document.getElementById('toastRoot');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || 'info');
+    el.textContent = msg;
+    root.appendChild(el);
+    setTimeout(function () { el.classList.add('leaving'); setTimeout(function () { el.remove(); }, 200); }, 2800);
+}
+
+function render() {
+    var filtered = CURRENT_FILTER === 'all' ? ENTRIES : ENTRIES.filter(function (e) { return e.type === CURRENT_FILTER; });
+    var tbody = document.getElementById('entries');
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No entries' + (CURRENT_FILTER === 'all' ? '' : ' of type ' + CURRENT_FILTER) + '.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    filtered.forEach(function (e) {
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-searchable', '');
+        tr.innerHTML =
+            '<td>' + (e._idx + 1) + '</td>' +
+            '<td><span class="tag ' + (typeTag[e.type] || 'tag-neutral') + '">' + (typeLabels[e.type] || e.type) + '</span></td>' +
+            '<td style="font-family:var(--mono);max-width:none;white-space:normal;word-break:break-all">' + esc(e.value) + '</td>' +
+            '<td style="max-width:none;white-space:normal;font-family:Inter,sans-serif">' + esc(e.reason || '—') + '</td>' +
+            '<td>' + esc(e.added_by || 'system') + '</td>' +
+            '<td>' + formatExpiry(e.expires) + '</td>' +
+            '<td><button class="btn danger small" data-del="' + e._idx + '">Remove</button></td>';
+        tbody.appendChild(tr);
+    });
+    // Wire delete buttons.
+    tbody.querySelectorAll('[data-del]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var idx = parseInt(btn.getAttribute('data-del'), 10);
+            if (!confirm('Remove entry #' + (idx + 1) + '?')) return;
+            fetch('/_lancarsec/api/dashboard/blocklist/' + encodeURIComponent(SCOPE) + '/' + idx, { method: 'DELETE' })
+                .then(function (r) { if (!r.ok) throw r; toast('Entry removed', 'success'); load(); })
+                .catch(function () { toast('Delete failed', 'error'); });
+        });
+    });
+}
+
+function updateStats() {
+    var counts = { ip: 0, cidr: 0, asn: 0, ua_contains: 0, ua_regex: 0 };
+    ENTRIES.forEach(function (e) { counts[e.type] = (counts[e.type] || 0) + 1; });
+    document.getElementById('st_total').textContent = fmt(ENTRIES.length);
+    document.getElementById('st_ip').textContent = fmt(counts.ip + counts.cidr);
+    document.getElementById('st_ua').textContent = fmt(counts.ua_contains + counts.ua_regex);
+    document.getElementById('st_asn').textContent = fmt(counts.asn);
+}
+
+function load() {
+    fetch('/_lancarsec/api/dashboard/blocklist/' + encodeURIComponent(SCOPE))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            ENTRIES = (d.entries || []).map(function (e, i) { e._idx = i; return e; });
+            updateStats();
+            render();
+        })
+        .catch(function () { toast('Failed to load entries', 'error'); });
+}
+
+document.querySelectorAll('#typeFilter button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#typeFilter button').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        CURRENT_FILTER = btn.getAttribute('data-f');
+        render();
+    });
+});
+
+// Add modal
+document.getElementById('openAdd').addEventListener('click', function () {
+    document.getElementById('addModal').style.display = 'grid';
+    document.getElementById('val').focus();
+});
+document.getElementById('cancelAdd').addEventListener('click', closeModal);
+function closeModal() {
+    document.getElementById('addModal').style.display = 'none';
+    document.getElementById('val').value = '';
+    document.getElementById('reason').value = '';
+    document.getElementById('expires').value = '';
+}
+document.querySelectorAll('#typePicker button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('#typePicker button').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        SELECTED_TYPE = btn.getAttribute('data-t');
+        document.getElementById('valHint').innerHTML = typeHints[SELECTED_TYPE];
+    });
+});
+
+function parseDuration(s) {
+    if (!s) return 0;
+    var m = s.match(/^(\d+)([mhd])$/);
+    if (!m) return 0;
+    var n = parseInt(m[1], 10);
+    var mult = { m: 60, h: 3600, d: 86400 }[m[2]];
+    return Math.floor(Date.now() / 1000) + n * mult;
+}
+document.getElementById('saveAdd').addEventListener('click', function () {
+    var val = document.getElementById('val').value.trim();
+    if (!val) { toast('Value is required', 'error'); return; }
+    var body = {
+        type: SELECTED_TYPE,
+        value: val,
+        reason: document.getElementById('reason').value.trim(),
+        expires: parseDuration(document.getElementById('expires').value.trim())
+    };
+    fetch('/_lancarsec/api/dashboard/blocklist/' + encodeURIComponent(SCOPE), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); toast('Entry added', 'success'); closeModal(); load(); })
+    .catch(function (e) { toast('Add failed: ' + (e.message || e), 'error'); });
+});
+
+// Close modal on backdrop click / Esc
+document.getElementById('addModal').addEventListener('click', function (e) {
+    if (e.target.id === 'addModal') closeModal();
+});
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+
+load();
+</script>
+{{end}}

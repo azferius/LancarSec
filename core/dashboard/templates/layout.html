@@ -27,6 +27,10 @@
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
                 Firewall Rules
             </a>
+            <a class="nav-item {{if eq .Tab "blocklist"}}active{{end}}" href="/_lancarsec/dashboard/blocklist?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                Blocklist
+            </a>
             <a class="nav-item {{if eq .Tab "logs"}}active{{end}}" href="/_lancarsec/dashboard/logs?domain={{.Domain}}">
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                 Logs
@@ -41,8 +45,12 @@
             </a>
         </div>
         <div class="nav-section">
-            <div class="nav-title">Protected Domains</div>
+            <div class="nav-title">Scope</div>
             <div class="domain-group">
+                <a class="domain-item {{if eq "__all" $.Domain}}active{{end}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain=__all">
+                    <span style="font-family:Inter,sans-serif;font-weight:600">All domains</span>
+                    <span class="domain-stage" style="background:var(--accent-soft);color:#93c5fd">GLOBAL</span>
+                </a>
                 {{range .Domains}}<a class="domain-item {{if eq . $.Domain}}active{{end}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain={{.}}"><span>{{.}}</span></a>{{end}}
             </div>
         </div>
