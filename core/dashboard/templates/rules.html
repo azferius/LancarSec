@@ -1,0 +1,98 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Firewall Rules</h1>
+        <p>Custom gofilter expressions for <strong>{{.Domain}}</strong>. Evaluated top to bottom.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn primary" onclick="document.getElementById('addForm').style.display='block'">+ Add rule</button>
+    </div>
+</div>
+
+<div id="addForm" class="card" style="display:none;margin-bottom:20px;">
+    <div class="card-header"><h2>New rule</h2></div>
+    <div style="display:grid;grid-template-columns:1fr 140px;gap:12px;">
+        <div>
+            <label>Expression</label>
+            <textarea id="ruleExpr" placeholder='(http.path eq "/wp-admin" and ip.engine eq "")'></textarea>
+        </div>
+        <div>
+            <label>Action</label>
+            <input id="ruleAction" type="text" placeholder="3 or +1">
+        </div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="btn primary" onclick="addRule()">Save rule</button>
+        <button class="btn" onclick="document.getElementById('addForm').style.display='none'">Cancel</button>
+    </div>
+    <p style="color:var(--text-muted);font-size:12px;margin:12px 0 0;">
+        Action: <code>0</code>=allow, <code>1</code>=cookie, <code>2</code>=JS PoW, <code>3</code>=captcha, <code>4+</code>=block. Prefix with <code>+</code> or <code>-</code> to mutate susLv instead of pinning.
+    </p>
+</div>
+
+<div class="card full-card">
+    <table>
+        <thead><tr><th style="width:60px">#</th><th>Expression</th><th style="width:100px">Action</th><th style="width:80px"></th></tr></thead>
+        <tbody id="rulesBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+    </table>
+</div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var DOMAIN = {{.Domain}};
+
+function loadRules() {
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            var tbody = document.getElementById('rulesBody');
+            if (!data.rules || !data.rules.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty">No custom rules for this domain yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = '';
+            data.rules.forEach(function (r, i) {
+                var tr = document.createElement('tr');
+                tr.setAttribute('data-searchable', '');
+                tr.innerHTML =
+                    '<td>' + (i + 1) + '</td>' +
+                    '<td style="max-width:none;white-space:normal;">' + esc(r.expression) + '</td>' +
+                    '<td><span class="tag ' + actionTag(r.action) + '">' + esc(r.action) + '</span></td>' +
+                    '<td><button class="btn danger" onclick="deleteRule(' + i + ')">Delete</button></td>';
+                tbody.appendChild(tr);
+            });
+        })
+        .catch(function () {
+            document.getElementById('rulesBody').innerHTML = '<tr><td colspan="4" class="empty">Failed to load rules.</td></tr>';
+        });
+}
+function actionTag(a) {
+    if (a === '0') return 'tag-browser';
+    if (a === '1' || a === '2') return 'tag-bot';
+    return 'tag-unknown';
+}
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function addRule() {
+    var expr = document.getElementById('ruleExpr').value.trim();
+    var act = document.getElementById('ruleAction').value.trim();
+    if (!expr || !act) return;
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({expression: expr, action: act})
+    }).then(function () {
+        document.getElementById('ruleExpr').value = '';
+        document.getElementById('ruleAction').value = '';
+        document.getElementById('addForm').style.display = 'none';
+        loadRules();
+    });
+}
+function deleteRule(i) {
+    if (!confirm('Delete rule ' + (i + 1) + '?')) return;
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/rules/' + i, {method: 'DELETE'})
+        .then(loadRules);
+}
+loadRules();
+</script>
+{{end}}

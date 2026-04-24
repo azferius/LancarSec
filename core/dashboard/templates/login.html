@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>Sign in · LancarSec</title>
+    <style>{{.CSS}}
+body { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+.login-card { width: 100%; max-width: 400px; background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 40px 32px; box-shadow: 0 20px 60px -20px rgba(0,0,0,.6); }
+h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; color: var(--text-bright); }
+p.lead { margin: 0 0 28px; font-size: 14px; color: var(--text-muted); }
+.field { margin-bottom: 16px; }
+button.primary { width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white;
+  border: none; border-radius: 8px; font-weight: 500; font-size: 14px; cursor: pointer; margin-top: 12px; font-family: inherit; }
+button.primary:hover { box-shadow: 0 4px 16px rgba(59,130,246,.35); }
+.failure { margin-top: 16px; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); color: #fca5a5;
+  padding: 14px 16px; border-radius: 10px; font-size: 13px; }
+.footer-row { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); }
+.footer-row a { color: var(--text-muted); text-decoration: none; }
+    </style>
+</head>
+<body>
+    <main class="login-card">
+        <div class="brand" style="border:none;padding:0 0 24px;margin:0 0 16px;">
+            <div class="brand-logo">LS</div>
+            <div class="brand-text">
+                <div class="brand-name">LancarSec</div>
+                <div class="brand-sub">Operator Dashboard</div>
+            </div>
+        </div>
+        <h1>Sign in</h1>
+        <p class="lead">Use the operator credentials from <code>dashboard.json</code>.</p>
+        <form method="POST" action="/_lancarsec/login" autocomplete="off">
+            <div class="field">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" placeholder="operator" required autofocus>
+            </div>
+            <div class="field">
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" placeholder="••••••••" required>
+            </div>
+            <button type="submit" class="primary">Sign in</button>
+        </form>
+        {{if .Error}}<div class="failure">✗ {{.Error}}</div>{{end}}
+        <div class="footer-row">
+            <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
+            <span>v1.0</span>
+        </div>
+    </main>
+</body>
+</html>

@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"image/png"
 	"lancarsec/core/api"
+	"lancarsec/core/dashboard"
 	"lancarsec/core/domains"
 	"lancarsec/core/firewall"
 	"lancarsec/core/proxy"
@@ -109,6 +110,21 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	firewall.DataMu.RLock()
 	domainData, domainFound := domains.DomainsData[domainName]
 	firewall.DataMu.RUnlock()
+
+	// Dashboard + auth routes are served regardless of which configured
+	// domain the Host resolves to. They live under /_lancarsec/login,
+	// /_lancarsec/dashboard/*, and /_lancarsec/api/dashboard/*. Handled
+	// before the 404 so the operator can hit the dashboard even on a Host
+	// header that doesn't match any forwarded domain (e.g. the raw origin
+	// IP).
+	if strings.HasPrefix(request.URL.Path, "/_lancarsec/login") ||
+		strings.HasPrefix(request.URL.Path, "/_lancarsec/logout") ||
+		strings.HasPrefix(request.URL.Path, "/_lancarsec/dashboard") ||
+		strings.HasPrefix(request.URL.Path, "/_lancarsec/api/dashboard") {
+		if dashboard.Serve(writer, request) {
+			return
+		}
+	}
 
 	if !domainFound {
 		writer.Header().Set("Content-Type", "text/plain")

@@ -1,0 +1,96 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Analytics</h1>
+        <p>Attack timeline and peak traffic records for <strong>{{.Domain}}</strong>.</p>
+    </div>
+</div>
+
+<section class="grid">
+    <div class="card">
+        <div class="stat-label">Peak r/s (window)</div>
+        <div class="stat-value" id="v_peakRps">0<span class="stat-unit">/s</span></div>
+        <div class="stat-trend">since last cooldown</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Peak bypass r/s</div>
+        <div class="stat-value" id="v_peakFwd">0<span class="stat-unit">/s</span></div>
+        <div class="stat-trend">requests that got through</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Attack samples</div>
+        <div class="stat-value" id="v_samples">0</div>
+        <div class="stat-trend">1 Hz tick resolution</div>
+    </div>
+    <div class="card">
+        <div class="stat-label">Attack state</div>
+        <div class="stat-value" id="v_attack" style="font-size:18px;">—</div>
+        <div class="stat-trend">bypass / raw / idle</div>
+    </div>
+</section>
+
+<section class="grid">
+    <div class="card full-card">
+        <div class="card-header">
+            <div><h2>Attack history</h2><p>RequestLogger — last 600 ticks while under attack. Total, forwarded, CPU.</p></div>
+            <div class="chart-legend">
+                <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Total</span>
+                <span class="legend-item"><span class="legend-dot" style="background:#10b981"></span>Forwarded</span>
+                <span class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>CPU %</span>
+            </div>
+        </div>
+        <div class="chart" style="height:340px;">
+            <svg id="chart2" viewBox="0 0 1200 340" preserveAspectRatio="none">
+                <defs>
+                    <linearGradient id="gAnalytics" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stop-color="#3b82f6" stop-opacity=".28"/>
+                        <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+                    </linearGradient>
+                </defs>
+                <g stroke="rgba(148,163,184,.08)" stroke-width="1">
+                    <line x1="0" y1="85" x2="1200" y2="85"/><line x1="0" y1="170" x2="1200" y2="170"/><line x1="0" y1="255" x2="1200" y2="255"/>
+                </g>
+                <path id="a_fill" fill="url(#gAnalytics)"/>
+                <path id="a_total" fill="none" stroke="#3b82f6" stroke-width="2"/>
+                <path id="a_fwd" fill="none" stroke="#10b981" stroke-width="2"/>
+                <path id="a_cpu" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>
+            </svg>
+        </div>
+    </div>
+</section>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var DOMAIN = {{.Domain}};
+function load() {
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/analytics')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            document.getElementById('v_peakRps').innerHTML = (data.peak_rps || 0).toLocaleString() + '<span class="stat-unit">/s</span>';
+            document.getElementById('v_peakFwd').innerHTML = (data.peak_bypassed || 0).toLocaleString() + '<span class="stat-unit">/s</span>';
+            document.getElementById('v_samples').textContent = (data.samples || []).length.toLocaleString();
+            document.getElementById('v_attack').textContent =
+                data.bypass_attack ? 'BYPASS' : data.raw_attack ? 'RAW' : 'idle';
+
+            var s = data.samples || [];
+            if (!s.length) return;
+            var maxY = Math.max(10, Math.max.apply(null, s.map(function (x) { return x.total; })));
+            function path(key, scale) {
+                return s.map(function (p, i) {
+                    var x = (i / (s.length - 1 || 1)) * 1200;
+                    var y = 340 - ((p[key] || 0) / (scale || maxY)) * 320;
+                    return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
+                }).join(' ');
+            }
+            var totalP = path('total');
+            document.getElementById('a_total').setAttribute('d', totalP);
+            document.getElementById('a_fwd').setAttribute('d', path('allowed'));
+            document.getElementById('a_cpu').setAttribute('d', path('cpu', 100));
+            document.getElementById('a_fill').setAttribute('d', totalP + ' L1200,340 L0,340 Z');
+        });
+}
+load();
+setInterval(load, 5000);
+</script>
+{{end}}

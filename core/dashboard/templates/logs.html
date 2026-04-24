@@ -1,0 +1,72 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Logs</h1>
+        <p>Forwarded requests tail for <strong>{{.Domain}}</strong>. Use the top search to filter.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn" onclick="location.reload()">Refresh</button>
+        <button class="btn danger" onclick="clearLogs()">Clear logs</button>
+    </div>
+</div>
+<div class="last-updated"><span class="dot"></span><span id="logsStatus">Streaming live</span></div>
+
+<div class="card full-card">
+    <table>
+        <thead><tr><th>Time</th><th>IP</th><th>Engine</th><th>Bot</th><th>JA4 / Fingerprint</th><th>Path</th><th>User-Agent</th></tr></thead>
+        <tbody id="logs"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+</div>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+var DOMAIN = {{.Domain}};
+
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function tagClass(e) { if (!e) return 'tag-unknown'; if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser'; return 'tag-bot'; }
+
+function renderLogs(logs) {
+    var tbody = document.getElementById('logs');
+    if (!logs || !logs.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No recent requests.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    logs.slice().reverse().forEach(function (l) {
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-searchable', '');
+        tr.innerHTML =
+            '<td>' + esc(l.time) + '</td>' +
+            '<td class="ip">' + esc(l.ip) + '</td>' +
+            '<td><span class="tag ' + tagClass(l.engine) + '">' + esc(l.engine || 'UNK') + '</span></td>' +
+            '<td>' + esc(l.bot || '—') + '</td>' +
+            '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + esc(l.fingerprint || '—') + '</td>' +
+            '<td>' + esc(l.path) + '</td>' +
+            '<td>' + esc(l.user_agent || '—') + '</td>';
+        tbody.appendChild(tr);
+    });
+}
+function clearLogs() {
+    if (!confirm('Clear all logs for ' + DOMAIN + '?')) return;
+    fetch('/_lancarsec/api/dashboard/domain/' + encodeURIComponent(DOMAIN) + '/logs', {method: 'DELETE'})
+        .then(function () { renderLogs([]); });
+}
+function connectSSE() {
+    var es = new EventSource('/_lancarsec/api/dashboard/stream?domain=' + encodeURIComponent(DOMAIN));
+    es.addEventListener('stats', function (e) {
+        try {
+            var data = JSON.parse(e.data);
+            renderLogs(data.logs || []);
+        } catch (_) {}
+    });
+    es.onerror = function () {
+        document.getElementById('logsStatus').textContent = 'Reconnecting…';
+        es.close();
+        setTimeout(connectSSE, 1500);
+    };
+    es.onopen = function () { document.getElementById('logsStatus').textContent = 'Streaming live'; };
+}
+connectSSE();
+</script>
+{{end}}

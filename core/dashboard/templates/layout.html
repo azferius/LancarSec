@@ -1,0 +1,91 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>{{.Title}} · LancarSec</title>
+    <style>{{.CSS}}</style>
+</head>
+<body>
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-logo">LS</div>
+            <div class="brand-text">
+                <div class="brand-name">LancarSec</div>
+                <div class="brand-sub">L7 Protection</div>
+            </div>
+        </div>
+        <div class="nav-section">
+            <div class="nav-title">Workspace</div>
+            <a class="nav-item {{if eq .Tab "overview"}}active{{end}}" href="/_lancarsec/dashboard/overview?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                Overview
+            </a>
+            <a class="nav-item {{if eq .Tab "rules"}}active{{end}}" href="/_lancarsec/dashboard/rules?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                Firewall Rules
+            </a>
+            <a class="nav-item {{if eq .Tab "logs"}}active{{end}}" href="/_lancarsec/dashboard/logs?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Logs
+            </a>
+            <a class="nav-item {{if eq .Tab "analytics"}}active{{end}}" href="/_lancarsec/dashboard/analytics?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H3v10h6V11zM15 3H9v18h6V3zM21 7h-6v14h6V7z"/></svg>
+                Analytics
+            </a>
+            <a class="nav-item {{if eq .Tab "settings"}}active{{end}}" href="/_lancarsec/dashboard/settings?domain={{.Domain}}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                Settings
+            </a>
+        </div>
+        <div class="nav-section">
+            <div class="nav-title">Protected Domains</div>
+            <div class="domain-group">
+                {{range .Domains}}<a class="domain-item {{if eq . $.Domain}}active{{end}}" href="/_lancarsec/dashboard/{{$.Tab}}?domain={{.}}"><span>{{.}}</span></a>{{end}}
+            </div>
+        </div>
+    </aside>
+    <main>
+        <div class="topbar">
+            <div class="search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" placeholder="Filter on this page…" id="globalSearch">
+                <kbd>⌘K</kbd>
+            </div>
+            <div class="topbar-right">
+                <span class="status-chip"><span class="dot"></span> Operational</span>
+                <form method="POST" action="/_lancarsec/logout" style="margin:0"><button class="logout-link" type="submit">Sign out</button></form>
+                <div class="avatar" title="{{.User}}">{{.UserInitial}}</div>
+            </div>
+        </div>
+        <div class="content">{{template "content" .}}</div>
+        <footer>
+            <span>Security by <a href="https://sec.splay.id" target="_blank" rel="noopener"><strong>LancarSec</strong></a></span>
+            <span>v1.0 · signed in as {{.User}}</span>
+        </footer>
+    </main>
+</div>
+<script>
+document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        var s = document.getElementById('globalSearch');
+        if (s) s.focus();
+    }
+});
+var gs = document.getElementById('globalSearch');
+if (gs) {
+    gs.addEventListener('input', function () {
+        var q = gs.value.toLowerCase();
+        document.querySelectorAll('[data-searchable]').forEach(function (row) {
+            row.style.display = row.textContent.toLowerCase().indexOf(q) >= 0 ? '' : 'none';
+        });
+    });
+}
+</script>
+{{block "pagescript" .}}{{end}}
+</body>
+</html>
+{{end}}

@@ -1,0 +1,96 @@
+{{define "content"}}
+<div class="page-header">
+    <div class="page-title">
+        <h1>Settings</h1>
+        <p>Active proxy configuration. Edit <code>config.json</code> on disk and use <strong>Reload</strong>.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn primary" onclick="reloadConfig()">Reload config</button>
+    </div>
+</div>
+
+<section class="grid">
+    <div class="card half-card">
+        <div class="card-header"><h2>Proxy mode</h2></div>
+        <dl class="kv">
+            <dt>Cloudflare</dt><dd id="s_cf">—</dd>
+            <dt>Full SSL</dt><dd id="s_fullssl">—</dd>
+            <dt>Enforce origin</dt><dd id="s_enforce">—</dd>
+            <dt>Hide version header</dt><dd id="s_hideh">—</dd>
+        </dl>
+    </div>
+    <div class="card half-card">
+        <div class="card-header"><h2>Timeouts</h2></div>
+        <dl class="kv">
+            <dt>Idle</dt><dd id="s_tidle">—</dd>
+            <dt>Read</dt><dd id="s_tread">—</dd>
+            <dt>Write</dt><dd id="s_twrite">—</dd>
+            <dt>Read header</dt><dd id="s_treadh">—</dd>
+        </dl>
+    </div>
+</section>
+
+<section class="grid">
+    <div class="card half-card">
+        <div class="card-header"><h2>Rate limits</h2><p>Per-IP window: <span id="s_window">—</span>s</p></div>
+        <dl class="kv">
+            <dt>Requests</dt><dd id="s_rreq">—</dd>
+            <dt>Unknown fingerprint</dt><dd id="s_runk">—</dd>
+            <dt>Challenge failures</dt><dd id="s_rchal">—</dd>
+            <dt>No requests sent</dt><dd id="s_rnone">—</dd>
+        </dl>
+    </div>
+    <div class="card half-card">
+        <div class="card-header"><h2>Domains registered</h2></div>
+        <table>
+            <thead><tr><th>Name</th><th>Backend</th><th>Scheme</th></tr></thead>
+            <tbody id="s_domains"></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="grid">
+    <div class="card full-card">
+        <div class="card-header"><h2>Raw configuration</h2><p>Sensitive fields (secrets, keys) are redacted before rendering.</p></div>
+        <pre class="code" id="s_raw">Loading…</pre>
+    </div>
+</section>
+{{end}}
+
+{{define "pagescript"}}
+<script>
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s) + ''; return d.innerHTML; }
+function load() {
+    fetch('/_lancarsec/api/dashboard/settings')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            document.getElementById('s_cf').textContent = d.cloudflare;
+            document.getElementById('s_fullssl').textContent = d.cloudflare_full_ssl;
+            document.getElementById('s_enforce').textContent = d.cloudflare_enforce_origin;
+            document.getElementById('s_hideh').textContent = d.hide_version_header;
+            document.getElementById('s_tidle').textContent = d.timeout_idle + 's';
+            document.getElementById('s_tread').textContent = d.timeout_read + 's';
+            document.getElementById('s_twrite').textContent = d.timeout_write + 's';
+            document.getElementById('s_treadh').textContent = d.timeout_readheader + 's';
+            document.getElementById('s_window').textContent = d.ratelimit_window;
+            document.getElementById('s_rreq').textContent = d.rl_requests;
+            document.getElementById('s_runk').textContent = d.rl_unknown_fingerprint;
+            document.getElementById('s_rchal').textContent = d.rl_challenge_failures;
+            document.getElementById('s_rnone').textContent = d.rl_no_requests;
+            document.getElementById('s_raw').textContent = d.raw;
+            var tbody = document.getElementById('s_domains');
+            tbody.innerHTML = '';
+            (d.domains || []).forEach(function (x) {
+                var tr = document.createElement('tr');
+                tr.setAttribute('data-searchable', '');
+                tr.innerHTML = '<td>' + esc(x.name) + '</td><td>' + esc(x.backend) + '</td><td>' + esc(x.scheme) + '</td>';
+                tbody.appendChild(tr);
+            });
+        });
+}
+function reloadConfig() {
+    fetch('/_lancarsec/api/dashboard/reload', {method: 'POST'}).then(function () { location.reload(); });
+}
+load();
+</script>
+{{end}}

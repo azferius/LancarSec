@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"lancarsec/core/config"
+	"lancarsec/core/dashboard"
 	"lancarsec/core/pnc"
 	"lancarsec/core/proxy"
 	"lancarsec/core/server"
@@ -35,6 +36,14 @@ func main() {
 	fmt.Println("Starting Proxy ...")
 	config.Load()
 	fmt.Println("Loaded Config ...")
+
+	// Dashboard credentials bootstrap runs after config load so dashboard.json
+	// ends up in the same working directory as config.json. First run prints
+	// a freshly generated password to the console; subsequent runs silently
+	// reuse the stored hash.
+	if err := dashboard.Bootstrap(); err != nil {
+		log.Fatalf("dashboard bootstrap failed: %v", err)
+	}
 
 	fmt.Println("Initialising ...")
 	go server.Monitor()
