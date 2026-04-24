@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,17 +14,30 @@ import (
 	"lancarsec/core/domains"
 	"lancarsec/core/firewall"
 	"lancarsec/core/proxy"
+	"lancarsec/core/store"
 )
 
 // sessionCookie is the HttpOnly cookie name holding the session token.
 const sessionCookie = "lancarsec_session"
 
 // IsAuthenticated reports whether the request carries a valid session.
-// Used by middleware to gate dashboard/API routes.
+// Returns the username (empty if unauthenticated). For the richer session
+// (role, user_id) callers should use SessionFrom instead.
 func IsAuthenticated(r *http.Request) (string, bool) {
+	s, ok := SessionFrom(r)
+	if !ok {
+		return "", false
+	}
+	return s.Username, true
+}
+
+// SessionFrom returns the full session record so handlers can reason about
+// role / user_id for RBAC decisions. Missing cookie or invalid token yields
+// ok=false; caller should redirect to login.
+func SessionFrom(r *http.Request) (*store.Session, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	return SessionUser(c.Value)
 }
@@ -39,7 +53,7 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 			renderLogin(w, "Malformed login form.")
 			return
 		}
-		ok, user := VerifyCredentials(r.PostForm.Get("username"), r.PostForm.Get("password"))
+		u, ok := VerifyCredentials(r.PostForm.Get("username"), r.PostForm.Get("password"))
 		if !ok {
 			// Fixed delay to blunt login brute-forcing. Bcrypt cost 12 already
 			// costs ~200 ms, but an explicit floor makes it consistent.
@@ -47,7 +61,12 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 			renderLogin(w, "Invalid credentials.")
 			return
 		}
-		token := CreateSession(user)
+		token, err := CreateSessionFor(u.ID, clientIP(r), r.UserAgent())
+		if err != nil {
+			renderLogin(w, "Could not start session. Please try again.")
+			return
+		}
+		store.LogEvent(r.Context(), u.Username, u.ID, "login", "", clientIP(r), nil)
 		http.SetCookie(w, &http.Cookie{
 			Name:     sessionCookie,
 			Value:    token,
@@ -69,6 +88,9 @@ func HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
+	}
+	if s, ok := SessionFrom(r); ok {
+		store.LogEvent(r.Context(), s.Username, s.UserID, "logout", "", clientIP(r), nil)
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		RevokeSession(c.Value)
@@ -474,6 +496,16 @@ func HandleReload(w http.ResponseWriter, r *http.Request) {
 }
 
 // ------------- helpers -------------
+
+// clientIP extracts the remote IP stripped of the port. Used for audit rows
+// and session creation so the operator can see which host signed in from
+// which address. Best-effort — falls back to the raw RemoteAddr.
+func clientIP(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return h
+	}
+	return r.RemoteAddr
+}
 
 // requestIsSecure reports whether the request reached LancarSec over TLS or
 // through a TLS-terminating proxy (Cloudflare) so we can flip the session
