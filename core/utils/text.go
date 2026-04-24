@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"lancarsec/core/domains"
 	"lancarsec/core/firewall"
+	"lancarsec/core/logstore"
 	"lancarsec/core/proxy"
 	"os"
 	"strconv"
@@ -23,6 +24,7 @@ func AddLogs(entry domains.DomainLog, domainName string) {
 	domainData := domains.DomainsData[domainName]
 	domainData.LastLogs = append(domainData.LastLogs, entry)
 	domains.DomainsData[domainName] = domainData
+	_ = logstore.Append(domainName, entry)
 }
 
 func FormatLogs(log domains.DomainLog) string {

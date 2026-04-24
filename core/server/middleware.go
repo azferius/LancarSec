@@ -182,6 +182,44 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	IncrRequest()
 
+	metrics := &responseMetricsWriter{ResponseWriter: writer}
+	writer = metrics
+
+	reqUa := request.UserAgent()
+	logIP := peerHost(request.RemoteAddr)
+	logTLSFP := ""
+	logJA3 := ""
+	logJA4 := ""
+	logJA4R := ""
+	logJA4O := ""
+	logJA4H := ""
+	logBrowser := ""
+	logBot := ""
+	defer func() {
+		entry := domains.DomainLog{
+			Time:      proxy.GetLastSecondFormatted(),
+			IP:        logIP,
+			Country:   strings.ToUpper(request.Header.Get("Cf-Ipcountry")),
+			BrowserFP: logBrowser,
+			BotFP:     logBot,
+			TLSFP:     logTLSFP,
+			JA3:       logJA3,
+			JA4:       logJA4,
+			JA4R:      logJA4R,
+			JA4O:      logJA4O,
+			JA4H:      logJA4H,
+			Useragent: reqUa,
+			Method:    request.Method,
+			Path:      request.RequestURI,
+			Protocol:  requestProtocol(request),
+			Status:    metrics.Status(),
+			Size:      metrics.Bytes(),
+		}
+		firewall.DataMu.Lock()
+		utils.AddLogs(entry, domainName)
+		firewall.DataMu.Unlock()
+	}()
+
 	// Reject CONNECT outright. httputil.ReverseProxy would otherwise tunnel
 	// it, turning LancarSec into an open HTTP proxy for attackers hopping to
 	// arbitrary destinations.
@@ -224,11 +262,61 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			resolvedIP = cf
 		}
 	}
+	// Pre-load TLS fingerprints so the blocklist can match against JA3 / JA4
+	// / JA4_R / JA4_O. In Cloudflare mode JA3 comes from the Cf-Ja3-Hash
+	// header (Enterprise add-on); the legacy hex string is set to a sentinel.
+	earlyTLSFP := ""
+	earlyJA3 := ""
+	earlyJA4 := ""
+	earlyJA4R := ""
+	earlyJA4O := ""
+	if proxy.Cloudflare {
+		earlyTLSFP = "Cloudflare"
+		if h := strings.TrimSpace(request.Header.Get("Cf-Ja3-Hash")); h != "" {
+			earlyJA3 = h
+			earlyJA4 = "cf:" + h
+		}
+	} else {
+		if v, ok := firewall.Connections.Load(request.RemoteAddr); ok {
+			earlyTLSFP = v.(string)
+		}
+		if v, ok := firewall.JA4s.Load(request.RemoteAddr); ok {
+			earlyJA4 = v.(string)
+		}
+		if v, ok := firewall.JA3s.Load(request.RemoteAddr); ok {
+			earlyJA3 = v.(string)
+		}
+		if v, ok := firewall.JA4Rs.Load(request.RemoteAddr); ok {
+			earlyJA4R = v.(string)
+		}
+		if v, ok := firewall.JA4Os.Load(request.RemoteAddr); ok {
+			earlyJA4O = v.(string)
+		}
+	}
+	earlyJA4H := firewall.ComputeJA4H(request)
+	logTLSFP = earlyTLSFP
+	logJA3 = earlyJA3
+	logJA4 = earlyJA4
+	logJA4R = earlyJA4R
+	logJA4O = earlyJA4O
+	logJA4H = earlyJA4H
+
 	// ASN resolution is O(1) when the GeoLite2 DB is loaded; returns empty
 	// when it isn't, which falls through cleanly without polluting the
 	// blocklist result.
 	asn := firewall.ResolveASN(resolvedIP)
-	if decision := firewall.Evaluate(resolvedIP, request.UserAgent(), asn, domainName); decision.Hit {
+	if decision := firewall.Evaluate(firewall.EvalContext{
+		IP:        resolvedIP,
+		UserAgent: request.UserAgent(),
+		ASN:       asn,
+		Domain:    domainName,
+		TLSFP:     earlyTLSFP,
+		JA3:       earlyJA3,
+		JA4:       earlyJA4,
+		JA4R:      earlyJA4R,
+		JA4O:      earlyJA4O,
+		JA4H:      earlyJA4H,
+	}); decision.Hit {
 		IncrBlocklistHit()
 		IncrBlocked()
 		writer.Header().Set("Content-Type", "text/plain")
@@ -306,9 +394,6 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	var ip string
-	var tlsFp string
-	var ja4 string
 	var browser string
 	var botFp string
 
@@ -316,15 +401,25 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	var ipCount int
 	var ipCountCookie int
 
-	ip = realClientIP(request)
+	ip := realClientIP(request)
+	tlsFp := earlyTLSFP
+	ja3 := earlyJA3
+	ja4 := earlyJA4
+	ja4r := earlyJA4R
+	ja4o := earlyJA4O
+	ja4h := earlyJA4H
+	logIP = ip
+	logTLSFP = tlsFp
+	logJA3 = ja3
+	logJA4 = ja4
+	logJA4R = ja4r
+	logJA4O = ja4o
+	logJA4H = ja4h
 
 	if proxy.Cloudflare {
-		tlsFp = "Cloudflare"
-		// If Cloudflare Enterprise is enabled with TLS fingerprinting add-on,
-		// it forwards the client JA3 here. Otherwise the sentinel stays.
-		if ja3 := request.Header.Get("Cf-Ja3-Hash"); ja3 != "" {
-			ja4 = "cf:" + ja3
-		} else {
+		// Sentinel for the JA4 slot when Cf-Ja3-Hash isn't forwarded — keeps
+		// downstream code from treating "" as a legitimate fingerprint.
+		if ja4 == "" {
 			ja4 = "Cloudflare"
 		}
 		browser = "Cloudflare"
@@ -336,13 +431,6 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		ipCountCookie = firewall.SumWindow(firewall.WindowAccessIpsCookie, ip, proxy.RatelimitWindow, nowSecond)
 		firewall.CountersMu.RUnlock()
 	} else {
-		if v, ok := firewall.Connections.Load(request.RemoteAddr); ok {
-			tlsFp = v.(string)
-		}
-		if v, ok := firewall.JA4s.Load(request.RemoteAddr); ok {
-			ja4 = v.(string)
-		}
-
 		firewall.CountersMu.RLock()
 		fpCount = firewall.SumWindow(firewall.WindowUnkFps, tlsFp, proxy.RatelimitWindow, nowSecond)
 		ipCount = firewall.SumWindow(firewall.WindowAccessIps, ip, proxy.RatelimitWindow, nowSecond)
@@ -354,6 +442,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		browser = firewall.LookupKnown(tlsFp)
 		botFp = firewall.LookupBot(tlsFp)
 	}
+	logBrowser = browser
+	logBot = botFp
 
 	// Bounded counter bump. Incr drops the increment if the per-bucket key
 	// count has hit the cap — an attacker flooding with fresh IPs can't
@@ -434,15 +524,17 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	}
 	domainSettings := settingsQuery.(domains.DomainSettings)
 
-	reqUa := request.UserAgent()
-
 	if len(domainSettings.CustomRules) != 0 {
 		requestVariables := gofilter.Message{
 			"ip.src":                net.ParseIP(ip),
 			"ip.engine":             browser,
 			"ip.bot":                botFp,
 			"ip.fingerprint":        tlsFp,
+			"ip.ja3":                ja3,
 			"ip.ja4":                ja4,
+			"ip.ja4_r":              ja4r,
+			"ip.ja4_o":              ja4o,
+			"ip.ja4h":               ja4h,
 			"ip.http_requests":      ipCount,
 			"ip.challenge_requests": ipCountCookie,
 
@@ -637,28 +729,22 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	request.Header.Add("proxy-real-ip", ip)
 	request.Header.Add("proxy-tls-fp", tlsFp)
 	request.Header.Add("proxy-tls-ja4", ja4)
+	if ja3 != "" {
+		request.Header.Add("proxy-tls-ja3", ja3)
+	}
+	if ja4r != "" {
+		request.Header.Add("proxy-tls-ja4-r", ja4r)
+	}
+	if ja4o != "" {
+		request.Header.Add("proxy-tls-ja4-o", ja4o)
+	}
+	if ja4h != "" {
+		request.Header.Add("proxy-http-ja4h", ja4h)
+	}
 	request.Header.Add("proxy-tls-name", browser+botFp)
 	if asn != "" {
 		request.Header.Add("proxy-client-asn", asn)
 	}
 
-	rec := &responseMetricsWriter{ResponseWriter: writer}
-	domainSettings.DomainProxy.ServeHTTP(rec, request)
-
-	firewall.DataMu.Lock()
-	utils.AddLogs(domains.DomainLog{
-		Time:      proxy.GetLastSecondFormatted(),
-		IP:        ip,
-		Country:   strings.ToUpper(request.Header.Get("Cf-Ipcountry")),
-		BrowserFP: browser,
-		BotFP:     botFp,
-		TLSFP:     tlsFp,
-		Useragent: reqUa,
-		Method:    request.Method,
-		Path:      request.RequestURI,
-		Protocol:  requestProtocol(request),
-		Status:    rec.Status(),
-		Size:      rec.Bytes(),
-	}, domainName)
-	firewall.DataMu.Unlock()
+	domainSettings.DomainProxy.ServeHTTP(writer, request)
 }

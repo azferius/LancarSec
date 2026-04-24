@@ -99,11 +99,17 @@ func loadBlockEntries(scope string) []domains.BlockEntry {
 // persisted. Deeper parse-validation happens at blocklist-compile time
 // (in firewall.compile) where a malformed CIDR or regex is simply dropped;
 // surfacing the error here lets the UI show actionable feedback.
+//
+// Fingerprint types (tls_fp, ja3, ja4, ja4_r, ja4_o, ja4h) accept the
+// raw string form as published by threat-intel feeds — no shape check
+// here because format varies per spec and a wrong-format string just
+// won't match any live request.
 func validateBlockEntry(e domains.BlockEntry) error {
 	switch e.Type {
-	case "ip", "cidr", "ua_contains", "ua_regex", "asn":
+	case "ip", "cidr", "ua_contains", "ua_regex", "asn",
+		"tls_fp", "ja3", "ja4", "ja4_r", "ja4_o", "ja4h":
 	default:
-		return errBadField("type must be ip|cidr|ua_contains|ua_regex|asn")
+		return errBadField("type must be ip|cidr|ua_contains|ua_regex|asn|tls_fp|ja3|ja4|ja4_r|ja4_o|ja4h")
 	}
 	if e.Value == "" {
 		return errBadField("value is required")

@@ -2,7 +2,7 @@
 <div class="page-header">
     <div class="page-title">
         <h1>Logs</h1>
-        <p id="pageSub">Forwarded request tail. Use <kbd style="background:rgba(148,163,184,.12);border:1px solid var(--border);padding:1px 5px;border-radius:3px;font-family:var(--mono);font-size:10px">⌘K</kbd> to filter.</p>
+        <p id="pageSub">Durable request history from log.db plus live tail. Use <kbd style="background:rgba(148,163,184,.12);border:1px solid var(--border);padding:1px 5px;border-radius:3px;font-family:var(--mono);font-size:10px">⌘K</kbd> to filter.</p>
     </div>
     <div class="page-actions">
         <button class="btn" id="pauseBtn" title="Pause live stream (P)">
@@ -82,7 +82,7 @@ function tagClass(e, bot) {
     if (/chromium|firefox|safari|edge|tor/i.test(e)) return 'tag-browser';
     return 'tag-bot';
 }
-function rowKey(l) { return (l.domain || '') + '|' + l.time + '|' + l.ip + '|' + l.path; }
+function rowKey(l) { return l.id ? ('db|' + l.id) : ((l.domain || '') + '|' + l.time + '|' + l.ip + '|' + l.path); }
 
 function toast(msg, kind) {
     var root = document.getElementById('toastRoot');
@@ -148,9 +148,9 @@ document.getElementById('clearBtn').addEventListener('click', function () {
 document.getElementById('exportBtn').addEventListener('click', function () {
     var visible = filteredRows();
     if (!visible.length) { toast('No rows to export', 'error'); return; }
-    var header = IS_GLOBAL
-        ? ['domain', 'time', 'ip', 'engine', 'bot', 'fingerprint', 'path', 'user_agent']
-        : ['time', 'ip', 'engine', 'bot', 'fingerprint', 'path', 'user_agent'];
+    var base = ['time', 'ip', 'country', 'method', 'path', 'status', 'size', 'protocol',
+                'engine', 'bot', 'fingerprint', 'ja3', 'ja4', 'ja4_r', 'ja4_o', 'ja4h', 'user_agent'];
+    var header = IS_GLOBAL ? ['domain'].concat(base) : base;
     function quote(v) { v = (v == null ? '' : v) + ''; return '"' + v.replace(/"/g, '""') + '"'; }
     var csv = header.join(',') + '\n' + visible.map(function (r) {
         return header.map(function (k) { return quote(r[k]); }).join(',');
@@ -171,7 +171,7 @@ function filteredRows() {
         if (currentFilter === 'bot' && !(r.bot || /curl|postman|python|requests|aio-http|wget|checkhost/i.test(r.engine || ''))) return false;
         if (currentFilter === 'unknown' && r.engine) return false;
         if (searchQuery) {
-            var hay = [r.domain, r.ip, r.path, r.user_agent, r.fingerprint, r.engine, r.bot].join(' ').toLowerCase();
+            var hay = [r.domain, r.ip, r.country, r.method, r.protocol, r.status, r.path, r.user_agent, r.fingerprint, r.ja3, r.ja4, r.ja4_r, r.ja4_o, r.ja4h, r.engine, r.bot].join(' ').toLowerCase();
             if (hay.indexOf(searchQuery) === -1) return false;
         }
         return true;
@@ -189,15 +189,23 @@ function renderRows() {
     visible.forEach(function (r) {
         var tr = document.createElement('tr');
         tr.setAttribute('data-searchable', '');
-        var fpShort = (r.fingerprint || '').slice(0, 28);
-        if (r.fingerprint && r.fingerprint.length > 28) fpShort += '…';
+        var primary = r.ja4 || r.fingerprint || '';
+        var fpShort = primary.slice(0, 28);
+        if (primary.length > 28) fpShort += '…';
+        var tooltip = [];
+        if (r.ja4) tooltip.push('JA4   ' + r.ja4);
+        if (r.ja4_r) tooltip.push('JA4_R ' + r.ja4_r);
+        if (r.ja4_o) tooltip.push('JA4_O ' + r.ja4_o);
+        if (r.ja3) tooltip.push('JA3   ' + r.ja3);
+        if (r.ja4h) tooltip.push('JA4H  ' + r.ja4h);
+        if (r.fingerprint) tooltip.push('TLS   ' + r.fingerprint);
         var cells = '';
         if (IS_GLOBAL) cells += '<td style="font-family:Inter,sans-serif;color:#93c5fd">' + esc(r.domain || '—') + '</td>';
         cells += '<td>' + esc(r.time) + '</td>' +
             '<td class="ip">' + esc(r.ip) + '</td>' +
             '<td><span class="tag ' + tagClass(r.engine, r.bot) + '">' + esc(r.engine || 'UNK') + '</span></td>' +
             '<td>' + (r.bot ? '<span class="tag tag-bot">' + esc(r.bot) + '</span>' : '—') + '</td>' +
-            '<td title="' + esc(r.fingerprint || '') + '" style="color:var(--text-muted)">' + esc(fpShort || '—') + '</td>' +
+            '<td title="' + esc(tooltip.join('\n')) + '" style="color:var(--text-muted);font-family:var(--mono);font-size:11px">' + esc(fpShort || '—') + '</td>' +
             '<td style="font-family:var(--mono);max-width:none;white-space:normal">' + esc(r.path) + '</td>' +
             '<td title="' + esc(r.user_agent || '') + '">' + esc(r.user_agent || '—') + '</td>';
         tr.innerHTML = cells;
@@ -226,6 +234,14 @@ function ingest(newLogs) {
 
 // =============== SSE ===============
 var lastDomains = [];
+function loadHistory() {
+    var url = '/_lancarsec/api/dashboard/logs/history?domain=' + encodeURIComponent(DOMAIN) + '&limit=' + MAX_ROWS;
+    fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { if (!r.ok) throw new Error('history unavailable'); return r.json(); })
+        .then(function (data) { ingest(data.logs || []); })
+        .catch(function () { toast('Failed to load log.db history', 'error'); });
+}
+
 function connect() {
     if (es) try { es.close(); } catch (_) {}
     es = new EventSource('/_lancarsec/api/dashboard/stream?domain=' + encodeURIComponent(DOMAIN));
@@ -248,6 +264,7 @@ function connect() {
         setTimeout(connect, 2000);
     };
 }
+loadHistory();
 connect();
 </script>
 {{end}}

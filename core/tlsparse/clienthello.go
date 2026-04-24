@@ -20,6 +20,7 @@ type ClientHello struct {
 	SigAlgs         []uint16
 	SupportedVers   []uint16
 	SupportedGroups []uint16
+	SupportedPoints []uint8
 	ALPN            []string
 	SNI             string
 }
@@ -112,6 +113,8 @@ func ParseHandshake(data []byte) (*ClientHello, bool) {
 			parseSNI(extData, hello)
 		case 0x000a: // supported_groups (named_curves)
 			parseUint16List(extData, &hello.SupportedGroups)
+		case 0x000b: // ec_point_formats — needed for JA3
+			parseECPointFormats(extData, hello)
 		case 0x000d: // signature_algorithms
 			parseUint16List(extData, &hello.SigAlgs)
 		case 0x0010: // application_layer_protocol_negotiation
@@ -169,6 +172,20 @@ func parseALPN(extData cryptobyte.String, hello *ClientHello) {
 			return
 		}
 		hello.ALPN = append(hello.ALPN, string(name))
+	}
+}
+
+func parseECPointFormats(extData cryptobyte.String, hello *ClientHello) {
+	var list cryptobyte.String
+	if !extData.ReadUint8LengthPrefixed(&list) {
+		return
+	}
+	for !list.Empty() {
+		var v uint8
+		if !list.ReadUint8(&v) {
+			return
+		}
+		hello.SupportedPoints = append(hello.SupportedPoints, v)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"lancarsec/core/logstore"
 	"lancarsec/core/store"
 )
 
@@ -21,6 +22,9 @@ import (
 // operator out — they get a one-time "use this password" banner.
 func Bootstrap() error {
 	if err := store.Open(); err != nil {
+		return err
+	}
+	if err := logstore.Open(); err != nil {
 		return err
 	}
 	ctx := context.Background()

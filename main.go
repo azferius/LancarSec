@@ -6,6 +6,7 @@ import (
 	"io"
 	"lancarsec/core/config"
 	"lancarsec/core/dashboard"
+	"lancarsec/core/logstore"
 	"lancarsec/core/pnc"
 	"lancarsec/core/proxy"
 	"lancarsec/core/server"
@@ -44,6 +45,7 @@ func main() {
 	if err := dashboard.Bootstrap(); err != nil {
 		log.Fatalf("dashboard bootstrap failed: %v", err)
 	}
+	defer logstore.Close()
 
 	fmt.Println("Initialising ...")
 	go server.Monitor()

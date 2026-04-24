@@ -81,6 +81,11 @@ type DomainLog struct {
 	BrowserFP string
 	BotFP     string
 	TLSFP     string
+	JA3       string
+	JA4       string
+	JA4R      string
+	JA4O      string
+	JA4H      string
 	Useragent string
 	Method    string
 	Path      string
@@ -156,8 +161,12 @@ type PathRateLimit struct {
 // is free-form operator-facing text shown in the dashboard and audit log.
 // Expires (unix seconds) is optional — 0 means permanent.
 type BlockEntry struct {
-	Type    string `json:"type"`  // "ip" | "cidr" | "ua_contains" | "ua_regex" | "asn"
-	Value   string `json:"value"` // "203.0.113.4" | "10.0.0.0/8" | "curl" | "^Wget/" | "13335"
+	// Type selects the match strategy; see firewall.compile for the live
+	// dispatcher. Recognised values:
+	//   "ip" | "cidr" | "asn" | "ua_contains" | "ua_regex"
+	//   "tls_fp" | "ja3" | "ja4" | "ja4_r" | "ja4_o" | "ja4h"
+	Type    string `json:"type"`
+	Value   string `json:"value"`
 	Reason  string `json:"reason,omitempty"`
 	Expires int64  `json:"expires,omitempty"`
 	AddedBy string `json:"added_by,omitempty"` // username or "system"

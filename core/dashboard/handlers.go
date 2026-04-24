@@ -13,6 +13,7 @@ import (
 	"lancarsec/core/config"
 	"lancarsec/core/domains"
 	"lancarsec/core/firewall"
+	"lancarsec/core/logstore"
 	"lancarsec/core/proxy"
 	"lancarsec/core/store"
 )
@@ -307,6 +308,11 @@ func serializeLogs(logs []domains.DomainLog) []map[string]any {
 			"engine":      l.BrowserFP,
 			"bot":         l.BotFP,
 			"fingerprint": l.TLSFP,
+			"ja3":         l.JA3,
+			"ja4":         l.JA4,
+			"ja4_r":       l.JA4R,
+			"ja4_o":       l.JA4O,
+			"ja4h":        l.JA4H,
 			"user_agent":  l.Useragent,
 			"method":      l.Method,
 			"path":        l.Path,
@@ -409,6 +415,53 @@ func HandleStatsJSON(w http.ResponseWriter, r *http.Request, domain string) {
 		return
 	}
 	writeJSON(w, statsFor(domain, allowedDomains))
+}
+
+// HandleRequestLogHistory reads durable request logs from log.db. The live
+// dashboard still streams from memory for low latency, while this endpoint
+// provides post-restart history for analysis/debugging.
+func HandleRequestLogHistory(w http.ResponseWriter, r *http.Request) {
+	s := requireSession(w, r)
+	if s == nil {
+		return
+	}
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		http.Error(w, "missing domain", http.StatusBadRequest)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	filter := logstore.Filter{Limit: limit, Search: search}
+	if IsGlobal(domain) {
+		allowedDomains, err := accessibleDomainsFor(r, s)
+		if err != nil {
+			http.Error(w, "access lookup failed", http.StatusInternalServerError)
+			return
+		}
+		if len(allowedDomains) == 0 {
+			writeJSON(w, map[string]any{"logs": []logstore.RequestLog{}})
+			return
+		}
+		filter.Domains = allowedDomains
+	} else {
+		if !requireView(w, r, s, domain) {
+			return
+		}
+		if !domainExists(domain) {
+			http.NotFound(w, r)
+			return
+		}
+		filter.Domain = domain
+	}
+
+	logs, err := logstore.List(r.Context(), filter)
+	if err != nil {
+		http.Error(w, "log query failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"logs": logs})
 }
 
 // HandleRules GET returns the current rule set for a domain; POST appends a

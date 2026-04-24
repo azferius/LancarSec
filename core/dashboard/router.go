@@ -52,6 +52,9 @@ func Serve(w http.ResponseWriter, r *http.Request) bool {
 	case p == "/_lancarsec/api/dashboard/audit":
 		HandleAudit(w, r)
 		return true
+	case p == "/_lancarsec/api/dashboard/logs/history":
+		HandleRequestLogHistory(w, r)
+		return true
 	case p == "/_lancarsec/api/dashboard/self/password":
 		HandleSelfPassword(w, r)
 		return true

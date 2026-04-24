@@ -111,7 +111,14 @@
         <div class="field">
             <label>Expression</label>
             <textarea id="e_expr" style="min-height:140px" spellcheck="false" placeholder='(http.path matches "^/admin/" and ip.engine eq "") or ip.fingerprint eq "known-bad"'></textarea>
-            <div class="field-hint">Fields: <code>ip.src</code> <code>ip.engine</code> <code>ip.bot</code> <code>ip.fingerprint</code> <code>ip.ja4</code> <code>http.path</code> <code>http.method</code> <code>http.user_agent</code> <code>http.host</code> <code>http.query</code> <code>proxy.stage</code> — ops: <code>eq ne gt lt ge le contains matches</code> · <code>and or not</code>.</div>
+            <div class="field-hint">Fields:
+                <code>ip.src</code> <code>ip.engine</code> <code>ip.bot</code>
+                <code>ip.fingerprint</code> <code>ip.ja3</code> <code>ip.ja4</code> <code>ip.ja4_r</code> <code>ip.ja4_o</code> <code>ip.ja4h</code>
+                <code>ip.http_requests</code> <code>ip.challenge_requests</code>
+                <code>http.path</code> <code>http.method</code> <code>http.user_agent</code> <code>http.host</code> <code>http.query</code> <code>http.cookie</code> <code>http.version</code>
+                <code>proxy.stage</code> <code>proxy.cloudflare</code> <code>proxy.attack</code> <code>proxy.bypass_attack</code> <code>proxy.rps</code>
+                — ops: <code>eq ne gt lt ge le contains matches</code> · <code>and or not</code>.
+            </div>
         </div>
         <div class="field">
             <label>Action</label>

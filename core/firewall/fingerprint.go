@@ -50,12 +50,18 @@ func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	Connections.Store(remoteAddr, legacy)
 
 	// Prefer the raw ClientHello captured by the peek listener (origin mode).
-	// If it's missing, fall back to deriving JA4 from the info that Go hands
-	// us — usable but not byte-match the spec.
+	// If it's missing, fall back to deriving fingerprints from the info that
+	// Go hands us — usable but won't byte-match the FoxIO/Salesforce specs
+	// because Go's tls.ClientHelloInfo hides the raw extension list.
 	if v, ok := ClientHellos.Load(remoteAddr); ok {
-		JA4s.Store(remoteAddr, ComputeJA4Spec(v.(*tlsparse.ClientHello)))
+		raw := v.(*tlsparse.ClientHello)
+		JA4s.Store(remoteAddr, ComputeJA4Spec(raw))
+		JA3s.Store(remoteAddr, ComputeJA3Spec(raw))
+		JA4Rs.Store(remoteAddr, ComputeJA4R(raw))
+		JA4Os.Store(remoteAddr, ComputeJA4O(raw))
 	} else {
 		JA4s.Store(remoteAddr, ComputeJA4Fallback(clientHello))
+		JA3s.Store(remoteAddr, ComputeJA3Fallback(clientHello))
 	}
 
 	return nil, nil
