@@ -36,6 +36,10 @@ func ClearProxyCache() {
 		// Old entries are never useful — the cookie they match has expired.
 		sweepCaptchaCache()
 
+		// Drop expired per-IP difficulty bumps so the map size stays bounded
+		// when an attacker's fleet rotates through IPs.
+		SweepIPDifficulty()
+
 		time.Sleep(2 * time.Minute)
 	}
 }

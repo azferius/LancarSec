@@ -1,0 +1,72 @@
+{
+  "proxy": {
+    "cloudflare": true,
+    "cloudflare_full_ssl": false,
+    "cloudflare_enforce_origin": false,
+    "hide_version_header": false,
+    "maxLogLength": 5,
+    "adminsecret": "d505db59cfb3eeac868b297e0c17b2b1",
+    "apisecret": "4a077e890d0d6a5ebf61b4ced866e280",
+    "secrets": {
+      "captcha": "cfff68ffc5b7e603605e7df253d45ae6",
+      "cookie": "e99533be6ca86c313eae6d62c8c03414",
+      "javascript": "04c23a1b4e952334017e24bcad6b7bd4"
+    },
+    "timeout": {
+      "idle": 5,
+      "read": 5,
+      "write": 7,
+      "read_header": 5
+    },
+    "ratelimits": {
+      "challengeFailures": 40,
+      "noRequestsSent": 10,
+      "requests": 500,
+      "unknownFingerprint": 150
+    },
+    "colors": [
+      "0",
+      "31"
+    ]
+  },
+  "domains": [
+    {
+      "name": "localhost",
+      "backend": "127.0.0.1:9000",
+      "scheme": "http",
+      "certificate": "assets/server/server.crt",
+      "key": "",
+      "webhook": {
+        "url": "",
+        "name": "LancarSec",
+        "avatar": "",
+        "attack_start_msg": "A DDoS attack has been detected against your domain `{{domain.name}}`",
+        "attack_stop_msg": "The DDoS attack against your domain `{{domain.name}}` has stopped"
+      },
+      "firewallRules": [
+        {
+          "expression": "(http.path eq \"/captcha\")",
+          "action": "3"
+        },
+        {
+          "expression": "(http.path eq \"/js\")",
+          "action": "2"
+        },
+        {
+          "expression": "(ip.engine eq \"\" or ((ip.engine eq \"Firefox\" and http.user_agent contains \"chrome\") or (ip.engine eq \"Chromium\" and http.user_agent contains \"firefox\")))",
+          "action": "+1"
+        },
+        {
+          "expression": "(http.method ne \"GET\" and http.method ne \"POST\")",
+          "action": "+2"
+        }
+      ],
+      "bypassStage1": 75,
+      "bypassStage2": 250,
+      "disableBypassStage3": 100,
+      "disableRawStage3": 250,
+      "disableBypassStage2": 50,
+      "disableRawStage2": 75
+    }
+  ]
+}

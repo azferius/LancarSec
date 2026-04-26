@@ -162,11 +162,15 @@ function load() {
             document.getElementById('s_operators').textContent = '—';
 
             var asnEl = document.getElementById('s_asn');
-            asnEl.textContent = d.asn_db_loaded ? 'loaded' : 'not configured';
-            asnEl.className = 'tag ' + (d.asn_db_loaded ? 'tag-browser' : 'tag-neutral');
-            document.getElementById('s_asnHelp').innerHTML = d.asn_db_loaded
-                ? 'Requests are enriched with the client ASN. Blocklist entries of type <code>asn</code> resolve against the loaded database.'
-                : 'To enable ASN blocklisting and the <code>proxy-client-asn</code> header, place a MaxMind GeoLite2-ASN.mmdb file at <code>global/geoip/GeoLite2-ASN.mmdb</code> and reload.';
+            var bothLoaded = d.asn_db_loaded && d.country_db_loaded;
+            var anyLoaded = d.asn_db_loaded || d.country_db_loaded;
+            asnEl.textContent = bothLoaded ? 'ASN + Country' : (d.asn_db_loaded ? 'ASN only' : (d.country_db_loaded ? 'Country only' : 'not configured'));
+            asnEl.className = 'tag ' + (anyLoaded ? 'tag-browser' : 'tag-neutral');
+            document.getElementById('s_asnHelp').innerHTML = bothLoaded
+                ? 'Requests are enriched with both ASN and country. Blocklist entries of type <code>asn</code> and <code>country</code> resolve against the loaded databases.'
+                : (anyLoaded
+                    ? 'Partial GeoIP: ' + (d.asn_db_loaded ? 'ASN' : 'Country') + ' loaded. To enable both, place <code>GeoLite2-ASN.mmdb</code> AND <code>GeoLite2-Country.mmdb</code> in <code>global/geoip/</code> and reload.'
+                    : 'To enable ASN/country blocklisting and the <code>proxy-client-asn</code> / <code>proxy-client-country</code> headers, place MaxMind <code>GeoLite2-ASN.mmdb</code> and <code>GeoLite2-Country.mmdb</code> in <code>global/geoip/</code> and reload.');
 
             var tbody = document.getElementById('s_domains');
             if (!(d.domains || []).length) {

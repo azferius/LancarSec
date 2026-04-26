@@ -103,6 +103,12 @@ func Apply(mode Mode) {
 		fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ Warning: ASN DB load failed: " + err.Error() + " ]")
 	}
 
+	// GeoLite2-Country is the parallel feed for country-based blocklist
+	// rules and the ip.country firewall variable. Same best-effort policy.
+	if err := firewall.LoadCountry(); err != nil {
+		fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ Warning: Country DB load failed: " + err.Error() + " ]")
+	}
+
 	if mode == ModeStartup {
 		registerDebugDomain()
 		if err := VersionCheck(); err != nil {

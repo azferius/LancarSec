@@ -660,6 +660,7 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 		"cloudflare_enforce_origin": cfg.Proxy.CloudflareEnforceOrigin,
 		"hide_version_header":       cfg.Proxy.HideVersionHeader,
 		"asn_db_loaded":             firewall.ASNLoaded(),
+		"country_db_loaded":         firewall.CountryLoaded(),
 		"timeout_idle":              cfg.Proxy.Timeout.Idle,
 		"timeout_read":              cfg.Proxy.Timeout.Read,
 		"timeout_write":             cfg.Proxy.Timeout.Write,

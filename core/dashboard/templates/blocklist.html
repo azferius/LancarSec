@@ -48,6 +48,7 @@
             <button data-f="ip">IP</button>
             <button data-f="cidr">CIDR</button>
             <button data-f="asn">ASN</button>
+            <button data-f="country">Country</button>
             <button data-f="ua_contains">UA</button>
             <button data-f="ua_regex">UA regex</button>
             <button data-f="tls_fp">TLS hex</button>
@@ -77,6 +78,7 @@
                 <button type="button" class="btn" data-t="ip">IP address</button>
                 <button type="button" class="btn active" data-t="cidr">CIDR</button>
                 <button type="button" class="btn" data-t="asn">ASN</button>
+                <button type="button" class="btn" data-t="country">Country</button>
                 <button type="button" class="btn" data-t="ua_contains">UA contains</button>
                 <button type="button" class="btn" data-t="ua_regex">UA regex</button>
                 <button type="button" class="btn" data-t="tls_fp">TLS hex</button>
@@ -121,6 +123,7 @@ var typeHints = {
     ip: 'Single IP — e.g. <code>203.0.113.4</code> or <code>2001:db8::1</code>',
     cidr: 'CIDR notation — e.g. <code>10.0.0.0/8</code> or <code>2001:db8::/32</code>',
     asn: 'Numeric ASN — e.g. <code>13335</code> (Cloudflare) or <code>15169</code> (Google)',
+    country: 'ISO 3166-1 alpha-2 country code — e.g. <code>RU</code>, <code>CN</code>, <code>KP</code>. Source: Cf-Ipcountry header (CF mode) or GeoLite2-Country.mmdb (origin mode).',
     ua_contains: 'Case-insensitive substring — e.g. <code>curl</code>, <code>python-requests</code>',
     ua_regex: 'Go regexp syntax — e.g. <code>^Wget/1\\.</code>',
     tls_fp: 'Legacy LancarSec hex fingerprint — e.g. <code>0xc02b,0xc02f,0xc00a,...</code> Copy from a request row in the logs page.',
@@ -131,13 +134,13 @@ var typeHints = {
     ja4h: 'JA4H HTTP request fingerprint — e.g. <code>ge11nn0500en_d22d05ee75dc_..._...</code>'
 };
 var typeLabels = {
-    ip: 'IP', cidr: 'CIDR', asn: 'ASN',
+    ip: 'IP', cidr: 'CIDR', asn: 'ASN', country: 'Country',
     ua_contains: 'UA', ua_regex: 'UA regex',
     tls_fp: 'TLS hex', ja3: 'JA3', ja4: 'JA4',
     ja4_r: 'JA4_R', ja4_o: 'JA4_O', ja4h: 'JA4H'
 };
 var typeTag = {
-    ip: 'tag-neutral', cidr: 'tag-neutral', asn: 'tag-neutral',
+    ip: 'tag-neutral', cidr: 'tag-neutral', asn: 'tag-neutral', country: 'tag-neutral',
     ua_contains: 'tag-bot', ua_regex: 'tag-bot',
     tls_fp: 'tag-unknown', ja3: 'tag-unknown', ja4: 'tag-unknown',
     ja4_r: 'tag-unknown', ja4_o: 'tag-unknown', ja4h: 'tag-unknown'
@@ -197,12 +200,12 @@ function render() {
 }
 
 function updateStats() {
-    var counts = { ip: 0, cidr: 0, asn: 0, ua_contains: 0, ua_regex: 0, tls_fp: 0, ja3: 0, ja4: 0, ja4_r: 0, ja4_o: 0, ja4h: 0 };
+    var counts = { ip: 0, cidr: 0, asn: 0, country: 0, ua_contains: 0, ua_regex: 0, tls_fp: 0, ja3: 0, ja4: 0, ja4_r: 0, ja4_o: 0, ja4h: 0 };
     ENTRIES.forEach(function (e) { counts[e.type] = (counts[e.type] || 0) + 1; });
     document.getElementById('st_total').textContent = fmt(ENTRIES.length);
     document.getElementById('st_ip').textContent = fmt(counts.ip + counts.cidr);
     document.getElementById('st_ua').textContent = fmt(counts.ua_contains + counts.ua_regex);
-    document.getElementById('st_asn').textContent = fmt(counts.asn);
+    document.getElementById('st_asn').textContent = fmt(counts.asn + counts.country);
     document.getElementById('st_fp').textContent = fmt(counts.tls_fp + counts.ja3 + counts.ja4 + counts.ja4_r + counts.ja4_o + counts.ja4h);
 }
 

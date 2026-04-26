@@ -106,10 +106,10 @@ func loadBlockEntries(scope string) []domains.BlockEntry {
 // won't match any live request.
 func validateBlockEntry(e domains.BlockEntry) error {
 	switch e.Type {
-	case "ip", "cidr", "ua_contains", "ua_regex", "asn",
+	case "ip", "cidr", "ua_contains", "ua_regex", "asn", "country",
 		"tls_fp", "ja3", "ja4", "ja4_r", "ja4_o", "ja4h":
 	default:
-		return errBadField("type must be ip|cidr|ua_contains|ua_regex|asn|tls_fp|ja3|ja4|ja4_r|ja4_o|ja4h")
+		return errBadField("type must be ip|cidr|ua_contains|ua_regex|asn|country|tls_fp|ja3|ja4|ja4_r|ja4_o|ja4h")
 	}
 	if e.Value == "" {
 		return errBadField("value is required")

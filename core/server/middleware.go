@@ -195,11 +195,15 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	logJA4H := ""
 	logBrowser := ""
 	logBot := ""
+	logCountry := strings.ToUpper(strings.TrimSpace(request.Header.Get("Cf-Ipcountry")))
+	if logCountry == "XX" {
+		logCountry = ""
+	}
 	defer func() {
 		entry := domains.DomainLog{
 			Time:      proxy.GetLastSecondFormatted(),
 			IP:        logIP,
-			Country:   strings.ToUpper(request.Header.Get("Cf-Ipcountry")),
+			Country:   logCountry,
 			BrowserFP: logBrowser,
 			BotFP:     logBot,
 			TLSFP:     logTLSFP,
@@ -301,14 +305,23 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	logJA4O = earlyJA4O
 	logJA4H = earlyJA4H
 
-	// ASN resolution is O(1) when the GeoLite2 DB is loaded; returns empty
-	// when it isn't, which falls through cleanly without polluting the
-	// blocklist result.
+	// ASN + country resolution. Both are O(1) when the GeoLite2 DBs are
+	// loaded; both return empty when not, which falls through cleanly.
+	// Country prefers Cloudflare's Cf-Ipcountry header (already trusted
+	// because we're past the trusted-proxy peer check) before falling back
+	// to GeoLite2 lookup so we don't pay a bdb lookup when CF already told
+	// us the answer.
 	asn := firewall.ResolveASN(resolvedIP)
+	country := strings.ToUpper(strings.TrimSpace(request.Header.Get("Cf-Ipcountry")))
+	if country == "" || country == "XX" {
+		country = firewall.ResolveCountry(resolvedIP)
+	}
+	logCountry = country
 	if decision := firewall.Evaluate(firewall.EvalContext{
 		IP:        resolvedIP,
 		UserAgent: request.UserAgent(),
 		ASN:       asn,
+		Country:   country,
 		Domain:    domainName,
 		TLSFP:     earlyTLSFP,
 		JA3:       earlyJA3,
@@ -535,6 +548,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			"ip.ja4_r":              ja4r,
 			"ip.ja4_o":              ja4o,
 			"ip.ja4h":               ja4h,
+			"ip.country":            country,
+			"ip.asn":                asn,
 			"ip.http_requests":      ipCount,
 			"ip.challenge_requests": ipCountCookie,
 
@@ -596,6 +611,12 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if !hasValidChallengeCookie(request, encryptedIP) {
 
 		firewall.Incr(firewall.WindowAccessIpsCookie, nowBucket, ip)
+		// Per-IP escalation: a single client racking up cookie failures gets
+		// its Stage 2 difficulty bumped individually so retry-loop bots pay
+		// more CPU per attempt without affecting legitimate Stage 2 visitors
+		// on the same domain. ipCountCookie was read before the Incr above,
+		// so +1 reflects the count this very request just produced.
+		firewall.BumpIPDifficultyOn(ip, ipCountCookie+1)
 
 		//Respond with verification challenge if client didnt provide correct result/none
 		switch susLv {
@@ -613,8 +634,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		case 2:
 			// Effective difficulty is the configured base, optionally
 			// bumped by the monitor's adaptive logic in response to a
-			// live bypass attack.
-			difficulty := firewall.DifficultyFor(domainName, domainData.Stage2Difficulty)
+			// live bypass attack, AND optionally bumped further per-IP
+			// when this client has a recent history of failing Stage 2.
+			difficulty := firewall.EffectiveDifficulty(domainName, ip, domainData.Stage2Difficulty)
 			publicSalt := encryptedIP[:len(encryptedIP)-difficulty]
 			IncrChallengeJS()
 			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -707,7 +729,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	case "/_lancarsec/fingerprint":
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("IP: "+ip+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
+		body := "IP: " + ip +
+			"\nIP Requests: " + strconv.Itoa(ipCount) +
+			"\nIP Challenge Requests: " + strconv.Itoa(ipCountCookie) +
+			"\nSusLV: " + strconv.Itoa(susLv) +
+			"\nIP Difficulty Bump: +" + strconv.Itoa(firewall.IPDifficultyBumpFor(ip)) +
+			"\nFingerprint (legacy): " + tlsFp +
+			"\nJA3: " + ja3 +
+			"\nJA4: " + ja4 +
+			"\nJA4_R: " + ja4r +
+			"\nJA4_O: " + ja4o +
+			"\nJA4H: " + ja4h +
+			"\nBrowser: " + browser + botFp
+		SendResponse(body, buffer, writer)
 		return
 	case "/_lancarsec/verified":
 		writer.Header().Set("Content-Type", "text/plain")
@@ -744,6 +778,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	request.Header.Add("proxy-tls-name", browser+botFp)
 	if asn != "" {
 		request.Header.Add("proxy-client-asn", asn)
+	}
+	if country != "" {
+		request.Header.Add("proxy-client-country", country)
 	}
 
 	domainSettings.DomainProxy.ServeHTTP(writer, request)

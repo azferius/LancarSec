@@ -26,6 +26,14 @@ var (
 	AccessIpsCookie       = map[string]int{}
 	WindowAccessIpsCookie = map[int]map[string]int{}
 
+	// WindowPathLimits is the dedicated window for path-scoped rate limits.
+	// Keys are composite (ip + "|" + rule_id) so different rules stay
+	// separate. Kept off WindowAccessIps so the global per-IP 200k bucket
+	// cap doesn't get consumed by per-path bookkeeping — under heavy
+	// path-rule coverage with IP rotation that pollution would silently
+	// drop legitimate IPs from the global ratelimit view.
+	WindowPathLimits = map[int]map[string]int{}
+
 	// Encryption/captcha caches — sync.Map was already the right structure;
 	// each key is written once and read many times before eviction.
 	CacheIps  = sync.Map{}

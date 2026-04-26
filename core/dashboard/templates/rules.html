@@ -114,6 +114,7 @@
             <div class="field-hint">Fields:
                 <code>ip.src</code> <code>ip.engine</code> <code>ip.bot</code>
                 <code>ip.fingerprint</code> <code>ip.ja3</code> <code>ip.ja4</code> <code>ip.ja4_r</code> <code>ip.ja4_o</code> <code>ip.ja4h</code>
+                <code>ip.country</code> <code>ip.asn</code>
                 <code>ip.http_requests</code> <code>ip.challenge_requests</code>
                 <code>http.path</code> <code>http.method</code> <code>http.user_agent</code> <code>http.host</code> <code>http.query</code> <code>http.cookie</code> <code>http.version</code>
                 <code>proxy.stage</code> <code>proxy.cloudflare</code> <code>proxy.attack</code> <code>proxy.bypass_attack</code> <code>proxy.rps</code>
@@ -144,9 +145,16 @@ var FIELDS = [
     { id: 'ip.src', label: 'Client IP', kind: 'ip', ops: ['eq', 'ne'] },
     { id: 'ip.engine', label: 'Browser engine', kind: 'string', ops: ['eq', 'ne', 'contains'] },
     { id: 'ip.bot', label: 'Bot identifier', kind: 'string', ops: ['eq', 'ne', 'contains'] },
-    { id: 'ip.fingerprint', label: 'TLS fingerprint', kind: 'string', ops: ['eq', 'ne', 'contains'] },
-    { id: 'ip.ja4', label: 'JA4 hash', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.fingerprint', label: 'TLS legacy hex', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja3', label: 'JA3 (MD5)', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja4', label: 'JA4', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja4_r', label: 'JA4_R (raw)', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja4_o', label: 'JA4_O (orig order)', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.ja4h', label: 'JA4H (HTTP)', kind: 'string', ops: ['eq', 'ne', 'contains'] },
+    { id: 'ip.country', label: 'Country (ISO-2)', kind: 'string', ops: ['eq', 'ne'] },
+    { id: 'ip.asn', label: 'ASN number', kind: 'string', ops: ['eq', 'ne'] },
     { id: 'ip.http_requests', label: 'HTTP req (2m)', kind: 'int', ops: ['eq', 'ne', 'gt', 'lt', 'ge', 'le'] },
+    { id: 'ip.challenge_requests', label: 'Challenge fails (2m)', kind: 'int', ops: ['eq', 'ne', 'gt', 'lt', 'ge', 'le'] },
     { id: 'http.host', label: 'Host header', kind: 'string', ops: ['eq', 'ne', 'contains'] },
     { id: 'http.method', label: 'HTTP method', kind: 'string', ops: ['eq', 'ne'] },
     { id: 'http.path', label: 'Request path', kind: 'string', ops: ['eq', 'ne', 'contains', 'matches'] },

@@ -605,6 +605,7 @@ function matchesLog(l) {
     if (textFilter) {
         var hay = [
             l.domain, l.time, l.ip, l.country, l.engine, l.bot, l.fingerprint,
+            l.ja3, l.ja4, l.ja4_r, l.ja4_o, l.ja4h,
             l.user_agent, l.method, l.path, l.protocol, l.status, l.size
         ].join(' ').toLowerCase();
         if (hay.indexOf(textFilter.toLowerCase()) === -1) return false;
@@ -675,6 +676,12 @@ function exportLogs() {
         ['path', 'Path', function (r) { return r.path || '/'; }],
         ['status', 'Status', function (r) { return r.status || ''; }],
         ['size', 'Size', function (r) { return r.size || 0; }],
+        ['fingerprint', 'TLS hex', function (r) { return r.fingerprint || ''; }],
+        ['ja3', 'JA3', function (r) { return r.ja3 || ''; }],
+        ['ja4', 'JA4', function (r) { return r.ja4 || ''; }],
+        ['ja4_r', 'JA4_R', function (r) { return r.ja4_r || ''; }],
+        ['ja4_o', 'JA4_O', function (r) { return r.ja4_o || ''; }],
+        ['ja4h', 'JA4H', function (r) { return r.ja4h || ''; }],
         ['ua', 'User-Agent', function (r) { return r.user_agent || ''; }]
     ].filter(function (c) { return c[0] !== 'domain' || IS_GLOBAL; });
     function csvCell(v) {

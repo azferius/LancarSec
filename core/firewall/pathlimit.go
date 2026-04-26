@@ -172,13 +172,15 @@ func EvaluatePath(domain, method, path, ip string, now int, windowDefault int) P
 		}
 		key := ip + "|" + rule.ruleID
 		// Read current count first (hot path: most requests will not hit
-		// the cap and the increment will happen regardless).
+		// the cap and the increment will happen regardless). Uses the
+		// dedicated WindowPathLimits so per-path composite keys don't
+		// consume slots in WindowAccessIps' 200k bucket cap.
 		CountersMu.RLock()
-		current := SumWindow(WindowAccessIps, key, window, now)
+		current := SumWindow(WindowPathLimits, key, window, now)
 		CountersMu.RUnlock()
 		// Bump the bucket. Even over-cap requests get counted so the
 		// window stays honest.
-		Incr(WindowAccessIps, now-(now%10), key)
+		Incr(WindowPathLimits, now-(now%10), key)
 
 		if current+1 > rule.limit+rule.burstBypass {
 			return PathLimitDecision{

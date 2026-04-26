@@ -1,7 +1,9 @@
 package firewall
 
 import (
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Adaptive PoW difficulty — the Stage 2 JavaScript proof-of-work scales
@@ -101,4 +103,119 @@ func AdaptDifficulty(domain string, base int, bypassing bool, bypassRPS, bypassS
 		target = MaxDifficulty
 	}
 	return target
+}
+
+// Per-IP escalation. When a single IP keeps failing the Stage 2 cookie
+// challenge we want to raise THAT IP's effective difficulty without
+// punishing every other Stage 2 visitor on the same domain. The bump is
+// additive on top of DifficultyFor's per-domain adaptive value, capped at
+// MaxDifficulty, and decays after a short TTL when the IP stops failing.
+//
+// This complements AdaptDifficulty (which reacts to aggregate traffic):
+// AdaptDifficulty raises the floor for everybody during a heavy bypass
+// attack, while the per-IP bump surgically punishes the IPs actually
+// driving that bypass volume.
+
+const (
+	// IPBumpThreshold is the number of cookie-failures within the rate
+	// window that triggers a +1 bump for the offending IP.
+	IPBumpThreshold = 8
+
+	// IPBumpHeavyThreshold triggers the maximum +IPBumpMaxStack bump
+	// (~16^stack× cost vs base). Crossed by sustained bot retry loops.
+	IPBumpHeavyThreshold = 25
+
+	// IPBumpMaxStack caps how many extra levels one IP can stack on top
+	// of the per-domain difficulty. Three levels = 4096× extra work for
+	// the attacker; legitimate humans who fail once or twice never hit it.
+	IPBumpMaxStack = 3
+
+	// IPBumpTTL is how long a bump stays active without further failures.
+	// Decay happens via the periodic ClearProxyCache sweep.
+	IPBumpTTL = 5 * time.Minute
+)
+
+type ipBump struct {
+	level     int
+	expiresAt time.Time
+}
+
+// ipDifficultyBumps maps a client IP to its current bump record. sync.Map
+// fits because an attacking IP writes once per failed challenge but reads
+// once per Stage 2 render — write-rare, read-often. Cardinality is bounded
+// by the attacking-IP fleet minus natural decay, well under any sane limit
+// in practice.
+var ipDifficultyBumps sync.Map
+
+// BumpIPDifficultyOn observes a cookie-failure event and updates the bump
+// for the given IP. count is the post-increment failure count read off the
+// sliding window. Returns the bump level now active for the IP (0/1/2/3).
+// Idempotent within the TTL: repeated failures refresh the expiry rather
+// than linearly stacking.
+func BumpIPDifficultyOn(ip string, count int) int {
+	if ip == "" {
+		return 0
+	}
+	var level int
+	switch {
+	case count >= IPBumpHeavyThreshold:
+		level = IPBumpMaxStack
+	case count >= IPBumpThreshold:
+		level = 1
+	default:
+		return 0
+	}
+	ipDifficultyBumps.Store(ip, ipBump{
+		level:     level,
+		expiresAt: time.Now().Add(IPBumpTTL),
+	})
+	return level
+}
+
+// IPDifficultyBumpFor returns the active per-IP bump level. 0 means no
+// bump or the previous bump has expired. Called on every Stage 2 render
+// so the lookup is a single sync.Map read plus a deadline compare.
+func IPDifficultyBumpFor(ip string) int {
+	if ip == "" {
+		return 0
+	}
+	v, ok := ipDifficultyBumps.Load(ip)
+	if !ok {
+		return 0
+	}
+	b := v.(ipBump)
+	if time.Now().After(b.expiresAt) {
+		ipDifficultyBumps.Delete(ip)
+		return 0
+	}
+	return b.level
+}
+
+// SweepIPDifficulty drops expired bumps. Bound the map size under sustained
+// IP rotation. Called from ClearProxyCache on its 2-min ticker.
+func SweepIPDifficulty() {
+	now := time.Now()
+	ipDifficultyBumps.Range(func(k, v any) bool {
+		if v.(ipBump).expiresAt.Before(now) {
+			ipDifficultyBumps.Delete(k)
+		}
+		return true
+	})
+}
+
+// EffectiveDifficulty composes the per-domain adaptive difficulty with the
+// per-IP bump for one specific request. Use at challenge render time so a
+// repeatedly-failing IP earns a harder Stage 2 puzzle than the rest of the
+// domain's traffic. Cap at MaxDifficulty so the JS PoW remains solvable
+// for real browsers no matter how many bumps stack.
+func EffectiveDifficulty(domain, ip string, base int) int {
+	d := DifficultyFor(domain, base)
+	bump := IPDifficultyBumpFor(ip)
+	if bump <= 0 {
+		return d
+	}
+	if d+bump > MaxDifficulty {
+		return MaxDifficulty
+	}
+	return d + bump
 }

@@ -94,9 +94,12 @@ func ComputeJA4H(r *http.Request) string {
 	return a + "_" + b + "_" + c + "_" + d
 }
 
-// primaryLang returns the first 4 characters of the highest-priority
-// Accept-Language tag, lowercased, padded with '0' if shorter. Per JA4H
-// spec, an absent or empty header yields "0000".
+// primaryLang returns a 4-char code for the highest-priority Accept-Language
+// tag, lowercased and stripped of non-alphanumeric characters, padded with
+// '0' when shorter. Follows the FoxIO Python reference so JA4H hashes match
+// external calculators: the cleanup strips dashes, underscores, and any
+// other non-alnum bytes before truncating to 4 chars. Absent or empty
+// Accept-Language yields "0000".
 func primaryLang(header string) string {
 	if header == "" {
 		return "0000"
@@ -109,12 +112,23 @@ func primaryLang(header string) string {
 		first = first[:i]
 	}
 	first = strings.ToLower(strings.TrimSpace(first))
-	first = strings.ReplaceAll(first, "-", "")
 	if first == "" {
 		return "0000"
 	}
-	if len(first) >= 4 {
-		return first[:4]
+	var b strings.Builder
+	b.Grow(len(first))
+	for i := 0; i < len(first); i++ {
+		c := first[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteByte(c)
+		}
 	}
-	return first + strings.Repeat("0", 4-len(first))
+	cleaned := b.String()
+	if cleaned == "" {
+		return "0000"
+	}
+	if len(cleaned) >= 4 {
+		return cleaned[:4]
+	}
+	return cleaned + strings.Repeat("0", 4-len(cleaned))
 }

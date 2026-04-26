@@ -27,6 +27,7 @@ type compiledBlocklist struct {
 	ips     map[string]domains.BlockEntry // exact IP (v4 or v6)
 	cidrs   []cidrRow
 	asnSet  map[string]domains.BlockEntry // ASN number as string
+	country map[string]domains.BlockEntry // ISO 3166-1 alpha-2 (uppercase)
 	uaSubs  []uaSub
 	uaRegex []uaRegex
 	// TLS / HTTP fingerprint deny sets. Exact-match maps for O(1) lookup;
@@ -77,14 +78,15 @@ func RebuildBlocklists(globalEntries []domains.BlockEntry, perDomain map[string]
 func compile(entries []domains.BlockEntry) *compiledBlocklist {
 	now := time.Now().Unix()
 	cb := &compiledBlocklist{
-		ips:    map[string]domains.BlockEntry{},
-		asnSet: map[string]domains.BlockEntry{},
-		tlsFP:  map[string]domains.BlockEntry{},
-		ja3:    map[string]domains.BlockEntry{},
-		ja4:    map[string]domains.BlockEntry{},
-		ja4r:   map[string]domains.BlockEntry{},
-		ja4o:   map[string]domains.BlockEntry{},
-		ja4h:   map[string]domains.BlockEntry{},
+		ips:     map[string]domains.BlockEntry{},
+		asnSet:  map[string]domains.BlockEntry{},
+		country: map[string]domains.BlockEntry{},
+		tlsFP:   map[string]domains.BlockEntry{},
+		ja3:     map[string]domains.BlockEntry{},
+		ja4:     map[string]domains.BlockEntry{},
+		ja4r:    map[string]domains.BlockEntry{},
+		ja4o:    map[string]domains.BlockEntry{},
+		ja4h:    map[string]domains.BlockEntry{},
 	}
 	for _, e := range entries {
 		if e.Expires > 0 && e.Expires < now {
@@ -109,6 +111,12 @@ func compile(entries []domains.BlockEntry) *compiledBlocklist {
 				continue
 			}
 			cb.asnSet[v] = e
+		case "country":
+			v := strings.ToUpper(strings.TrimSpace(e.Value))
+			if v == "" {
+				continue
+			}
+			cb.country[v] = e
 		case "ua_contains":
 			needle := strings.ToLower(strings.TrimSpace(e.Value))
 			if needle == "" {
@@ -170,6 +178,7 @@ type EvalContext struct {
 	IP        string
 	UserAgent string
 	ASN       string
+	Country   string // ISO 3166-1 alpha-2, uppercase. CF mode honors Cf-Ipcountry; origin mode resolves via GeoLite2.
 	Domain    string
 
 	TLSFP string // legacy hex-list fingerprint
@@ -213,6 +222,11 @@ func evaluateOne(cb *compiledBlocklist, ctx EvalContext) BlockDecision {
 	}
 	if ctx.ASN != "" {
 		if e, ok := cb.asnSet[ctx.ASN]; ok {
+			return BlockDecision{Hit: true, Entry: e}
+		}
+	}
+	if ctx.Country != "" {
+		if e, ok := cb.country[ctx.Country]; ok {
 			return BlockDecision{Hit: true, Entry: e}
 		}
 	}

@@ -79,11 +79,18 @@ func EvaluateRatelimit() {
 			if WindowUnkFps[i] == nil {
 				WindowUnkFps[i] = map[string]int{}
 			}
+			if WindowPathLimits[i] == nil {
+				WindowPathLimits[i] = map[string]int{}
+			}
 		}
 
 		AccessIps = rebuildCounter(WindowAccessIps)
 		AccessIpsCookie = rebuildCounter(WindowAccessIpsCookie)
 		UnkFps = rebuildCounter(WindowUnkFps)
+		// WindowPathLimits has no rebuilt-summary map exposed to middleware —
+		// path evaluation reads SumWindow directly per rule. We still call
+		// rebuildCounter so the expiry sweep runs on it.
+		_ = rebuildCounter(WindowPathLimits)
 		CountersMu.Unlock()
 
 		proxy.SetInitialised(true)
