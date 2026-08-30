@@ -13,6 +13,6 @@ type API_REQUEST struct {
 }
 
 type API_RESPONSE struct {
-	Success  bool                   `json:"success"`
-	Response map[string]interface{} `json:"results"`
+	Success  bool           `json:"success"`
+	Response map[string]any `json:"results"`
 }

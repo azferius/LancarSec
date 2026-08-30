@@ -264,7 +264,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 				blacklist := make(map[[2]int]bool) // We use this to keep track of already overwritten pixels.
 				// it's slightly more performant to not do this but can lead to unsolvable captchas
 
-				for i := 0; i < numTriangles; i++ {
+				for range numTriangles {
 					size := rand.Intn(5) + 10
 					x := rand.Intn(captchaImg.Bounds().Dx() - size)
 					y := rand.Intn(captchaImg.Bounds().Dy() - size)

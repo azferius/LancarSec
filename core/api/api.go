@@ -20,7 +20,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 
 	reqBody, err := io.ReadAll(request.Body)
 	if err != nil {
-		APIResponse(writer, false, map[string]interface{}{
+		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_BODY_READ_FAILED,
 		})
 	}
@@ -30,7 +30,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 	var apiRequest API_REQUEST
 	err = json.Unmarshal(reqBody, &apiRequest)
 	if err != nil {
-		APIResponse(writer, false, map[string]interface{}{
+		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_JSON_READ_FAILED,
 		})
 		return true
@@ -43,7 +43,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 
 	uncastedDomainSettings, ok := domains.DomainsMap.Load(apiRequest.Domain)
 	if !ok {
-		APIResponse(writer, false, map[string]interface{}{
+		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_DOMAIN_NOT_FOUND,
 		})
 		return true
@@ -57,16 +57,16 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 func handleProxyActions(action string, writer http.ResponseWriter) {
 	switch action {
 	case "GET_PROXY_STATS":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"CPU_USAGE": proxy.CpuUsage,
 			"RAM_USAGE": proxy.RamUsage,
 		})
 	case "GET_PROXY_STATS_CPU_USAGE":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"CPU_USAGE": proxy.CpuUsage,
 		})
 	case "GET_PROXY_STATS_RAM_USAGE":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"RAM_USAGE": proxy.RamUsage,
 		})
 	case "GET_IP_REQUESTS":
@@ -75,7 +75,7 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 		ipsCookie := firewall.AccessIpsCookie
 		firewall.Mutex.RUnlock()
 
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"TOTAL_IP_REQUESTS":     ipsAll,
 			"CHALLENGE_IP_REQUESTS": ipsCookie,
 		})
@@ -85,33 +85,33 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 		ipsFps := firewall.UnkFps
 		firewall.Mutex.RUnlock()
 
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"TOTAL_FINGERPRINT_REQUESTS": ipsFps,
 		})
 	case "GET_IP_CACHE":
-		cacheIps := make(map[string]interface{})
+		cacheIps := make(map[string]any)
 		firewall.CacheIps.Range(func(key, value any) bool {
 			cacheIps[fmt.Sprint(key)] = value
 			return true
 		})
 
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"IP_CACHE": cacheIps,
 		})
 	// Useful to fill up your ipCache and see how your proxy performs with high memory usage
 	case "FILL_IP_CACHE":
 		firewall.Mutex.Lock()
-		for i := 0; i < 19980; i++ {
+		for range 19980 {
 			firewall.CacheIps.Store(utils.RandomString(24), utils.RandomString(64))
 		}
 		firewall.Mutex.Unlock()
 
-		APIResponse(writer, true, map[string]interface{}{})
+		APIResponse(writer, true, map[string]any{})
 	case "RELOAD":
 		firewall.Mutex.Lock()
 		firewall.Mutex.Unlock()
 	default:
-		APIResponse(writer, false, map[string]interface{}{
+		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_ACTION_NOT_FOUND,
 		})
 	}
@@ -120,31 +120,31 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 func handleDomainActions(action string, writer http.ResponseWriter, domainData *domains.DomainData, domainSettings *domains.DomainSettings) {
 	switch action {
 	case "GET_TOTAL_REQUESTS":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"TOTAL_REQUESTS": domainData.TotalRequests,
 		})
 	case "GET_BYPASSED_REQUESTS":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"BYPASSED_REQUESTS": domainData.BypassedRequests,
 		})
 	case "GET_TOTAL_REQUESTS_PER_SECOND":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"TOTAL_REQUESTS_REQUESTS_PER_SECOND": domainData.RequestsPerSecond,
 		})
 	case "GET_BYPASSED_REQUESTS_PER_SECOND":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"BYPASSED_REQUESTS_REQUESTS_PER_SECOND": domainData.RequestsBypassedPerSecond,
 		})
 	case "GET_FIREWALL_RULES":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"FIREWALL_RULES": domainSettings.RawCustomRules,
 		})
 	case "GET_LOGS":
-		APIResponse(writer, true, map[string]interface{}{
+		APIResponse(writer, true, map[string]any{
 			"LOGS": domainData.LastLogs,
 		})
 	default:
-		APIResponse(writer, false, map[string]interface{}{
+		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_ACTION_NOT_FOUND,
 		})
 	}
@@ -175,7 +175,7 @@ func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 
 		uncastedDomainSettingsdomain, ok := domains.DomainsMap.Load(parts[0])
 		if !ok {
-			APIResponse(w, false, map[string]interface{}{
+			APIResponse(w, false, map[string]any{
 				"ERROR": ERR_DOMAIN_NOT_FOUND,
 			})
 			return true
@@ -191,7 +191,7 @@ func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 	}
 }
 
-func APIResponse(writer http.ResponseWriter, success bool, response map[string]interface{}) error {
+func APIResponse(writer http.ResponseWriter, success bool, response map[string]any) error {
 
 	writer.Header().Set("Content-Type", "application/json")
 

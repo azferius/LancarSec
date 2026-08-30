@@ -139,3 +139,10 @@ The parser itself is table-driven goyacc, **not** recursive descent, so deeply
 nested input cannot blow the goroutine stack: 200 000 nested parentheses parse in
 16 ms using 19 MB, growing linearly. `filterMaxDepth` is 200 but the generated
 code grows the stack past it rather than erroring.
+
+## Do not run modernize or gofmt sweeps over this directory
+
+`modernize -fix ./...` rewrites this package (56 lines in `nodes.go` alone) and
+destroys the provenance the fidelity check above depends on. Exclude
+`core/gofilter/` from any repo-wide automated rewrite, and re-run the per-file
+diff against `$GOMODCACHE` if you suspect one has run.

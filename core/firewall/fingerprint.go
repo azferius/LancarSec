@@ -3,6 +3,7 @@ package firewall
 import (
 	"crypto/tls"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -59,28 +60,28 @@ func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 
 	remoteAddr := clientHello.Conn.RemoteAddr().String()
 
-	fingerprint := ""
+	var fingerprint strings.Builder
 
 	//Loop over clientHello parameters and ignore first elements of arrays since they may be randomised by certain browsers
 
 	for _, suite := range clientHello.CipherSuites[1:] {
-		fingerprint += fmt.Sprintf("0x%x,", suite)
+		fingerprint.WriteString(fmt.Sprintf("0x%x,", suite))
 	}
 
 	if len(clientHello.SupportedCurves) > 0 {
 		for _, curve := range clientHello.SupportedCurves[1:] {
-			fingerprint += fmt.Sprintf("0x%x,", curve)
+			fingerprint.WriteString(fmt.Sprintf("0x%x,", curve))
 		}
 	}
 	if len(clientHello.SupportedPoints) > 0 {
 		for _, point := range clientHello.SupportedPoints[:1] {
-			fingerprint += fmt.Sprintf("0x%x,", point)
+			fingerprint.WriteString(fmt.Sprintf("0x%x,", point))
 		}
 	}
 
 	//Remember what connection has what fingerprint for later use
 	Mutex.Lock()
-	Connections[remoteAddr] = fingerprint
+	Connections[remoteAddr] = fingerprint.String()
 	Mutex.Unlock()
 
 	return nil, nil

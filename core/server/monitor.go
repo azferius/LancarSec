@@ -72,11 +72,7 @@ func Monitor() {
 			proxy.THeight = tempHeight
 
 			pHeight := tempHeight - 15
-			if pHeight < 0 {
-				proxy.MaxLogLength = 0
-			} else {
-				proxy.MaxLogLength = pHeight
-			}
+			proxy.MaxLogLength = max(pHeight, 0)
 
 			screen.Clear()
 			screen.MoveTopLeft()

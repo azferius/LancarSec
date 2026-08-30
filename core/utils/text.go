@@ -82,11 +82,7 @@ func PrimaryColor(input string) string {
 }
 
 func SetColor(colorMap []string) {
-	res := ""
-	for _, color := range colorMap {
-		res += color + ";"
-	}
-	ColorsString = res[:len(res)-1]
+	ColorsString = strings.Join(colorMap, ";")
 }
 
 func ClearScreen(length int) {
