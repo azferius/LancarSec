@@ -6,9 +6,15 @@ LancarSec is a fork of **balooProxy** (`github.com/41Baloo/balooProxy`, GPL v2) 
 Go HTTP reverse proxy with L7 DDoS mitigation, a 3-stage browser challenge (cookie → JS
 proof-of-work → captcha), TLS fingerprinting, and a Wireshark-style firewall rule DSL.
 
-The tree is currently **unmodified upstream** at commit `4d4f128` (Oct 2024): 25 `.go` files,
-3098 lines, module `goProxy`, `go 1.19`. Nothing has been rebranded or fixed yet. A previous
-fork attempt was reset away on 2026-08-30 to restart cleanly from upstream.
+The fork restarted from upstream commit `4d4f128` (Oct 2024) on 2026-08-30, after an earlier
+attempt was reset away. **Waves 1 and 2 have landed**: module `github.com/azferius/lancarsec`,
+`go 1.25.0`, every dependency current, `gofilter` and `screen` vendored in-tree, history purged,
+CI gating build/gofmt/vet/race/tidy.
+
+**Runtime behaviour is still 100% upstream.** Waves 1-2 deliberately changed no proxy logic, so
+every finding in `docs/AUDIT.md` still stands except the handful noted in the wave outcomes below.
+The wire-visible tokens are still `baloo-Proxy`, `__bProxy_v` and `/_bProxy/` — those move in wave
+10, atomically.
 
 **Goal of this fork, in the owner's words:** improve performance, improve security, improve code
 quality, move to the latest Go and latest dependencies, and rebrand every marker to LancarSec.
