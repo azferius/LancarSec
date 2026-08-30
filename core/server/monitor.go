@@ -14,13 +14,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inancgumus/screen"
-	"github.com/kor44/gofilter"
+	"github.com/azferius/lancarsec/core/screen"
+
 	"github.com/shirou/gopsutil/cpu"
 	"golang.org/x/term"
 
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/gofilter"
 	"github.com/azferius/lancarsec/core/pnc"
 	"github.com/azferius/lancarsec/core/proxy"
 	"github.com/azferius/lancarsec/core/utils"

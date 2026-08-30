@@ -1,6 +1,6 @@
 package firewall
 
-import "github.com/kor44/gofilter"
+import "github.com/azferius/lancarsec/core/gofilter"
 
 func init() {
 	gofilter.RegisterField("ip.src", gofilter.FT_IP)

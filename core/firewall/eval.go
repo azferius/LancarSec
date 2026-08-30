@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"github.com/azferius/lancarsec/core/domains"
 
-	"github.com/kor44/gofilter"
+	"github.com/azferius/lancarsec/core/gofilter"
 )
 
 func EvalFirewallRule(currDomain domains.DomainSettings, variables gofilter.Message, susLv int) int {

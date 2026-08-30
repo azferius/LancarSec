@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kor44/gofilter"
+	"github.com/azferius/lancarsec/core/gofilter"
 )
 
 func SendResponse(str string, buffer *bytes.Buffer, writer http.ResponseWriter) {

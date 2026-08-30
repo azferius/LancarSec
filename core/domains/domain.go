@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kor44/gofilter"
+	"github.com/azferius/lancarsec/core/gofilter"
 )
 
 var (
