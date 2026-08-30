@@ -70,7 +70,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | Wave | Name | Why it sits here |
 | --- | --- | --- |
 | 1 | ~~Repo hygiene, secret purge, history rewrite~~ **DONE 2026-08-30** | See "Wave 1 outcome" below. |
-| 2 | Toolchain, dependency graph, module path | `go 1.19` blocks `min`/`max`, `clear`, range-over-int, `errors.Join`, and the Go 1.22 loopvar semantics. Nothing downstream can use modern Go until this lands. |
+| 2 | ~~Toolchain, dependency graph, module path~~ **DONE 2026-08-30** | See "Wave 2 outcome" below. |
 | 3 | Test harness, benchmark baseline, CI gates | **Nothing after this may start until it lands.** Zero tests exist across 3098 lines, and wave 7 rewrites a 335-line function that decides whether traffic is blocked. |
 | 4 | Config load unification | `ReloadConfig` is a 131-line divergent copy-paste of `config.Load`. Until they are one function, every fix must be written twice or it silently regresses on `reload`. |
 | 5 | Secrets, token derivation, admin auth | Lands after wave 4 so each fix lands in exactly one place. |
@@ -110,10 +110,51 @@ Backup bundle of the pre-purge state, if anything needs recovering:
 `<scratchpad>/pre-purge-backup.bundle` (319 MB, session-local — copy it somewhere durable if you
 want to keep it).
 
-### Quick wins — safe to land immediately, before wave 2
+### Wave 2 outcome (2026-08-30)
 
-- `fmt.Println` → `fmt.Printf` at `core/firewall/eval.go:30`. The whole module fails `go vet` on this
-  one line, so no CI gate can be added until it's fixed.
+Module is now `github.com/azferius/lancarsec`, directive `go 1.25.0`, toolchain `go1.25.14`.
+Landed as six independently revertable commits (`2b6bd93`..`38f0beb`).
+
+- **govulncheck: 20 symbol-reachable stdlib vulnerabilities → "No vulnerabilities found."** The two
+  that actually mattered were GO-2026-4918 (infinite loop in the HTTP/2 transport on a bad
+  `SETTINGS_MAX_FRAME_SIZE`, reachable from `core/server/serve.go` where the proxy dials the
+  customer backend — a hostile backend could hang a proxy goroutine forever) and GO-2026-5026 in
+  `x/net/idna`. The x/image VP8L and x/sys Windows advisories are **not** reachable here; don't cite
+  them as urgency.
+- **The Go 1.22 loop-variable change is inert in this codebase.** Verified with
+  `go build -gcflags=all=-d=loopvar=2` plus a positive control: 46 diagnostics across stdlib and
+  dependencies, zero in this module. No goroutine or closure anywhere captures a loop variable.
+  This was the one behavioural risk of the bump and it is closed — don't re-litigate it.
+- `gopsutil v3.21.11+incompatible` → `gopsutil/v4 v4.26.7`. `cpu.Percent` has an identical
+  signature, so the only edit was the import path. Dropped `boltdb/bolt` (archived 2017, never
+  imported), `stretchr/testify`, and `golang.org/x/crypto` (fell out once `screen` was absorbed).
+- **`core/gofilter` is vendored, verbatim.** kor44/gofilter@75787865c72c, MIT, zero transitive deps.
+  Fidelity is verified per-file against `$GOMODCACHE`; only `lexer.go` (5 lines, a gofmt reflow) and
+  `nodes.go` (2 lines, one unreachable `return false` that `go vet` rejects) deviate, both recorded
+  in `core/gofilter/README.md`. **Never run `modernize -fix` or a repo-wide rewrite over that
+  directory** — it rewrote 56 lines of the parser on the first attempt and had to be restored.
+- `core/screen` replaces a 129-line dependency. Only `Clear()` and `MoveTopLeft()` were ever used.
+- 8 `io/ioutil` sites removed. `config.json` is now written `0600` — it holds all five secrets and
+  was world-readable at `0644`. **Existing deployments keep their old mode; operators must
+  `chmod 600` manually.**
+- CI gate added (`build`, `gofmt`, `vet`, `test -race`, tidy check). All pass locally. Every action
+  across all three workflows is pinned to a 40-char SHA, including the pre-existing `codeql.yml`.
+
+**New defect found, not yet fixed.** `core/gofilter/parser.go` compiles a `matches` operand with
+`regexp.Compile(val.(string))` — an unchecked type assertion, and `NewFilter` has no recover. So
+`ip.src matches 1.2.3.4` panics, as do `ip.asn matches 1234` and any non-quoted operand. Both call
+sites are startup and live reload, meaning one config typo kills the proxy. This was not in the
+original audit. Fix it in wave 4 alongside the other reload-path hardening.
+
+**Not verified: the Docker image does not build here** (no Docker daemon on this machine). The YAML
+parses and every action SHA resolves, but run `docker build` before cutting a release.
+
+**Toolchain caveat.** `toolchain go1.25.14` makes any builder with `GOTOOLCHAIN=local`, or without
+proxy egress, fail loudly rather than build with a stale compiler. That is intended — it is what
+keeps the CVE fixes in — but check your CI runner and build box before merging.
+
+### Quick wins — safe to land immediately, before wave 3
+
 - Add `Stage2Difficulty: domain.Stage2Difficulty` + the `== 0 { = 5 }` default to
   `core/server/monitor.go:507-526`. One line; until it lands, any `reload` disables stage 2.
 - `r.URL.Path + r.URL.RawQuery` → `r.URL.RequestURI()` at `core/server/serve.go:99`. Today every
