@@ -16,7 +16,7 @@ import (
 
 	"github.com/azferius/lancarsec/core/screen"
 
-	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/v4/cpu"
 	"golang.org/x/term"
 
 	"github.com/azferius/lancarsec/core/domains"
