@@ -1,0 +1,173 @@
+# Continuous integration.
+#
+# New file. Nothing enforced build, vet, formatting, tests or vulnerability
+# scanning on a pull request before this.
+#
+# ---------------------------------------------------------------------------
+# DAY-ONE EXPECTATION -- this workflow goes red on its first run, on purpose.
+# Every line below was measured against the tree as it stands, not guessed.
+# ---------------------------------------------------------------------------
+#
+#   go build ./...                 PASS   exit 0
+#
+#   gofmt -l .                     PASS   no output
+#
+#   go vet ./...                   FAIL   exit 1
+#       core/firewall/eval.go:30:6: fmt.Println call has possible Printf
+#       formatting directive %d
+#
+#   go test -race -count=1 ./...   FAIL   exit 1, for the SAME defect.
+#       `go test` runs a subset of vet -- printf included -- before it
+#       compiles anything, so eval.go:30 fails the test job too, not just the
+#       vet step. Do not read this as a broken test. There are zero *_test.go
+#       files in the repo; `go test -vet=off ./...` already exits 0 and prints
+#       "[no test files]" for all nine packages. Once wave 3 fixes eval.go
+#       this step goes green with no tests, and stays correct when tests land.
+#
+#   go mod tidy check              FAIL   go.mod/go.sum are not tidy today.
+#       Running tidy drops `github.com/boltdb/bolt v1.3.1` from the require
+#       block and its two lines from go.sum, because nothing imports it. That
+#       is precisely the dead dependency wave 2 removes, so this step turns
+#       green the moment that lands.
+#
+#   govulncheck ./...              DEPENDS ON THE TOOLCHAIN go.mod SELECTS.
+#       Scanned with go1.25.4: exit 3, 20 called standard-library
+#       vulnerabilities. Scanned with go1.25.14: exit 0, "No vulnerabilities
+#       found" (the 4 imported and 41 required findings that remain are not
+#       reachable from this code, and do not fail the scan).
+#       The highest "Fixed in" among the called set is go1.25.13
+#       -- crypto/tls, encoding/asn1, net/http and net/url all land there --
+#       so WAVE 2 MUST PIN `toolchain go1.25.13` OR NEWER in go.mod, or this
+#       job is how you will find out. go1.25.14 is the current 1.25 patch.
+#       Separately, golang.org/x/net should go to v0.55.0 (currently v0.26.0)
+#       to clear the not-called x/net findings.
+#
+# Wave 3 fixes eval.go and adds tests; this file is already correct for that
+# state and needs no edit when they land.
+#
+# Every check step carries `if: ${{ !cancelled() }}` so one run reports all
+# failures at once instead of stopping at the first.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build, vet, fmt, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          # Single source of truth for the toolchain: the go/toolchain lines
+          # in go.mod. Never hard-code a version here again. This also caches
+          # the module and build caches, keyed on go.sum.
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: go build
+        if: ${{ !cancelled() }}
+        run: go build ./...
+
+      - name: gofmt
+        if: ${{ !cancelled() }}
+        shell: bash
+        # `gofmt -l` always exits 0 and reports misformatted files on stdout.
+        # `(! read)` succeeds only when that stream is empty: a successful read
+        # means a filename was printed, and `!` turns that into a failure.
+        # GitHub runs bash steps with `set -eo pipefail`, so the subshell's
+        # non-zero status propagates out of the pipeline.
+        run: gofmt -l . | (! read)
+
+      - name: go vet
+        if: ${{ !cancelled() }}
+        run: go vet ./...
+
+      - name: go test -race
+        if: ${{ !cancelled() }}
+        # -count=1 defeats the test result cache, so a green run means the
+        # tests actually executed against this commit.
+        run: go test -race -count=1 ./...
+
+      - name: go.mod and go.sum are tidy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp go.mod go.mod.ci-backup
+          cp go.sum go.sum.ci-backup
+          go mod tidy
+          if ! diff -u go.mod.ci-backup go.mod || ! diff -u go.sum.ci-backup go.sum; then
+            echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."
+            exit 1
+          fi
+          rm -f go.mod.ci-backup go.sum.ci-backup
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Run the scanner directly rather than through
+      # golang/govulncheck-action. Two concrete reasons, both verified:
+      #
+      #  1. That action installs the scanner with
+      #     `go install golang.org/x/vuln/cmd/govulncheck@latest` -- a mutable
+      #     reference, which is exactly the pattern the old release.yml was
+      #     rewritten to eliminate. Here the scanner version is pinned.
+      #
+      #  2. That action passes setup-go BOTH `go-version` (default 'stable')
+      #     and `go-version-file`, and setup-go gives `go-version` precedence.
+      #     The scan would therefore run against the newest stable Go rather
+      #     than the toolchain this project actually ships, and would report
+      #     zero standard-library findings even when the shipped binary has
+      #     twenty. Scanning with go.mod's own toolchain is the whole point.
+      #
+      # `go run pkg@version` resolves outside the main module, so this does
+      # not touch go.mod or go.sum.
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...

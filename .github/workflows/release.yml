@@ -1,43 +1,182 @@
-name: "GO Linux Release"
+# Tag-triggered release.
+#
+# Replaces the old "GO Linux Release" workflow, which fired on every push to
+# main, built one unnamed linux binary with Go 1.19, and handed GITHUB_TOKEN
+# to marvinpinto/action-automatic-releases@latest -- a third-party action on a
+# mutable tag, so whoever controlled that tag controlled a token with write
+# access to this repository.
+#
+# What changed:
+#   * fires on a version tag, not on every push to main
+#   * every action pinned to a full 40-char commit SHA
+#   * the token-holding step is isolated in its own job; the matrix that
+#     compiles code never sees a writable token
+#   * cross-platform matrix, archives, and sha256sums.txt
+#
+# All seven matrix targets were verified to cross-compile from this tree with
+# CGO_ENABLED=0 before this file was written.
+
+name: Release
 
 on:
   push:
-    branches:
-      - "main"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a release for (e.g. v1.2.3)"
+        required: true
+        type: string
+
+# Read-only by default; the single job that needs to write says so itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  BINARY: lancarsec
 
 jobs:
-  pre-release:
-    name: "Auto Release"
-    runs-on: "ubuntu-latest"
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm, goarm: "7" }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: freebsd, goarch: amd64 }
 
     steps:
-      - name: "Checkout code"
-        uses: actions/checkout@v4
-
-      - name: "Set up Go"
-        uses: actions/setup-go@v2
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          go-version: "1.19"
+          ref: ${{ inputs.tag || github.ref }}
+          # Do not leave a credential in .git/config for later steps to reuse.
+          persist-credentials: false
 
-      - name: "Install dependencies"
-        run: go mod download
-
-      - name: "Generate random UUID"
-        id: uuid
-        run: echo "uuid=$(uuidgen)" >> $GITHUB_ENV
-
-      - name: "Build with UUID"
-        run: go build -ldflags "-X 'main.Fingerprint=${{ env.uuid }}'" -o dist/main
-
-      - name: "Release"
-        uses: marvinpinto/action-automatic-releases@latest
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "latest"
-          prerelease: true
-          title: "Prerelease ${{ env.uuid }}"
-          files: |
-            dist/main
-          body: |
-            This is an automatic build that might have bugs.
-            Release Tag: ${{ env.uuid }}
+          # Single source of truth for the toolchain: the go/toolchain lines
+          # in go.mod. Never hard-code a version here again.
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: -mod=readonly
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          EXT: ${{ matrix.ext }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${BINARY}_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p "stage/${name}"
+          # -X main.Fingerprint stamps build metadata onto the var declared at
+          # main.go:15 and echoed by the admin stats endpoint
+          # (core/server/middleware.go:327). It feeds no proxy decision. The
+          # old workflow injected a random uuidgen value here; a tag is
+          # reproducible and actually identifies the build.
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags="-s -w -X main.Fingerprint=${VERSION}" \
+            -o "stage/${name}/${BINARY}${EXT}" \
+            .
+          # GPL v2: ship the license with the binary.
+          cp LICENSE README.md "stage/${name}/"
+          echo "ARTIFACT_NAME=${name}" >> "$GITHUB_ENV"
+
+      - name: Archive
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd stage
+          if [ "$GOOS" = "windows" ]; then
+            zip -qr "../dist/${ARTIFACT_NAME}.zip" "${ARTIFACT_NAME}"
+          else
+            tar -czf "../dist/${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job in this workflow that holds a writable token, and it
+    # compiles nothing.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate sha256sums.txt
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # Hash every archive, with bare filenames (no ./ prefix) so the file
+          # verifies with `sha256sum -c sha256sums.txt` from inside the
+          # download directory. Written outside dist/ first so the checksum
+          # file cannot hash itself.
+          find . -maxdepth 1 -type f -printf '%P\n' \
+            | sort \
+            | xargs -r sha256sum > ../sha256sums.txt
+          mv ../sha256sums.txt .
+          cat sha256sums.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: false
+          # Any tag carrying a pre-release suffix (v1.2.3-rc1) is published as
+          # a pre-release; plain version tags are full releases.
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          make_latest: ${{ !contains(inputs.tag || github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

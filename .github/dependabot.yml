@@ -1,0 +1,95 @@
+# Dependabot configuration.
+#
+# New file. Three ecosystems, all weekly, all grouped so a routine week
+# produces three pull requests instead of fifteen.
+#
+# Grouping rationale: this module depends on five golang.org/x/* packages
+# (crypto, image, net, sys, term, text). Ungrouped, a single Go release train
+# opens six near-identical PRs that must be merged in lockstep anyway. The
+# `patterns: ["*"]` + `update-types: [minor, patch]` group folds every
+# non-breaking bump into one branch. Major bumps are deliberately left OUT of
+# the groups so each arrives as its own reviewable PR -- a major on
+# gofilter, gopsutil or blake3 is a code-review event, not a rubber stamp.
+#
+# The github-actions ecosystem understands SHA pins: it rewrites both the
+# 40-character SHA and the trailing `# vX.Y.Z` comment. That comment format is
+# load-bearing -- ci.yml and release.yml use it deliberately so Dependabot can
+# keep the pins current without anyone hand-resolving a SHA again.
+#
+# The docker ecosystem reads the FROM lines in ./Dockerfile. Both are pinned
+# as tag@sha256:..., which Dependabot updates in place.
+
+version: 2
+
+updates:
+  # -------------------------------------------------------------------------
+  # Go modules
+  # -------------------------------------------------------------------------
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "deps(go)"
+    groups:
+      go-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # -------------------------------------------------------------------------
+  # GitHub Actions (SHA pins in .github/workflows/*.yml)
+  # -------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # -------------------------------------------------------------------------
+  # Docker base images (Dockerfile)
+  # -------------------------------------------------------------------------
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      docker-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
