@@ -69,7 +69,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 
 | Wave | Name | Why it sits here |
 | --- | --- | --- |
-| 1 | Repo hygiene, secret purge, history rewrite | Rewrites git history and renormalises CRLF→LF in all 25 files. Must be the literal first commit or every later branch needs rebasing onto rewritten history. |
+| 1 | ~~Repo hygiene, secret purge, history rewrite~~ **DONE 2026-08-30** | See "Wave 1 outcome" below. |
 | 2 | Toolchain, dependency graph, module path | `go 1.19` blocks `min`/`max`, `clear`, range-over-int, `errors.Join`, and the Go 1.22 loopvar semantics. Nothing downstream can use modern Go until this lands. |
 | 3 | Test harness, benchmark baseline, CI gates | **Nothing after this may start until it lands.** Zero tests exist across 3098 lines, and wave 7 rewrites a 335-line function that decides whether traffic is blocked. |
 | 4 | Config load unification | `ReloadConfig` is a 131-line divergent copy-paste of `config.Load`. Until they are one function, every fix must be written twice or it silently regresses on `reload`. |
@@ -81,7 +81,36 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 10 | Wire-visible rebrand + legal notices | **One commit, one deploy, atomic.** Every token here is protocol-visible and two break live sessions. |
 | 11 | Deferred hard problems | Spec-accurate JA4 from raw ClientHello; stage-3 captcha redesign. Both change detection behaviour rather than fix a defect. |
 
-### Quick wins — safe to land immediately, before wave 1
+### Wave 1 outcome (2026-08-30)
+
+History was rewritten with `git filter-repo`; **every commit SHA changed** and `origin/main` was
+force-pushed. Any clone predating `a09cc54` must be re-cloned, not pulled. Local tags `1.0`–`1.5`
+and `latest` were rewritten but deliberately **not** pushed — the remote has no tags, and publishing
+rewritten upstream release tags would be misleading.
+
+- Pack size **312.28 MiB → 494.99 KiB**. Purged 7 paths: `main` (88 blobs), `oryxBuildBinary`,
+  `config.json` (15 blobs), `crash.log`, `proxyCache.db`, `assets/server/server.{key,crt}`.
+- `git reflog expire --expire=now --all && git gc --prune=now` was required to kill a **second,
+  unreachable copy of the private key** (blob `4ad1bcf7`, an LF variant of the same PEM) that
+  `filter-repo --path` could not target. Verified gone with `git fsck --unreachable`.
+- A second `--replace-text` pass scrubbed upstream's Discord webhook ID, which survived in 70
+  historical revisions of `examples/config.json`.
+- Line endings normalised to LF, proven EOL-only: for all 17 files
+  `git show <old>:f | tr -d '\r' | git hash-object --stdin` matched the new blob, 0 content changes.
+  `gofmt -l .` is now empty and all 47 tracked files are `i/lf w/lf`.
+
+**What the purge did NOT achieve.** Every credential found was already public in
+`41Baloo/balooProxy`'s history since early 2023 — purging this fork stops *us* redistributing them,
+it does not un-leak them. Still outstanding, and not ours to fix: upstream's Discord webhook should
+be **deleted server-side** (regenerating the token is not enough), and the RSA key must never have a
+new certificate issued against it. GitHub may also retain the old unreachable objects until its own
+GC runs; contact GitHub Support if a guaranteed server-side purge is required.
+
+Backup bundle of the pre-purge state, if anything needs recovering:
+`<scratchpad>/pre-purge-backup.bundle` (319 MB, session-local — copy it somewhere durable if you
+want to keep it).
+
+### Quick wins — safe to land immediately, before wave 2
 
 - `fmt.Println` → `fmt.Printf` at `core/firewall/eval.go:30`. The whole module fails `go vet` on this
   one line, so no CI gate can be added until it's fixed.
