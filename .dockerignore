@@ -1,0 +1,102 @@
+# LancarSec .dockerignore
+#
+# The Dockerfile does:
+#     COPY go.mod go.sum ./      -> both MUST reach the build context
+#     RUN go mod download
+#     COPY . .
+#     RUN go build -o main .     -> needs main.go and core/**/*.go
+#     CMD ["./main"]             -> needs global/ and assets/html at runtime
+#
+# So go.mod, go.sum, main.go, core/, global/, assets/html/ and LICENSE
+# (GPL v2 - the license belongs inside the distributed image) are absent from
+# this file on purpose. Everything listed below is either not needed to
+# build, not needed to run, or must never be baked into a published image.
+#
+# This is an explicit deny-list rather than the "* plus !allow" form on
+# purpose. The exclude/re-include form depends on last-match ordering and
+# parent-directory descent semantics that have differed between the classic
+# builder and BuildKit; a mistake there silently drops .go files and breaks
+# `go build` with a confusing error. A deny-list cannot break the build.
+#
+# Note: examples/ is excluded because the interactive generator in
+# core/config writes config.json on first run. Drop the `examples` line below
+# if you want the starter template readable inside the container.
+
+# --- Version control: this is the 312 MiB one -----------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Key material ---------------------------------------------------------
+# assets/server held a real, now-burned RSA private key and its certificate.
+# assets/html is kept even though no Go file references it today (the challenge
+# markup is inlined in core/server/middleware.go). Wave 9 moves it here and
+# //go:embed's it; excluding the directory would break that build. 30 KB.
+assets/server
+**/*.key
+**/*.pem
+**/*.crt
+**/*.cer
+**/*.der
+**/*.p12
+**/*.pfx
+id_rsa
+id_ed25519
+**/*.jks
+**/*.keystore
+**/*.gpg
+**/*.asc
+**/id_ecdsa
+**/id_dsa
+**/*.ppk
+
+# --- Operator config and secrets ------------------------------------------
+**/config.json
+**/config.*.json
+*.local.json
+**/.env
+**/.env.*
+
+# --- Databases, logs, runtime state ---------------------------------------
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
+**/*Cache.db*
+**/*.log
+crash.log
+
+# --- Build output: never copy a host binary into the build context --------
+main
+lancarsec
+lancarsec_*
+oryxBuildBinary
+dist
+bin
+**/*.exe
+**/*.dll
+**/*.so
+**/*.dylib
+**/*.test
+**/*.out
+**/*.prof
+__debug_bin*
+
+# --- Docs, examples, editor and CI files: not needed to build or run ------
+README.md
+CLAUDE.md
+CHANGELOG.md
+docs
+examples
+.vscode
+.idea
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+Makefile
+**/*.swp
+**/.DS_Store
+**/Thumbs.db
