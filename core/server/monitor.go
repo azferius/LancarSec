@@ -19,11 +19,11 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 	"golang.org/x/term"
 
-	"goProxy/core/domains"
-	"goProxy/core/firewall"
-	"goProxy/core/pnc"
-	"goProxy/core/proxy"
-	"goProxy/core/utils"
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/pnc"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/utils"
 )
 
 var (

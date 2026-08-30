@@ -1,4 +1,4 @@
-module goProxy
+module github.com/azferius/lancarsec
 
 go 1.19
 

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"goProxy/core/domains"
-	"goProxy/core/pnc"
-	"goProxy/core/proxy"
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/pnc"
+	"github.com/azferius/lancarsec/core/proxy"
 	"net/http"
 	"strings"
 

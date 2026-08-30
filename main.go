@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"goProxy/core/config"
-	"goProxy/core/pnc"
-	"goProxy/core/proxy"
-	"goProxy/core/server"
+	"github.com/azferius/lancarsec/core/config"
+	"github.com/azferius/lancarsec/core/pnc"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/server"
 	"io"
 	"log"
 	"os"
