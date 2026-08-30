@@ -1,0 +1,75 @@
+# LancarSec .gitattributes
+#
+# The tree arrived from upstream entirely CRLF: all 25 tracked .go files and
+# all 19 tracked non-Go text files carry CR, which is why `gofmt -l .` flags
+# every Go file in the repo. Everything is normalised to LF in the index and
+# checked out as LF on every platform, including the Windows dev machine, so
+# gofmt and the Linux build agree byte for byte.
+#
+# After untracking the key material and running the history purge, run once:
+#     git add --renormalize .
+#     git commit -m "Normalise line endings to LF"
+
+* text=auto eol=lf
+
+# --- Go toolchain ---------------------------------------------------------
+*.go     text eol=lf diff=golang
+go.mod   text eol=lf
+go.sum   text eol=lf
+go.work  text eol=lf
+
+# --- Config, data, docs, templates ----------------------------------------
+*.json          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.md            text eol=lf
+*.html          text eol=lf
+*.css           text eol=lf
+*.js            text eol=lf
+*.txt           text eol=lf
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+LICENSE         text eol=lf
+
+# --- Windows-only scripts keep CRLF ---------------------------------------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# --- Bundled fingerprint data ---------------------------------------------
+# Text, LF, but not LancarSec-authored. No linguist attribute: both
+# linguist-vendored and linguist-generated collapse the file in GitHub review
+# diffs, and a change to security data must stay visible.
+global/fingerprints/*.json text eol=lf
+global/proxy/version.json  text eol=lf
+
+# --- Binary assets: never diff, never munge -------------------------------
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
+*.tar    binary
+*.db     binary
+*.sqlite binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary
+*.der      binary
+*.p12      binary
+*.pfx      binary
+*.jks      binary
+*.keystore binary
+*.gpg      binary
