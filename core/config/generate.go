@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/utils"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -50,7 +51,7 @@ func Generate() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0600)
 	if err != nil {
 		panic(err)
 	}
@@ -93,7 +94,7 @@ func AddDomain() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0600)
 	if err != nil {
 		panic(err)
 	}
@@ -106,7 +107,7 @@ func GetFingerprints(url string, target *map[string]string) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return errors.New("failed to fetch fingerprints: " + err.Error())
 	}

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/azferius/lancarsec/core/domains"
-	"io/ioutil"
+	"os"
 	"strings"
 )
 
@@ -41,7 +41,7 @@ func AddDomain() {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile("config.json", jsonConfig, 0644)
+	err = os.WriteFile("config.json", jsonConfig, 0600)
 	if err != nil {
 		panic(err)
 	}

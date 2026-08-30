@@ -10,7 +10,7 @@ import (
 	"github.com/azferius/lancarsec/core/proxy"
 	"github.com/azferius/lancarsec/core/server"
 	"github.com/azferius/lancarsec/core/utils"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -241,7 +241,7 @@ func VersionCheck() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return errors.New("Failed to check for proxy version: " + err.Error())
 	}
