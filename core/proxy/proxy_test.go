@@ -118,27 +118,7 @@ func TestLoadOTPNeverSeesATornSet(t *testing.T) {
 	wg.Wait()
 }
 
-// The deprecated mirrors exist only so core/server/middleware.go still
-// compiles while its four read sites are migrated to LoadOTP. Pin that they
-// track the published set, so a partially-completed migration cannot leave
-// middleware reading a bucket that no longer matches the OTPs.
-func TestStoreOTPKeepsDeprecatedMirrorsInStep(t *testing.T) {
-	restore := LoadOTP()
-	t.Cleanup(func() { StoreOTP(*restore) })
-
-	want := OTP{Hour: "2026-08-31-07", Cookie: "cc", JS: "jj", Captcha: "kk"}
-	StoreOTP(want)
-
-	if CurrHourStr != want.Hour {
-		t.Errorf("CurrHourStr = %q, want %q", CurrHourStr, want.Hour)
-	}
-	if CookieOTP != want.Cookie {
-		t.Errorf("CookieOTP = %q, want %q", CookieOTP, want.Cookie)
-	}
-	if JSOTP != want.JS {
-		t.Errorf("JSOTP = %q, want %q", JSOTP, want.JS)
-	}
-	if CaptchaOTP != want.Captcha {
-		t.Errorf("CaptchaOTP = %q, want %q", CaptchaOTP, want.Captcha)
-	}
-}
+// The deprecated mirrors (CurrHourStr/CookieOTP/JSOTP/CaptchaOTP) were deleted
+// in wave 7: middleware reads LoadOTP directly, so there is nothing left to
+// keep in step. This test would have caught a partial migration leaving a
+// stale reader behind; its absence is now the state being asserted.

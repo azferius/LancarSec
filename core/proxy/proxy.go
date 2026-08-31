@@ -57,16 +57,6 @@ func LoadOTP() *OTP {
 func StoreOTP(next OTP) {
 	published := next
 	otp.Store(&published)
-
-	// DEPRECATED MIRRORS — see the CookieOTP/JSOTP/CaptchaOTP/CurrHourStr
-	// declarations below. core/server/middleware.go still reads those four
-	// package variables directly, and it is owned by another agent this wave,
-	// so the mirrors are kept in step here until its four read sites move to
-	// LoadOTP. Once they do, delete both these four lines and the variables.
-	CurrHourStr = published.Hour
-	CookieOTP = published.Cookie
-	JSOTP = published.JS
-	CaptchaOTP = published.Captcha
 }
 
 var (
@@ -109,18 +99,9 @@ var (
 
 	CaptchaSecret string
 
-	// CookieOTP, JSOTP, CaptchaOTP and CurrHourStr are DEPRECATED read-only
-	// mirrors of the corresponding LoadOTP fields, written only by StoreOTP.
-	//
-	// They are not synchronised. A string is two machine words, so a reader
-	// racing the hourly write can observe a pointer from one value next to a
-	// length from another. Do not add new readers, and do not write them from
-	// anywhere but StoreOTP. New code calls LoadOTP once and reads the fields
-	// off the returned snapshot.
-	CookieOTP   string
-	JSOTP       string
-	CaptchaOTP  string
-	CurrHourStr string
+	// CookieOTP/JSOTP/CaptchaOTP/CurrHourStr used to be deprecated mirrors of
+	// the LoadOTP fields; wave 7 deleted them. Readers call LoadOTP and take
+	// the fields off the returned snapshot.
 
 	IdleTimeout       = 5
 	ReadTimeout       = 5
@@ -139,11 +120,9 @@ var (
 	FailChallengeRatelimit int
 	FailRequestRatelimit   int
 
-	CurrHour               int
-	LastSecondTime         time.Time
-	LastSecondTimeFormated string
-	LastSecondTimestamp    int
-	Last10SecondTimestamp  int
+	// The request-path clock moved to clock.go in wave 7. It is published by a
+	// dedicated ticker goroutine rather than by the terminal renderer, so a
+	// blocked stdout can no longer freeze the ratelimit window.
 
 	Initialised = false
 )

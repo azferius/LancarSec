@@ -363,11 +363,11 @@ func stripClientIdentityHeaders(header http.Header) {
 
 // accessKeyFor renders the identity that a challenge token is minted against.
 //
-// It replaces `ip + tlsFp + reqUa + proxy.CurrHourStr`, an unseparated
+// It replaces `ip + tlsFp + reqUa + CurrHourStr`, an unseparated
 // concatenation of attacker-controlled strings with two distinct holes in it:
 //
-//  1. No delimiter, so components bleed into each other. proxy.CurrHourStr is
-//     a bare decimal hour ("0".."23"), which means a client sending the user
+//  1. No delimiter, so components bleed into each other. The hour used to be
+//     a bare decimal ("0".."23"), which means a client sending the user
 //     agent "Mozilla1" during hour 3 mints exactly the token that a client
 //     sending "Mozilla" is issued during hour 13. Choosing a user agent is
 //     free, so an attacker can pre-mint clearance for a future hour and walk
@@ -644,14 +644,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	firewall.Mutex.Lock()
-	// Leaving this here for future reference. When the monitor thread that's supposed to prefill these maps lags
-	//behind for some reason, this will be come really messy. The mutex will be locked and never unlocked again,
-	//freezing the entire proxy
-	/*_, temp_found := firewall.WindowAccessIps[proxy.Last10SecondTimestamp]
-	if !temp_found {
-		log.Printf("Attempting To Set %s, %d but timestamp hasn't been set yet ?!?", ip, proxy.Last10SecondTimestamp)
-	}*/
-	firewall.WindowAccessIps[proxy.Last10SecondTimestamp][rateKey]++
+	// When the monitor thread that's supposed to prefill these maps lags behind
+	// for some reason, this will become really messy. The mutex will be locked
+	// and never unlocked again, freezing the entire proxy. Wave 7's window
+	// rewrite replaces the prefill contract with lazy bucket creation.
+	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][rateKey]++
 	domainData = domains.DomainsData[domainName]
 	domainData.TotalRequests++
 	domains.DomainsData[domainName] = domainData
@@ -761,7 +758,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			}
 
 			firewall.Mutex.Lock()
-			firewall.WindowUnkFps[proxy.Last10SecondTimestamp][tlsFp]++
+			firewall.WindowUnkFps[int(proxy.Last10SecondTimestamp())][tlsFp]++
 			firewall.Mutex.Unlock()
 		}
 	}
@@ -783,13 +780,18 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	encryptedIP := ""
 	hashedEncryptedIP := ""
 	susLvStr := utils.StageToString(susLv)
+	// The challenge secrets are read as ONE snapshot: the OTP set rotates
+	// hourly, and accessKey, the encrypted tokens and the published bucket
+	// string have to come from the same rotation or a token minted at the
+	// boundary would not verify against anything.
+	otp := proxy.LoadOTP()
 	// The suspicion level is part of accessKey, so accessKey IS the cache key.
 	// The old key was `accessKey + utils.StageToString(susLv)`, and
 	// StageToString collapses 0 and everything from 5 up into "5+": a
 	// whitelisted request and a blocked request shared one cache entry, and
 	// the whitelisted one cached an empty token that then satisfied the
 	// blocked one's cookie check.
-	accessKey := accessKeyFor(domainName, ip, tlsFp, reqUa, proxy.CurrHourStr, susLv)
+	accessKey := accessKeyFor(domainName, ip, tlsFp, reqUa, otp.Hour, susLv)
 	encryptedCache, encryptedExists := firewall.CacheIps.Load(accessKey)
 
 	if !encryptedExists {
@@ -797,13 +799,13 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		case 0:
 			//whitelisted
 		case 1:
-			encryptedIP = utils.Encrypt(accessKey, proxy.CookieOTP)
+			encryptedIP = utils.Encrypt(accessKey, otp.Cookie)
 		case 2:
-			encryptedIP = utils.Encrypt(accessKey, proxy.JSOTP)
+			encryptedIP = utils.Encrypt(accessKey, otp.JS)
 			hashedEncryptedIP = utils.EncryptSha(encryptedIP, "")
 			firewall.CacheIps.Store(encryptedIP, hashedEncryptedIP)
 		case 3:
-			encryptedIP = utils.Encrypt(accessKey, proxy.CaptchaOTP)
+			encryptedIP = utils.Encrypt(accessKey, otp.Captcha)
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
 			SendResponse("Blocked by BalooProxy.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
@@ -847,7 +849,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// default), which is the precise opposite of what `action: 0` means.
 		if susLv > 0 {
 			firewall.Mutex.Lock()
-			firewall.WindowAccessIpsCookie[proxy.Last10SecondTimestamp][rateKey]++
+			firewall.WindowAccessIpsCookie[int(proxy.Last10SecondTimestamp())][rateKey]++
 			firewall.Mutex.Unlock()
 		}
 
@@ -949,7 +951,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	//Access logs of clients that passed the challenge
 	firewall.Mutex.Lock()
 	utils.AddLogs(domains.DomainLog{
-		Time:      proxy.LastSecondTimeFormated,
+		Time:      proxy.LastSecondTimeFormatted(),
 		IP:        ip,
 		BrowserFP: browser,
 		BotFP:     botFp,

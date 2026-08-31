@@ -34,15 +34,17 @@ func funcName(t *testing.T, f any) string {
 }
 
 func TestMonitorJobsCoverEveryBackgroundWorker(t *testing.T) {
-	// Exactly these four, in this order. A fifth worker added as a bare
+	// Exactly these five, in this order. A sixth worker added as a bare
 	// `go f()` inside Monitor would leave this list unchanged and go
 	// unsupervised, which is why the count is asserted and not just the
-	// membership.
+	// membership. (Wave 7 added `clock`: the dedicated ticker goroutine that
+	// publishes the ratelimit clock even when the TUI stdout is blocked.)
 	want := []string{
 		"commands",
 		"clearProxyCache",
 		"generateOTPSecrets",
 		"evaluateRatelimit",
+		"clock",
 	}
 
 	if len(monitorJobs) != len(want) {

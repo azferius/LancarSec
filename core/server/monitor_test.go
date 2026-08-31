@@ -72,8 +72,9 @@ func rlSnapshotGlobals(t *testing.T) {
 	oldAccessIpsCookie := firewall.AccessIpsCookie
 	oldUnkFps := firewall.UnkFps
 
-	oldLast10 := proxy.Last10SecondTimestamp
-	oldLastSecond := proxy.LastSecondTimestamp
+	// WAVE 7: the clock is atomics now — there is nothing to snapshot. Every
+	// test pins the clock explicitly via rlSetClock before it reads it.
+
 	oldWindow := proxy.RatelimitWindow
 	oldInitialised := proxy.Initialised
 
@@ -85,8 +86,6 @@ func rlSnapshotGlobals(t *testing.T) {
 		firewall.AccessIpsCookie = oldAccessIpsCookie
 		firewall.UnkFps = oldUnkFps
 
-		proxy.Last10SecondTimestamp = oldLast10
-		proxy.LastSecondTimestamp = oldLastSecond
 		proxy.RatelimitWindow = oldWindow
 		proxy.Initialised = oldInitialised
 	})
@@ -100,12 +99,20 @@ func rlSnapshotGlobals(t *testing.T) {
 	proxy.RatelimitWindow = 120
 }
 
+// rlSetClock pins the atomic clock: last-second timestamp unix and the 10s
+// bucket derived from it (TrimTime(unix), which for a 10-aligned base is the
+// base itself). This is the only writer tests may use.
+func rlSetClock(unix int64) {
+	proxy.UpdateClock(time.Unix(unix, 0))
+}
+
 // rlPrefillWindows is a verbatim transcription of the bucket-prefill loop at
 // the top of evaluateRatelimit's body. Note the hardcoded literal 120 — it is
 // NOT proxy.RatelimitWindow. TestRatelimitPrefillIgnoresConfiguredWindow pins
 // that divergence.
 func rlPrefillWindows() {
-	for i := proxy.Last10SecondTimestamp; i < proxy.Last10SecondTimestamp+120; i = i + 10 {
+	last10 := int(proxy.Last10SecondTimestamp())
+	for i := last10; i < last10+120; i = i + 10 {
 		if firewall.WindowAccessIps[i] == nil {
 			firewall.WindowAccessIps[i] = map[string]int{}
 		}
@@ -122,9 +129,10 @@ func rlPrefillWindows() {
 // summation pass. The lock, the `proxy.Initialised = true` publish and the
 // 5-second sleep are the only parts omitted.
 func rlSweepWindows() {
+	now := int(proxy.LastSecondTimestamp())
 	firewall.AccessIps = map[string]int{}
 	for windowTime, accessIPs := range firewall.WindowAccessIps {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 			delete(firewall.WindowAccessIps, windowTime)
 		} else {
 			for IP, requests := range accessIPs {
@@ -134,7 +142,7 @@ func rlSweepWindows() {
 	}
 	firewall.AccessIpsCookie = map[string]int{}
 	for windowTime, accessIPsCookie := range firewall.WindowAccessIpsCookie {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 			delete(firewall.WindowAccessIpsCookie, windowTime)
 		} else {
 			for IP, requests := range accessIPsCookie {
@@ -144,7 +152,7 @@ func rlSweepWindows() {
 	}
 	firewall.UnkFps = map[string]int{}
 	for windowTime, unkFps := range firewall.WindowUnkFps {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 			delete(firewall.WindowUnkFps, windowTime)
 		} else {
 			for IP, requests := range unkFps {
@@ -257,8 +265,7 @@ func TestRatelimitTrimTimeIsIdempotent(t *testing.T) {
 
 func TestRatelimitPrefillCreatesTwelveBucketsAhead(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 
 	rlPrefillWindows()
 
@@ -295,8 +302,7 @@ func TestRatelimitPrefillCreatesTwelveBucketsAhead(t *testing.T) {
 
 func TestRatelimitPrefillPreservesExistingCounts(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 7}
 	firewall.WindowAccessIpsCookie[rlBase+30] = map[string]int{"2.2.2.2": 3}
@@ -330,8 +336,7 @@ func TestRatelimitPrefillPreservesExistingCounts(t *testing.T) {
 func TestRatelimitPrefillIgnoresConfiguredWindow(t *testing.T) {
 	rlSnapshotGlobals(t)
 	proxy.RatelimitWindow = 300
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	rlPrefillWindows()
 
@@ -356,8 +361,7 @@ func TestRatelimitPrefillIgnoresConfiguredWindow(t *testing.T) {
 // B < rlBase-115, i.e. everything at or below rlBase-120 dies.
 func TestRatelimitSweepExpiresOutdatedBuckets(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 
 	seeded := []int{rlBase - 140, rlBase - 130, rlBase - 120, rlBase - 110, rlBase - 10, rlBase}
 	for _, ts := range seeded {
@@ -398,8 +402,7 @@ func TestRatelimitSweepExpiresOutdatedBuckets(t *testing.T) {
 // no matter how many passes run.
 func TestRatelimitSweepExpiryFollowsTheClockNotThePassCount(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	firewall.WindowAccessIps[rlBase-100] = map[string]int{"1.1.1.1": 3}
 
@@ -411,7 +414,7 @@ func TestRatelimitSweepExpiryFollowsTheClockNotThePassCount(t *testing.T) {
 	}
 
 	// Advance the clock past the window and a single pass reaps it.
-	proxy.LastSecondTimestamp = rlBase + 25
+	rlSetClock(rlBase + 25)
 	rlSweepWindows()
 	if _, alive := firewall.WindowAccessIps[rlBase-100]; alive {
 		t.Error("bucket survived past the ratelimit window")
@@ -424,8 +427,7 @@ func TestRatelimitSweepExpiryFollowsTheClockNotThePassCount(t *testing.T) {
 
 func TestRatelimitSweepSumsAcrossLiveBucketsOnly(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 
 	// live
 	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 4, "2.2.2.2": 1}
@@ -448,8 +450,7 @@ func TestRatelimitSweepSumsAcrossLiveBucketsOnly(t *testing.T) {
 
 func TestRatelimitSweepIsIdempotentForAFixedClock(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 
 	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 4}
 	firewall.WindowAccessIps[rlBase-10] = map[string]int{"1.1.1.1": 6}
@@ -468,8 +469,7 @@ func TestRatelimitSweepIsIdempotentForAFixedClock(t *testing.T) {
 
 func TestRatelimitSweepKeepsTheThreeWindowsIndependent(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 
 	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 1}
 	firewall.WindowAccessIpsCookie[rlBase] = map[string]int{"1.1.1.1": 2}
@@ -492,8 +492,7 @@ func TestRatelimitSweepKeepsTheThreeWindowsIndependent(t *testing.T) {
 // totals rather than nil ones — middleware reads these maps unconditionally.
 func TestRatelimitFullPassFromEmptyStateProducesEmptyTotals(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	rlPass()
 
@@ -516,15 +515,14 @@ func TestRatelimitFullPassFromEmptyStateProducesEmptyTotals(t *testing.T) {
 // which point the first assertion below flips from 0 to 50.
 func TestRatelimitTotalsLagBehindTheCurrentBucketByOnePass(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	rlPass()
 
 	// Simulate 50 requests landing in the current bucket (the middleware's
-	// `firewall.WindowAccessIps[proxy.Last10SecondTimestamp][ip]++`).
+	// `firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][ip]++`).
 	for range 50 {
-		firewall.WindowAccessIps[proxy.Last10SecondTimestamp]["1.1.1.1"]++
+		firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
 	}
 
 	// BUG (a later wave flips this to 50): the published total the ratelimit
@@ -592,8 +590,7 @@ func TestRatelimitEvaluateRatelimitChild(t *testing.T) {
 	// Fixture. rlBase-1000 is far outside any sane window and must be swept;
 	// rlBase-110, rlBase-10 and rlBase are inside it and must be summed. The
 	// prefill is expected to add rlBase+10 .. rlBase+110 on top.
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase + 5
+	rlSetClock(rlBase + 5)
 	proxy.RatelimitWindow = 120
 
 	firewall.WindowAccessIps = map[int]map[string]int{
@@ -706,7 +703,7 @@ func rlRunEvaluateRatelimitChild(t *testing.T) rlChildReport {
 //   - the PREFILL HORIZON. The loop runs `i < Last10SecondTimestamp+120` in
 //     steps of 10, i.e. it creates the current bucket plus eleven ahead of it.
 //     That horizon is the only thing keeping Middleware's
-//     `firewall.WindowAccessIps[proxy.Last10SecondTimestamp][ip]++` from writing
+//     `firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][ip]++` from writing
 //     into a nil map, and that write happens while holding the write lock with
 //     no defer - so a shorter horizon reintroduces the permanent proxy-wide
 //     deadlock pinned by TestRatelimitMissingBucketWritePanics*.
@@ -792,7 +789,7 @@ func TestRatelimitEvaluateRatelimitOnePass(t *testing.T) {
 // This is the tripwire that matters most. middleware.go does, under a bare
 // firewall.Mutex.Lock() with NO defer Unlock:
 //
-//	firewall.WindowAccessIps[proxy.Last10SecondTimestamp][ip]++
+//	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][ip]++
 //
 // If the monitor thread has not prefilled that bucket, the inner map is nil and
 // the increment panics. pnc.PanicHndl recovers it — and because the Unlock is a
@@ -804,15 +801,15 @@ func TestRatelimitEvaluateRatelimitOnePass(t *testing.T) {
 // the test binary.
 func TestRatelimitMissingBucketWritePanics(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	// No prefill has run: the bucket does not exist.
-	if _, ok := firewall.WindowAccessIps[proxy.Last10SecondTimestamp]; ok {
+	if _, ok := firewall.WindowAccessIps[rlBase]; ok {
 		t.Fatal("test setup wrong: bucket should be absent")
 	}
 
 	msg := rlMustPanic(t, func() {
-		firewall.WindowAccessIps[proxy.Last10SecondTimestamp]["1.1.1.1"]++
+		firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
 	})
 	if !strings.Contains(msg, "nil map") {
 		t.Errorf("panic message = %q, want it to mention a nil map", msg)
@@ -825,8 +822,7 @@ func TestRatelimitMissingBucketWritePanics(t *testing.T) {
 // next request writes into a hole. All three window maps have the same hole.
 func TestRatelimitMissingBucketWritePanicsWhenMonitorStallsPastHorizon(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 	rlPass()
 
 	// Furthest bucket the pass created is rlBase+110; rlBase+120 is the hole.
@@ -866,7 +862,7 @@ func TestRatelimitMissingBucketWritePanicsWhenMonitorStallsPastHorizon(t *testin
 // later wave does not "fix" the read path and assume the write path is covered.
 func TestRatelimitMissingBucketReadIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
+	rlSetClock(rlBase)
 
 	if got := firewall.WindowAccessIps[rlBase]["1.1.1.1"]; got != 0 {
 		t.Errorf("read through a missing bucket = %d, want 0", got)
@@ -880,12 +876,11 @@ func TestRatelimitMissingBucketReadIsSafe(t *testing.T) {
 // prefill loop exists to maintain.
 func TestRatelimitPrefilledBucketWriteIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
-	proxy.Last10SecondTimestamp = rlBase
-	proxy.LastSecondTimestamp = rlBase
+	rlSetClock(rlBase)
 	rlPrefillWindows()
 
-	firewall.WindowAccessIps[proxy.Last10SecondTimestamp]["1.1.1.1"]++
-	firewall.WindowAccessIps[proxy.Last10SecondTimestamp]["1.1.1.1"]++
+	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
+	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
 
 	if got := firewall.WindowAccessIps[rlBase]["1.1.1.1"]; got != 2 {
 		t.Errorf("bucket count = %d, want 2", got)

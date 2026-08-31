@@ -74,6 +74,8 @@ var monitorJobs = []struct {
 	{"generateOTPSecrets", generateOTPSecrets},
 	// Responsible for keeping track of ratelimit
 	{"evaluateRatelimit", evaluateRatelimit},
+	// Responsible for publishing the request-path clock (wave 7)
+	{"clock", clock},
 }
 
 func Monitor() {
@@ -85,17 +87,17 @@ func Monitor() {
 	screen.MoveTopLeft()
 	PrintMutex.Unlock()
 
-	proxy.LastSecondTime = time.Now()
-	proxy.LastSecondTimeFormated = proxy.LastSecondTime.Format("15:04:05")
-	proxy.LastSecondTimestamp = int(proxy.LastSecondTime.Unix())
-	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
-	proxy.CurrHour, _, _ = proxy.LastSecondTime.Clock()
+	// Publish the clock once synchronously before any job -- and therefore
+	// before Serve is allowed to start -- so the first request reads a real
+	// clock and a real 10-second bucket, never a zero one. The clock job takes over
+	// from here.
+	proxy.UpdateClock(time.Now())
 
 	// Publish one OTP set synchronously before any job — and therefore before
 	// Serve is allowed to start — so the first request cannot be derived
 	// against an empty bucket. generateOTPSecrets republishes the same value
 	// immediately; publishOTP is idempotent within an hour.
-	publishOTP(proxy.LastSecondTime)
+	publishOTP(time.Now())
 
 	for _, job := range monitorJobs {
 		pnc.Supervise(job.name, job.run)
@@ -248,15 +250,10 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 
 func printStats() {
 
-	proxy.LastSecondTime = time.Now()
-	proxy.LastSecondTimeFormated = proxy.LastSecondTime.Format("15:04:05")
-	proxy.LastSecondTimestamp = int(proxy.LastSecondTime.Unix())
-	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
-	proxy.CurrHour, _, _ = proxy.LastSecondTime.Clock()
-	// The hour bucket used by the request path is no longer derived here. It is
-	// part of the OTP set published by generateOTPSecrets, so it rotates with
-	// the secrets it is paired with instead of being rewritten every second by
-	// the stats loop while requests read it.
+	// The clock used to be rewritten here, inside the rendering loop. That is
+	// the defect wave 7 removes: this loop is serialised on PrintMutex and on
+	// every stdout write, so a blocked console froze the clock, the sliding
+	// window and the sweeper with it. The clock is now owned by the clock job.
 
 	result, err := cpu.Percent(0, false)
 	if err != nil {
@@ -517,9 +514,14 @@ func clearProxyCache() {
 func evaluateRatelimit() {
 	for {
 
+		// Read the clock once per pass, off the atomic publisher. The reads
+		// below must not straddle a clock tick.
+		now := int(proxy.LastSecondTimestamp())
+		last10 := int(proxy.Last10SecondTimestamp())
+
 		firewall.Mutex.Lock()
 		//Initialise Maps before they're ever written, as to save if statements during potential attack
-		for i := proxy.Last10SecondTimestamp; i < proxy.Last10SecondTimestamp+120; i = i + 10 {
+		for i := last10; i < last10+120; i = i + 10 {
 			if firewall.WindowAccessIps[i] == nil {
 				//log.Printf("Set AccessIPs Windows For %d", i)
 				firewall.WindowAccessIps[i] = map[string]int{}
@@ -537,7 +539,7 @@ func evaluateRatelimit() {
 		// Delete outdated records & calculate requests for every ip
 		firewall.AccessIps = map[string]int{}
 		for windowTime, accessIPs := range firewall.WindowAccessIps {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 				//log.Printf("Deleting AccessIPs Windows For %d", windowTime)
 				delete(firewall.WindowAccessIps, windowTime)
 			} else {
@@ -548,7 +550,7 @@ func evaluateRatelimit() {
 		}
 		firewall.AccessIpsCookie = map[string]int{}
 		for windowTime, accessIPsCookie := range firewall.WindowAccessIpsCookie {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 				//log.Printf("Deleting AccessIPsCookie Windows For %d", windowTime)
 				delete(firewall.WindowAccessIpsCookie, windowTime)
 			} else {
@@ -559,7 +561,7 @@ func evaluateRatelimit() {
 		}
 		firewall.UnkFps = map[string]int{}
 		for windowTime, unkFps := range firewall.WindowUnkFps {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < proxy.LastSecondTimestamp {
+			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
 				//log.Printf("Deleting AccessUnkFps Windows For %d", windowTime)
 				delete(firewall.WindowUnkFps, windowTime)
 			} else {
@@ -573,7 +575,25 @@ func evaluateRatelimit() {
 
 		//log.Printf("I Ran. I'm supposed to run every 5 seconds. If that didn't happen we're in deep shit")
 		time.Sleep(5 * time.Second)
+	}
+}
 
+// clock publishes the request-path clock once per second.
+//
+// Wave 7: this job exists so the clock is no longer written by printStats, the
+// terminal renderer. printStats runs under PrintMutex and every stdout write
+// serialises against it, so a blocked stdout -- journald, a full pipe, a
+// stopped console -- used to freeze the clock, and with it the sliding-window
+// bucket every request increments and the "now" the sweeper compares against.
+// Ratelimiting then stopped recovering for as long as stdout stayed blocked.
+//
+// This goroutine deliberately touches nothing but proxy.UpdateClock. It does
+// not print, and it does not take PrintMutex.
+func clock() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		proxy.UpdateClock(time.Now())
 	}
 }
 

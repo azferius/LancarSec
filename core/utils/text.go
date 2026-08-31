@@ -161,8 +161,12 @@ func JsonEscape(i string) string {
 	return string(b[1 : len(b)-1])
 }
 
+// TrimTime floors a unix timestamp onto the 10-second bucket grid. It moved
+// to core/proxy in wave 7 (the clock lives there, and core/utils imports
+// core/proxy, so proxy cannot import utils back); this wrapper keeps the
+// import path the wave-3 TrimTime tests pin.
 func TrimTime(timestamp int) int {
-	return (timestamp / 10) * 10
+	return proxy.TrimTime(timestamp)
 }
 
 func SafeString(str string) string {

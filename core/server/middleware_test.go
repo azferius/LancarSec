@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
@@ -130,17 +131,13 @@ func mwSaveGlobals(tb testing.TB) {
 	oldCloudflare := proxy.Cloudflare
 	oldAdminSecret := proxy.AdminSecret
 	oldAPISecret := proxy.APISecret
-	oldCookieOTP := proxy.CookieOTP
-	oldJSOTP := proxy.JSOTP
-	oldCaptchaOTP := proxy.CaptchaOTP
+	// WAVE 7: the clock is atomics now. There is nothing to snapshot -- every
+	// test that cares pins it with proxy.UpdateClock, and a stale clock only
+	// ever lands in a bucket key the next test overwrites.
+	oldOTP := *proxy.LoadOTP()
 	oldIPRatelimit := proxy.IPRatelimit
 	oldFPRatelimit := proxy.FPRatelimit
 	oldFailChallenge := proxy.FailChallengeRatelimit
-	oldCurrHour := proxy.CurrHour
-	oldCurrHourStr := proxy.CurrHourStr
-	oldLastSecondTimestamp := proxy.LastSecondTimestamp
-	oldLast10 := proxy.Last10SecondTimestamp
-	oldLastSecondFmt := proxy.LastSecondTimeFormated
 	oldMaxLogLength := proxy.MaxLogLength
 	oldFingerprint := proxy.Fingerprint
 	oldWatched := proxy.WatchedDomain
@@ -174,17 +171,10 @@ func mwSaveGlobals(tb testing.TB) {
 		proxy.Cloudflare = oldCloudflare
 		proxy.AdminSecret = oldAdminSecret
 		proxy.APISecret = oldAPISecret
-		proxy.CookieOTP = oldCookieOTP
-		proxy.JSOTP = oldJSOTP
-		proxy.CaptchaOTP = oldCaptchaOTP
+		proxy.StoreOTP(oldOTP)
 		proxy.IPRatelimit = oldIPRatelimit
 		proxy.FPRatelimit = oldFPRatelimit
 		proxy.FailChallengeRatelimit = oldFailChallenge
-		proxy.CurrHour = oldCurrHour
-		proxy.CurrHourStr = oldCurrHourStr
-		proxy.LastSecondTimestamp = oldLastSecondTimestamp
-		proxy.Last10SecondTimestamp = oldLast10
-		proxy.LastSecondTimeFormated = oldLastSecondFmt
 		proxy.MaxLogLength = oldMaxLogLength
 		proxy.Fingerprint = oldFingerprint
 		proxy.WatchedDomain = oldWatched
@@ -256,17 +246,16 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 	proxy.Cloudflare = false
 	proxy.AdminSecret = mwAdminSecret
 	proxy.APISecret = mwAPISecret
-	proxy.CookieOTP = mwCookieOTP
-	proxy.JSOTP = mwJSOTP
-	proxy.CaptchaOTP = mwCaptchaOTP
 	proxy.IPRatelimit = 500
 	proxy.FPRatelimit = 150
 	proxy.FailChallengeRatelimit = 40
-	proxy.CurrHour = 13
-	proxy.CurrHourStr = mwHourStr
-	proxy.LastSecondTimestamp = mwTimestamp + 3
-	proxy.Last10SecondTimestamp = mwTimestamp
-	proxy.LastSecondTimeFormated = "13:00:03"
+	// WAVE 7: the OTP set and the clock are atomics now. StoreOTP publishes one
+	// immutable set; UpdateClock pins the second/10s-bucket/formatted reads.
+	// time.Unix(mwTimestamp+3, 0) yields last-second 1700000003 and 10s bucket
+	// 1700000000 == mwTimestamp. (Formatted string becomes "22:13:23"; no test
+	// asserts it.)
+	proxy.StoreOTP(proxy.OTP{Hour: mwHourStr, Cookie: mwCookieOTP, JS: mwJSOTP, Captcha: mwCaptchaOTP})
+	proxy.UpdateClock(time.Unix(mwTimestamp+3, 0))
 	proxy.MaxLogLength = 20
 	proxy.Fingerprint = "mw-proxy-fingerprint"
 	proxy.WatchedDomain = mwDomain
@@ -2687,11 +2676,14 @@ func TestMiddlewareAccessKeyDoesNotMergeUserAgentIntoTheHour(t *testing.T) {
 		t.Fatal("fixture drifted: the two identities no longer collide under the old concatenation")
 	}
 
-	proxy.CurrHourStr = "3"
+	// WAVE 7: the hour bucket lives in the OTP set now, not on the clock.
+	// Rotate by publishing a set whose Hour is "3"; the secrets stay the same so
+	// the only way the two tokens can differ is the access key.
+	proxy.StoreOTP(proxy.OTP{Hour: "3", Cookie: mwCookieOTP, JS: mwJSOTP, Captcha: mwCaptchaOTP})
 	premint := mwTokenFromSetCookie(t, mwDo(mwRequest("/", mwWithHeader("User-Agent", mwUA+"1"))))
 
 	// Ten hours pass and the OTP bucket rotates.
-	proxy.CurrHourStr = "13"
+	proxy.StoreOTP(proxy.OTP{Hour: mwHourStr, Cookie: mwCookieOTP, JS: mwJSOTP, Captcha: mwCaptchaOTP})
 	current := mwTokenFromSetCookie(t, mwDo(mwRequest("/")))
 
 	if premint == current {
