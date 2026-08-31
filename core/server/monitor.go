@@ -477,44 +477,58 @@ func ReloadConfig() {
 	}
 }
 
+// Eviction caps for the two unbounded challenge caches (AUDIT.md:4822).
+// WAVE 8: the old gate was (cpu < 15 && mem > 25) || mem > 95, where mem was
+// proxy.RamUsage = Alloc/Sys -- a heap-liveness ratio that plateaus as a cache
+// leak grows, so the > 95 emergency branch was unreachable and the proxy had
+// no eviction backstop at all. The gate is now a real bound: entry counts,
+// checked every 2 minutes. Vars, not consts, so tests can lower them.
+// Per-entry TTL needs timestamps at the Store sites (middleware.go) and lands
+// with wave 9's middleware split.
+var (
+	maxIpsCacheEntries  = 100_000 // accessKey -> token rows, ~hundreds of bytes each
+	maxImgsCacheEntries = 1_024   // captcha image + mask pairs, ~100s of KB each
+)
+
+// evictCaches runs one eviction pass: dump a cache wholesale when it is over
+// its cap. Entries evicted here only force a re-challenge -- the token is
+// looked up again, fails, and the client is re-issued one -- so dumping is
+// always safe, merely slightly rude.
+func evictCaches() {
+	firewall.Mutex.Lock()
+	defer firewall.Mutex.Unlock()
+
+	ipCachelen := 0
+	firewall.CacheIps.Range(func(key, value any) bool {
+		ipCachelen++
+		return true
+	})
+	if ipCachelen > maxIpsCacheEntries {
+		firewall.CacheIps.Range(func(key, value any) bool {
+			firewall.CacheIps.Delete(key)
+			return true
+		})
+	}
+
+	imgCachelen := 0
+	firewall.CacheImgs.Range(func(key, value any) bool {
+		imgCachelen++
+		return true
+	})
+	if imgCachelen > maxImgsCacheEntries {
+		firewall.CacheImgs.Range(func(key, value any) bool {
+			firewall.CacheImgs.Delete(key)
+			return true
+		})
+	}
+}
+
 func clearProxyCache() {
 
 	defer pnc.PanicHndl()
 
 	for {
-		//Clear logs and maps every 2 minutes. (I know this is a lazy way to do it, tho for now it seems to be the most efficient and fast way to go about it)
-		firewall.Mutex.Lock()
-
-		proxyCpuUsage, pcuErr := strconv.ParseFloat(proxy.CpuUsage(), 32)
-		if pcuErr != nil {
-			proxyCpuUsage = 0
-		}
-
-		proxyMemUsage, pmuErr := strconv.ParseFloat(proxy.RamUsage(), 32)
-		if pmuErr != nil {
-			proxyMemUsage = 0
-		}
-
-		// Only clear if proxy isnt under attack / memory is running out
-		if (proxyCpuUsage < 15 && proxyMemUsage > 25) || proxyMemUsage > 95 {
-			firewall.CacheIps.Range(func(key, value any) bool {
-				firewall.CacheIps.Delete(key)
-				return true
-			})
-		}
-		// Same for here
-		imgCachelen := 0
-		firewall.CacheImgs.Range(func(key, value any) bool {
-			imgCachelen++
-			return true
-		})
-		if (proxyCpuUsage < 15 && proxyMemUsage > 25) || proxyMemUsage > 95 {
-			firewall.CacheImgs.Range(func(key, value any) bool {
-				firewall.CacheImgs.Delete(key)
-				return true
-			})
-		}
-		firewall.Mutex.Unlock()
+		evictCaches()
 		time.Sleep(2 * time.Minute)
 	}
 }
