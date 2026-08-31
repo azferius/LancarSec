@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -383,13 +384,92 @@ func TestBuildInstallsTheSharedRoundTripper(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	// Every domain's reverse proxy must carry the shared transport.RoundTripper
+	// Every domain's reverse proxy must carry the transport.RoundTripper
 	// rather than http.DefaultTransport: it is what applies the per-domain
 	// read timeout and renders the backend-error page. A nil here means a
 	// backend failure reaches the client as a bare 502 with no page.
 	got := built.domains[0].settings.DomainProxy.Transport
 	if _, ok := got.(*transport.RoundTripper); !ok {
 		t.Errorf("Transport = %#v, want *transport.RoundTripper", got)
+	}
+	// Wave 8: the proxy must also draw its 32 KiB response buffers from the
+	// shared pool instead of allocating one per proxied response.
+	if built.domains[0].settings.DomainProxy.BufferPool == nil {
+		t.Error("DomainProxy.BufferPool is nil; every proxied response allocates a fresh 32 KiB buffer")
+	}
+}
+
+func TestBuildWiresPassBackendErrorsAndTransportConfig(t *testing.T) {
+	cfgIsolate(t)
+
+	// WAVE 8 (assertion flipped): the transport REGISTRY used to be configured
+	// here in build. It is global state, and build is the last stage that can
+	// fail, so a refused config could leak its backend_tls_skip_verify onto
+	// the still-running domains. The registry is now configured in publish;
+	// this test's seam records what build itself does, and it must be
+	// nothing. The per-domain transport's skip-verify semantics are pinned in
+	// core/transport's own tests.
+	configures := 0
+	previousConfigure := configureTransports
+	configureTransports = func(string, transport.Options) { configures++ }
+	t.Cleanup(func() { configureTransports = previousConfigure })
+
+	cfg := cfgFixture("opted.example")
+	cfg.Domains[0].PassBackendErrors = true
+	cfg.Proxy.BackendTLSSkipVerify = true
+	normalise(cfg)
+	built, err := build(cfg)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	got, ok := built.domains[0].settings.DomainProxy.Transport.(*transport.RoundTripper)
+	if !ok {
+		t.Fatalf("Transport = %#v, want *transport.RoundTripper", got)
+	}
+	if !got.PassBackendErrors {
+		t.Error("PassBackendErrors did not reach the domain's RoundTripper")
+	}
+	if configures != 0 {
+		t.Errorf("build configured %d transports; the registry swap belongs to publish", configures)
+	}
+}
+
+// The registry swap publish performs must carry the config's
+// backend_tls_skip_verify for every configured domain.
+func TestPublishConfiguresTransportsWithTLSSetting(t *testing.T) {
+	cfgIsolate(t)
+
+	calls := map[string]transport.Options{}
+	previousConfigure := configureTransports
+	configureTransports = func(name string, opts transport.Options) { calls[name] = opts }
+	t.Cleanup(func() { configureTransports = previousConfigure })
+
+	opted := cfgFixture("a.example", "b.example")
+	opted.Proxy.BackendTLSSkipVerify = true
+	cfgPublish(t, opted, modeStartup)
+
+	if len(calls) != 2 {
+		t.Fatalf("publish configured %d transports, want one per domain (2)", len(calls))
+	}
+	for _, name := range []string{"a.example", "b.example"} {
+		if !calls[name].SkipVerify {
+			t.Errorf("transport for %q was configured with SkipVerify=false; the opt-out did not reach it", name)
+		}
+	}
+
+	for name := range calls {
+		delete(calls, name)
+	}
+	defaults := cfgFixture("a.example", "b.example")
+	cfgPublish(t, defaults, modeReload)
+	if len(calls) != 2 {
+		t.Fatalf("publish configured %d transports on reload, want 2", len(calls))
+	}
+	for _, name := range []string{"a.example", "b.example"} {
+		if calls[name].SkipVerify {
+			t.Errorf("transport for %q kept SkipVerify after the flag was removed", name)
+		}
 	}
 }
 
@@ -490,7 +570,7 @@ func TestPublishReloadRemovesDeletedDomains(t *testing.T) {
 	cfgIsolate(t)
 
 	resets := 0
-	resetTransports = func() { resets++ }
+	resetTransports = func(map[string]struct{}) { resets++ }
 
 	cfgPublish(t, cfgFixture("a.example", "b.example"), modeStartup)
 	cfgPublish(t, cfgFixture("a.example"), modeReload)
@@ -521,7 +601,7 @@ func TestPublishResetsTransportsWhenABackendMoves(t *testing.T) {
 	cfgPublish(t, cfgFixture("a.example"), modeStartup)
 
 	resets := 0
-	resetTransports = func() { resets++ }
+	resetTransports = func(map[string]struct{}) { resets++ }
 
 	unchanged := cfgFixture("a.example")
 	cfgPublish(t, unchanged, modeReload)
@@ -534,6 +614,50 @@ func TestPublishResetsTransportsWhenABackendMoves(t *testing.T) {
 	cfgPublish(t, moved, modeReload)
 	if resets != 1 {
 		t.Errorf("ResetTransports ran %d times after a backend change, want 1", resets)
+	}
+}
+
+// WAVE 8: the per-domain transports are configured in publish, not build, so
+// a configuration refused in build must not have touched them. Configure in
+// build leaked a refused config's backend_tls_skip_verify onto the domains
+// still running -- exactly the half-published state the pipeline exists to
+// prevent.
+func TestRefusedReloadDoesNotConfigureTransports(t *testing.T) {
+	cfgIsolate(t)
+
+	configures, resets := 0, 0
+	previousConfigure, previousReset := configureTransports, resetTransports
+	configureTransports = func(string, transport.Options) { configures++ }
+	resetTransports = func(map[string]struct{}) { resets++ }
+	t.Cleanup(func() { configureTransports, resetTransports = previousConfigure, previousReset })
+
+	cfgPublish(t, cfgFixture("a.example"), modeStartup)
+	before := configures
+	if before != 1 {
+		t.Fatalf("startup configured %d transports, want 1", before)
+	}
+
+	// A certificate path validate never reads, so the refusal must land in
+	// build -- the stage Configure used to leak from.
+	refused := cfgFixture("a.example")
+	refused.Proxy.Cloudflare = false
+	refused.Domains[0].Certificate = "does-not-exist.pem"
+	refused.Domains[0].Key = "does-not-exist.key"
+	cfgWrite(t, refused)
+
+	err := Reload()
+	if err == nil {
+		t.Fatal("Reload accepted a configuration with an unloadable certificate")
+	}
+	if !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("Reload failed in the wrong stage (%v); the test must refuse in build, not validate", err)
+	}
+
+	if configures != before {
+		t.Errorf("the refused reload (re)configured %d transports; a refused config must not touch the running ones", configures-before)
+	}
+	if resets != 0 {
+		t.Errorf("the refused reload reset the transports %d times", resets)
 	}
 }
 
@@ -661,7 +785,7 @@ func TestReloadRefusalPublishesNothing(t *testing.T) {
 			if err := Reload(); err != nil {
 				t.Fatalf("baseline Reload: %v", err)
 			}
-			resetTransports = func() { t.Error("a refused reload reset the transports") }
+			resetTransports = func(map[string]struct{}) { t.Error("a refused reload reset the transports") }
 
 			wantConfig := domains.Config
 			wantDomains := append([]string(nil), domains.Domains...)
