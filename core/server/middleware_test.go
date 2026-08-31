@@ -205,14 +205,24 @@ func mwSaveGlobals(tb testing.TB) {
 // mwTrustPeers publishes a trusted-proxy set for the duration of one test.
 // Tests that want a forwarding header believed must call it; without it the
 // default set is empty and realClientIP falls back to the socket peer.
+// mwTrustPeers installs a trusted-proxy set for one test.
+//
+// trusted.Load always includes the 22 bundled Cloudflare prefixes on top of the
+// operator entries passed here, so the count is checked as "bundled + extras"
+// rather than "extras". Asserting the exact number is deliberate: it fails
+// loudly if the bundled lists are ever refreshed, which is a moment somebody
+// should look at these tests rather than have them silently keep passing
+// against a different allowlist.
 func mwTrustPeers(tb testing.TB, cidrs ...string) {
 	tb.Helper()
+	const bundled = 22
 	n, err := trusted.Load(cidrs)
 	if err != nil {
 		tb.Fatalf("trusted.Load(%v): %v", cidrs, err)
 	}
-	if n != len(cidrs) {
-		tb.Fatalf("trusted.Load(%v) loaded %d prefixes, want %d", cidrs, n, len(cidrs))
+	if want := bundled + len(cidrs); n != want {
+		tb.Fatalf("trusted.Load(%v) loaded %d prefixes, want %d (%d bundled + %d extras)",
+			cidrs, n, want, bundled, len(cidrs))
 	}
 }
 
