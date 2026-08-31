@@ -23,6 +23,7 @@ quality, move to the latest Go and latest dependencies, and rebrand every marker
 
 | File | What it is |
 | --- | --- |
+| [`PROGRESS.md`](PROGRESS.md) | **Start here.** Wave-by-wave status, how to verify, and the traps. It is the handoff for a new session or a different agent. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the code works today — per-package map, request dataflow with line anchors, and 40+ non-obvious gotchas. Read before touching anything. |
 | [`docs/AUDIT.md`](docs/AUDIT.md) | 185 verified findings + an 11-wave roadmap + the breaking-change list. This is the work queue. |
 
@@ -312,6 +313,11 @@ body to **add** LancarSec's identity while **preserving** upstream's. Add a `NOT
 `github.com/41Baloo/balooProxy` as upstream. Do not remove upstream's copyright from anything.
 
 ## Conventions for this fork
+
+- **Update `PROGRESS.md` at the end of every wave, in the same commit as the work.** It is what a
+  new session or another agent reads first. A wave that landed but is not recorded there will be
+  redone by whoever picks this up next. Record what changed, what it breaks, and what is still
+  open — not just a status flip.
 
 - **`docs/AUDIT.md` is the work queue.** Before starting anything, check whether it is already a
   numbered finding there. Do not re-derive.
