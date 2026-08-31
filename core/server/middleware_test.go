@@ -1529,10 +1529,12 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 			t.Errorf("Content-Type = %q, want text/plain", ct)
 		}
-		// BUG (a later wave flips this): StageToString(0) renders as "5+", so a
-		// whitelisted domain reports itself as the most hostile stage. The fix
-		// lives in core/utils, not here.
-		mwAssertBodyContains(t, rec, "Stage: 5+")
+		// FLIPPED BY WAVE 5: StageToString used to render 0 as "5+", so a
+		// whitelisted domain reported itself as the most hostile stage on its
+		// own stats page. The same collision was a full bypass of the block
+		// verdict through the token cache; see
+		// TestMiddlewareSuspicionLevelCacheKeysAreDistinct.
+		mwAssertBodyContains(t, rec, "Stage: 0")
 		mwAssertBodyContains(t, rec, "Total Requests: 1")
 		mwAssertBodyContains(t, rec, "Bypassed Requests: 1")
 		mwAssertBodyContains(t, rec, "Proxy Fingerprint: mw-proxy-fingerprint")
