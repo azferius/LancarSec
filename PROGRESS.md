@@ -246,6 +246,13 @@ Every item below was confirmed in code by an independent audit pass.
 
 ### Wave 9 — challenge rendering, XSS, middleware decomposition
 
+**W1 status: LANDED 2026-08-31 at `d1d62e9` (merge of `ad22800`).** Items 2–7 below are fixed and
+verified (item 5's mechanism text is corrected in the outcome block); item 1 needs no fix; item 8
+(decomposition) is the W2 slice. Verification: independent PASS — 13 checks incl. adversarial
+probes (open-redirect target 400/no Location/no cookie, legit path still 302s with clearance
+cookie, PoW assets first-party + immutable, proxied responses carry none of the new headers); all
+CI gates green under `-race`.
+
 1. **Reflected XSS via interpolated IP is already dead** — wave 6 canonicalizes identity through
    `parseClientAddr`/`netip.ParseAddr` (`middleware.go:100-110, 583-584, 316-321`); payloads fail to
    parse. Do NOT claim to fix it. Still do the `html/template` move as defence-in-depth.
@@ -271,6 +278,31 @@ Every item below was confirmed in code by an independent audit pass.
 8. **Middleware monolith** — `middleware.go:523-1031` (523 lines, not the old audit's 335);
    per-request field map `:691-726`; per-request admin-path concat `:996`. Decomposition targets
    should cite these lines.
+
+### Wave 9 W1 outcome (2026-08-31, `ad22800`, merged `d1d62e9`)
+
+- **Real status codes + `Cache-Control: no-store`** on every block/ratelimit/404/405 path
+  (`SendResponseWithStatus`); R1/R2/R3 now send 429 with `Retry-After: 10`. Closes item 4.
+- **`setProxyPageHeaders`** (nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer) at each
+  proxy-generated response site — deliberately never globally: `httputil.ReverseProxy` appends
+  backend headers without clearing what the handler set. Closes item 6. No CSP by design: the
+  challenge pages ARE inline script; a CSP with `'unsafe-inline'` would be security theater.
+- **PoW assets served first-party** from the `global/pow` embeds (`/_bProxy/balooPow.min.js`,
+  `/_bProxy/crypto-js.min.js`, immutable cache) before any bookkeeping; stage-2 page references
+  them; CDN tags gone. Closes item 3 (and CVE-2023-46233's exposure).
+- **Stage-3 cookie name** no longer embeds the client IP (IPv6 `:` made the challenge unsolvable);
+  name derives from `challengeCookieName(3)`. **Breaks in-flight stage-3 cookies — one
+  re-challenge at cutover.** Closes item 2.
+- **Open redirect (item 5) — the mechanism text above was wrong.** `url.ParseRequestURI` parses
+  `GET //evil.com/ HTTP/1.1` with `Host` EMPTY and `Path="//evil.com/"` (it never reads a
+  scheme-less `//` as an authority); it is `http.Redirect`'s internal `url.Parse` that reads `//`
+  as an authority and skips its relative-URL fixup, emitting `Location: //evil.com/` verbatim.
+  The fix refuses any target with `URL.Host != ""` or `Path` starting `//` (400, no Location, no
+  cookie). Mutation-tested: the weaker Host-only guard reproduces the 302 + cookie leak.
+- **Captcha encode failures log instead of echoing `err.Error()`** (item 7). Interpolations into
+  stage 2/3 go through new `escapeHTML`/`escapeJSString` helpers — a scoped defence-in-depth
+  choice; the full `html/template` move stays deferred to W2 alongside item 8's decomposition.
+- Item 1 confirmed dead (wave 6 canonicalization); not claimed as a fix.
 
 ### Already fixed — do not re-scope (waves 5/6)
 
