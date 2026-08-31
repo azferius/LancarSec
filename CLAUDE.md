@@ -86,7 +86,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 2 | ~~Toolchain, dependency graph, module path~~ **DONE 2026-08-30** | See "Wave 2 outcome" below. |
 | 3 | ~~Test harness, benchmark baseline, CI gates~~ **DONE 2026-08-31** | See "Wave 3 outcome" below. |
 | 4 | ~~Config load unification~~ **DONE 2026-08-31** | See "Wave 4 outcome" below. |
-| 5 | Secrets, token derivation, admin auth | Lands after wave 4 so each fix lands in exactly one place. |
+| 5 | ~~Secrets, token derivation, admin auth~~ **DONE 2026-08-31** | Details in [`PROGRESS.md`](PROGRESS.md). Deploying it re-challenges every visitor once. |
 | 6 | Client identity: trusted-proxy + IPv6 | Changes what the ratelimit map *keys* are. Wave 7's sharding is only meaningful once the key space is bounded. |
 | 7 | Hot-path concurrency rewrite | Largest and riskiest. Needs the toolchain (2), the tests and benchmark baseline (3), and the corrected keys (6). |
 | 8 | Upstream transport and response path | Independent of 7; sequenced after so throughput measurements aren't confounded. |

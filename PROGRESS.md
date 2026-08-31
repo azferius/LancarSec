@@ -19,8 +19,8 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 2 | Toolchain 1.19→1.25, dependency graph, module path | **DONE** |
 | 3 | Test harness, benchmark baseline, CI gates | **DONE** |
 | 4 | Config load/reload unification, embed fingerprints, panics→errors | **DONE** |
-| 5 | Secrets, token derivation, admin auth | **IN PROGRESS** |
-| 6 | Client identity: trusted-proxy resolution, IPv6 | not started |
+| 5 | Secrets, token derivation, admin auth | **DONE** |
+| 6 | Client identity: trusted-proxy resolution, IPv6 | **NEXT** |
 | 7 | Hot-path concurrency rewrite | not started |
 | 8 | Upstream transport and response path | not started |
 | 9 | Challenge rendering, XSS, middleware decomposition | not started |
@@ -88,6 +88,40 @@ Benchmark baseline committed. `hack/` holds the load and memory-growth harnesses
 published. `reload` no longer disables the stage-2 proof-of-work, converges on the file, and
 preserves live counters and attack state. No outbound call to Baloo infrastructure remains.
 The `gofilter` `matches` panic is fixed in both `parser.go` and `parser.y`.
+
+**Wave 5.** Secrets, tokens and admin auth. **Deploying this re-challenges every visitor once** —
+three independent causes, any one sufficient: `Encrypt` became keyed BLAKE3 (was
+`blake3(input+key)` concatenation), `EncryptSha` became HMAC-SHA256 (was `sha256(input+key)`,
+length-extendable), and the access key changed shape.
+
+- `utils.RandomString` and the new `utils.RandomIntN` draw from `crypto/rand` with rejection
+  sampling. **`math/rand` is now absent from every non-vendored file.** The twelve `rand.Intn`
+  calls generating the stage-3 captcha fell in the gap between two agents' scopes and were fixed
+  separately: they place the answer, and captchas are served to anyone, so a linear PRNG there let
+  a bot recover the state and predict where the secret half would be drawn.
+- Challenge tokens are length-prefix encoded over `(v1, domain, ip, fingerprint, UA, hour, susLv)`.
+  Previously bare concatenation: a UA ending in digits merged with the hour string, so an attacker
+  could pre-mint a future hour's token, and a token minted on an idle domain cleared any other
+  domain on the same proxy.
+- `StageToString` no longer maps both susLv 0 and susLv >= 5 to `"5+"`. That collision was a full
+  block bypass: a whitelisted request cached an empty token under the shared key, and the later
+  blocked request found it, skipped the block, and hit a cookie check that degenerated to
+  `strings.Contains(header, "__bProxy_v=")` — satisfied by any stale cookie.
+- OTPs rotate on the **aligned UTC hour** through a single `atomic.Pointer` snapshot. They were
+  plain globals written by a background goroutine and read on the hot path with no synchronisation.
+- Stage-1 cookie is `HttpOnly`; cookies are validated by exact per-stage name lookup with
+  `subtle.ConstantTimeCompare`; every `*__bProxy_v` cookie is stripped before forwarding upstream.
+- Admin API: constant-time compare, 404 (not 403) on failure so endpoints are undiscoverable, an
+  empty secret now denies everyone instead of matching `""`, and a capped failure delay.
+  `/_bProxy/stats` and `/_bProxy/fingerprint` now require the secret — **any monitoring scraping
+  them will break.**
+- Deleted: `GET_IP_CACHE` (returned every live clearance token on the proxy), `FILL_IP_CACHE`
+  (held the global write lock across ~20k iterations — one authenticated request was an outage).
+
+**Decision that departed from the plan, recorded so it is not silently reverted:** the wave-4
+design said to make the API `RELOAD` action actually work; the agent deleted it instead, on the
+grounds that remote config reload is a lateral-movement primitive and the TUI `reload` covers the
+operator need. If you want remote reload back, that is a deliberate re-add, not a bug fix.
 
 ---
 
