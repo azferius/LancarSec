@@ -1,0 +1,1602 @@
+package server
+
+// Wave 3 tripwire tests for core/server/middleware.go.
+//
+// These tests pin the behaviour of Middleware AS IT EXISTS TODAY, bugs included.
+// Anything marked "BUG (wave N flips this)" is a defect that is deliberately
+// asserted as the current contract: when a later wave fixes it, the assertion
+// below must visibly flip in the diff so a reviewer sees the behaviour change.
+//
+// Every helper and test in this file is prefixed mw/TestMiddleware to avoid
+// symbol collisions with monitor_test.go, which lives in the same package.
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/gofilter"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/utils"
+)
+
+const (
+	mwDomain      = "mw.test.local"
+	mwIP          = "203.0.113.7"
+	mwRemoteAddr  = mwIP + ":51000"
+	mwUA          = "mw-test-agent"
+	mwFP          = "0xdead,0xbeef,"
+	mwHourStr     = "13"
+	mwTimestamp   = 1700000000
+	mwBackendBody = "MW-BACKEND-OK"
+
+	mwCookieOTP   = "mw-cookie-otp"
+	mwJSOTP       = "mw-js-otp"
+	mwCaptchaOTP  = "mw-captcha-otp"
+	mwAdminSecret = "mw-admin-secret"
+	mwAPISecret   = "mw-api-secret"
+
+	mwStage2Difficulty = 5
+)
+
+// mwAccessKey mirrors the accessKey built inside Middleware:
+// ip + tlsFp + userAgent + proxy.CurrHourStr
+func mwAccessKey() string {
+	return mwIP + mwFP + mwUA + mwHourStr
+}
+
+func mwCookieToken() string  { return utils.Encrypt(mwAccessKey(), mwCookieOTP) }
+func mwJSToken() string      { return utils.Encrypt(mwAccessKey(), mwJSOTP) }
+func mwCaptchaToken() string { return utils.Encrypt(mwAccessKey(), mwCaptchaOTP) }
+
+// ---------------------------------------------------------------------------
+// harness
+// ---------------------------------------------------------------------------
+
+type mwEnv struct {
+	tb      testing.TB
+	backend *httptest.Server
+	hits    atomic.Int64
+}
+
+// mwSaveGlobals snapshots every package-level global Middleware touches and
+// restores it with t.Cleanup. This package is a swamp of mutable globals; no
+// test may leak state into the next one.
+func mwSaveGlobals(tb testing.TB) {
+	tb.Helper()
+
+	oldConfig := domains.Config
+	oldDomainList := domains.Domains
+	oldDomainsData := domains.DomainsData
+
+	oldMutex := firewall.Mutex
+	oldAccessIps := firewall.AccessIps
+	oldAccessIpsCookie := firewall.AccessIpsCookie
+	oldUnkFps := firewall.UnkFps
+	oldWindowAccessIps := firewall.WindowAccessIps
+	oldWindowAccessIpsCookie := firewall.WindowAccessIpsCookie
+	oldWindowUnkFps := firewall.WindowUnkFps
+	oldConnections := firewall.Connections
+	oldKnown := firewall.KnownFingerprints
+	oldBot := firewall.BotFingerprints
+	oldForbidden := firewall.ForbiddenFingerprints
+
+	oldCloudflare := proxy.Cloudflare
+	oldAdminSecret := proxy.AdminSecret
+	oldAPISecret := proxy.APISecret
+	oldCookieOTP := proxy.CookieOTP
+	oldJSOTP := proxy.JSOTP
+	oldCaptchaOTP := proxy.CaptchaOTP
+	oldIPRatelimit := proxy.IPRatelimit
+	oldFPRatelimit := proxy.FPRatelimit
+	oldFailChallenge := proxy.FailChallengeRatelimit
+	oldCurrHour := proxy.CurrHour
+	oldCurrHourStr := proxy.CurrHourStr
+	oldLastSecondTimestamp := proxy.LastSecondTimestamp
+	oldLast10 := proxy.Last10SecondTimestamp
+	oldLastSecondFmt := proxy.LastSecondTimeFormated
+	oldMaxLogLength := proxy.MaxLogLength
+	oldFingerprint := proxy.Fingerprint
+	oldWatched := proxy.WatchedDomain
+	oldCPU := proxy.CpuUsage
+	oldRAM := proxy.RamUsage
+
+	tb.Cleanup(func() {
+		domains.Config = oldConfig
+		domains.Domains = oldDomainList
+		domains.DomainsData = oldDomainsData
+		domains.DomainsMap = sync.Map{}
+
+		firewall.Mutex = oldMutex
+		firewall.AccessIps = oldAccessIps
+		firewall.AccessIpsCookie = oldAccessIpsCookie
+		firewall.UnkFps = oldUnkFps
+		firewall.WindowAccessIps = oldWindowAccessIps
+		firewall.WindowAccessIpsCookie = oldWindowAccessIpsCookie
+		firewall.WindowUnkFps = oldWindowUnkFps
+		firewall.Connections = oldConnections
+		firewall.KnownFingerprints = oldKnown
+		firewall.BotFingerprints = oldBot
+		firewall.ForbiddenFingerprints = oldForbidden
+		firewall.CacheIps = sync.Map{}
+		firewall.CacheImgs = sync.Map{}
+
+		proxy.Cloudflare = oldCloudflare
+		proxy.AdminSecret = oldAdminSecret
+		proxy.APISecret = oldAPISecret
+		proxy.CookieOTP = oldCookieOTP
+		proxy.JSOTP = oldJSOTP
+		proxy.CaptchaOTP = oldCaptchaOTP
+		proxy.IPRatelimit = oldIPRatelimit
+		proxy.FPRatelimit = oldFPRatelimit
+		proxy.FailChallengeRatelimit = oldFailChallenge
+		proxy.CurrHour = oldCurrHour
+		proxy.CurrHourStr = oldCurrHourStr
+		proxy.LastSecondTimestamp = oldLastSecondTimestamp
+		proxy.Last10SecondTimestamp = oldLast10
+		proxy.LastSecondTimeFormated = oldLastSecondFmt
+		proxy.MaxLogLength = oldMaxLogLength
+		proxy.Fingerprint = oldFingerprint
+		proxy.WatchedDomain = oldWatched
+		proxy.CpuUsage = oldCPU
+		proxy.RamUsage = oldRAM
+
+		transportMap = sync.Map{}
+	})
+}
+
+// mwNewEnv builds a fully initialised single-domain proxy state that mirrors
+// what core/config.Load() produces, plus a stub backend.
+func mwNewEnv(tb testing.TB) *mwEnv {
+	tb.Helper()
+
+	mwSaveGlobals(tb)
+
+	env := &mwEnv{tb: tb}
+
+	// --- firewall state (as evaluateRatelimit() would leave it) ---
+	firewall.Mutex = &sync.RWMutex{}
+	firewall.AccessIps = map[string]int{}
+	firewall.AccessIpsCookie = map[string]int{}
+	firewall.UnkFps = map[string]int{}
+	firewall.WindowAccessIps = map[int]map[string]int{mwTimestamp: {}}
+	firewall.WindowAccessIpsCookie = map[int]map[string]int{mwTimestamp: {}}
+	firewall.WindowUnkFps = map[int]map[string]int{mwTimestamp: {}}
+	firewall.Connections = map[string]string{mwRemoteAddr: mwFP}
+	// Fresh (empty) fingerprint tables so tests control browser/bot/forbidden
+	// classification instead of depending on the bundled upstream tables.
+	firewall.KnownFingerprints = map[string]string{}
+	firewall.BotFingerprints = map[string]string{}
+	firewall.ForbiddenFingerprints = map[string]string{}
+	firewall.CacheIps = sync.Map{}
+	firewall.CacheImgs = sync.Map{}
+
+	// --- proxy globals (as Monitor()/generateOTPSecrets() would leave them) ---
+	proxy.Cloudflare = false
+	proxy.AdminSecret = mwAdminSecret
+	proxy.APISecret = mwAPISecret
+	proxy.CookieOTP = mwCookieOTP
+	proxy.JSOTP = mwJSOTP
+	proxy.CaptchaOTP = mwCaptchaOTP
+	proxy.IPRatelimit = 500
+	proxy.FPRatelimit = 150
+	proxy.FailChallengeRatelimit = 40
+	proxy.CurrHour = 13
+	proxy.CurrHourStr = mwHourStr
+	proxy.LastSecondTimestamp = mwTimestamp + 3
+	proxy.Last10SecondTimestamp = mwTimestamp
+	proxy.LastSecondTimeFormated = "13:00:03"
+	proxy.MaxLogLength = 20
+	proxy.Fingerprint = "mw-proxy-fingerprint"
+	proxy.WatchedDomain = mwDomain
+	proxy.CpuUsage = ""
+	proxy.RamUsage = ""
+
+	// --- config ---
+	domains.Config = &domains.Configuration{
+		Proxy: domains.Proxy{
+			Cloudflare:      false,
+			AdminSecret:     mwAdminSecret,
+			APISecret:       mwAPISecret,
+			RatelimitWindow: 120,
+			Ratelimits: map[string]int{
+				"requests":           500,
+				"unknownFingerprint": 150,
+				"challengeFailures":  40,
+				"noRequestsSent":     10,
+			},
+		},
+		Domains: []domains.Domain{{Name: mwDomain}},
+	}
+	domains.Domains = []string{mwDomain}
+
+	domains.DomainsMap = sync.Map{}
+	domains.DomainsData = map[string]domains.DomainData{
+		mwDomain: {
+			Name:             mwDomain,
+			Stage:            1,
+			StageManuallySet: false,
+			Stage2Difficulty: mwStage2Difficulty,
+			RawAttack:        false,
+			BypassAttack:     false,
+			LastLogs:         []domains.DomainLog{},
+			RequestLogger:    []domains.RequestLog{},
+		},
+	}
+
+	env.backend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		env.hits.Add(1)
+		for _, h := range []string{"X-Real-Ip", "Proxy-Real-Ip", "Proxy-Tls-Fp", "Proxy-Tls-Name", "Cookie"} {
+			w.Header().Set("X-Echo-"+h, strings.Join(r.Header.Values(h), "|"))
+		}
+		w.Header().Set("X-Echo-Path", r.URL.Path)
+		w.Header().Set("X-Echo-Query", r.URL.RawQuery)
+		_, _ = w.Write([]byte(mwBackendBody))
+	}))
+	tb.Cleanup(env.backend.Close)
+
+	env.storeSettings(nil, nil)
+
+	return env
+}
+
+// storeSettings (re)publishes DomainSettings for the test domain, mirroring
+// config.buildDomain: reverse proxy to the stub backend through the production
+// server.RoundTripper.
+func (e *mwEnv) storeSettings(rules []domains.Rule, transport http.RoundTripper) {
+	e.tb.Helper()
+
+	target, err := url.Parse(e.backend.URL)
+	if err != nil {
+		e.tb.Fatalf("parse backend url: %v", err)
+	}
+	dProxy := httputil.NewSingleHostReverseProxy(target)
+	if transport == nil {
+		dProxy.Transport = &RoundTripper{}
+	} else {
+		dProxy.Transport = transport
+	}
+
+	domains.DomainsMap.Store(mwDomain, domains.DomainSettings{
+		Name:        mwDomain,
+		CustomRules: rules,
+		RawCustomRules: []domains.JsonRule{
+			{Expression: "mw-test", Action: "0"},
+		},
+		DomainProxy: dProxy,
+	})
+}
+
+// mwSetRules compiles expression/action pairs the way config.Load does.
+func (e *mwEnv) mwSetRules(pairs ...[2]string) {
+	e.tb.Helper()
+	rules := make([]domains.Rule, 0, len(pairs))
+	for _, p := range pairs {
+		f, err := gofilter.NewFilter(p[0])
+		if err != nil {
+			e.tb.Fatalf("compile rule %q: %v", p[0], err)
+		}
+		rules = append(rules, domains.Rule{Filter: f, Action: p[1]})
+	}
+	e.storeSettings(rules, nil)
+}
+
+func (e *mwEnv) mwSetStage(stage int) {
+	e.tb.Helper()
+	firewall.Mutex.Lock()
+	d := domains.DomainsData[mwDomain]
+	d.Stage = stage
+	domains.DomainsData[mwDomain] = d
+	firewall.Mutex.Unlock()
+}
+
+func (e *mwEnv) mwDomainData() domains.DomainData {
+	firewall.Mutex.RLock()
+	defer firewall.Mutex.RUnlock()
+	return domains.DomainsData[mwDomain]
+}
+
+func (e *mwEnv) mwBackendHits() int64 { return e.hits.Load() }
+
+type mwReqOpt func(*http.Request)
+
+func mwWithCookie(v string) mwReqOpt {
+	return func(r *http.Request) { r.Header.Set("Cookie", v) }
+}
+
+func mwWithHeader(k, v string) mwReqOpt {
+	return func(r *http.Request) { r.Header.Set(k, v) }
+}
+
+func mwWithHost(h string) mwReqOpt {
+	return func(r *http.Request) { r.Host = h }
+}
+
+func mwWithRemoteAddr(a string) mwReqOpt {
+	return func(r *http.Request) { r.RemoteAddr = a }
+}
+
+func mwWithMethod(m string) mwReqOpt {
+	return func(r *http.Request) { r.Method = m }
+}
+
+// mwRequest builds a request that, by default, looks like a well-behaved
+// client of the test domain.
+func mwRequest(target string, opts ...mwReqOpt) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Host = mwDomain
+	req.RemoteAddr = mwRemoteAddr
+	req.Header.Set("User-Agent", mwUA)
+	for _, o := range opts {
+		o(req)
+	}
+	return req
+}
+
+func mwDo(req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	Middleware(rec, req)
+	return rec
+}
+
+// mwRecover runs fn and returns the recovered panic value (nil if it did not
+// panic).
+func mwRecover(fn func()) (rec any) {
+	defer func() { rec = recover() }()
+	fn()
+	return nil
+}
+
+func mwAssertStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
+	t.Helper()
+	if got := rec.Result().StatusCode; got != want {
+		t.Errorf("status = %d, want %d", got, want)
+	}
+}
+
+func mwAssertBodyContains(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	if body := rec.Body.String(); !strings.Contains(body, want) {
+		t.Errorf("body does not contain %q\n--- body (first 400 bytes) ---\n%s", want, mwTrunc(body, 400))
+	}
+}
+
+func mwAssertBodyNotContains(t *testing.T, rec *httptest.ResponseRecorder, notWant string) {
+	t.Helper()
+	if body := rec.Body.String(); strings.Contains(body, notWant) {
+		t.Errorf("body unexpectedly contains %q", notWant)
+	}
+}
+
+func mwTrunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + " ..."
+}
+
+// ---------------------------------------------------------------------------
+// domain resolution
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareUnknownDomain(t *testing.T) {
+	env := mwNewEnv(t)
+
+	cases := []struct {
+		name string
+		host string
+	}{
+		{name: "unconfigured host", host: "not-configured.example"},
+		// BUG (a later wave may flip this): the Host header is matched verbatim,
+		// so a client that sends an explicit port for a configured domain gets
+		// "404 Not Found" instead of being served.
+		{name: "configured host with explicit port", host: mwDomain + ":80"},
+		{name: "empty host", host: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := env.mwDomainData().TotalRequests
+			rec := mwDo(mwRequest("/", mwWithHost(tc.host)))
+
+			// BUG (wave 9 flips this): the "not found" path answers 200 OK with a
+			// plain-text body that merely says 404. Wave 9 should send a real 404.
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, "404 Not Found")
+
+			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+				t.Errorf("Content-Type = %q, want text/plain", ct)
+			}
+			// The version header is set AFTER the domain lookup, so unknown-domain
+			// responses carry no proxy header at all.
+			if v := rec.Result().Header.Get("baloo-Proxy"); v != "" {
+				t.Errorf("baloo-Proxy = %q, want empty on the unknown-domain path", v)
+			}
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend was reached on the unknown-domain path")
+			}
+			if after := env.mwDomainData().TotalRequests; after != before {
+				t.Errorf("TotalRequests changed (%d -> %d) for an unknown domain", before, after)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// counters / window maps
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareCountersAndWindows(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	// A stage-1 request with no cookie: counted as Total, challenged, not bypassed.
+	rec := mwDo(mwRequest("/"))
+	mwAssertStatus(t, rec, http.StatusFound)
+
+	d := env.mwDomainData()
+	if d.TotalRequests != 1 {
+		t.Errorf("TotalRequests = %d, want 1", d.TotalRequests)
+	}
+	if d.BypassedRequests != 0 {
+		t.Errorf("BypassedRequests = %d, want 0 (request was challenged)", d.BypassedRequests)
+	}
+
+	firewall.Mutex.RLock()
+	accessCount := firewall.WindowAccessIps[mwTimestamp][mwIP]
+	cookieCount := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+	unkFpCount := firewall.WindowUnkFps[mwTimestamp][mwFP]
+	firewall.Mutex.RUnlock()
+
+	if accessCount != 1 {
+		t.Errorf("WindowAccessIps[%d][%s] = %d, want 1", mwTimestamp, mwIP, accessCount)
+	}
+	if cookieCount != 1 {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 1", mwTimestamp, mwIP, cookieCount)
+	}
+	// The fingerprint is unknown (empty KnownFingerprints table), so the unknown
+	// fingerprint window is incremented too.
+	if unkFpCount != 1 {
+		t.Errorf("WindowUnkFps[%d][%s] = %d, want 1", mwTimestamp, mwFP, unkFpCount)
+	}
+
+	// Now the same client with the correct cookie: bypassed, no challenge counter.
+	rec = mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	d = env.mwDomainData()
+	if d.TotalRequests != 2 {
+		t.Errorf("TotalRequests = %d, want 2", d.TotalRequests)
+	}
+	if d.BypassedRequests != 1 {
+		t.Errorf("BypassedRequests = %d, want 1", d.BypassedRequests)
+	}
+	if len(d.LastLogs) != 1 {
+		t.Fatalf("LastLogs = %d entries, want 1 (only bypassed requests are logged)", len(d.LastLogs))
+	}
+	if d.LastLogs[0].IP != mwIP || d.LastLogs[0].TLSFP != mwFP || d.LastLogs[0].Useragent != mwUA {
+		t.Errorf("log entry = %+v, want ip/fp/ua of the test client", d.LastLogs[0])
+	}
+
+	firewall.Mutex.RLock()
+	cookieCount = firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+	firewall.Mutex.RUnlock()
+	if cookieCount != 1 {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 1 (a passing request must not count as a challenge failure)", mwTimestamp, mwIP, cookieCount)
+	}
+}
+
+// BUG (wave 5/7 flips this): a whitelisted (susLv 0) request never has a cookie
+// to present, so it always "fails" the cookie check and increments the
+// challenge-failure window that drives the R1 ratelimit. Whitelisted traffic
+// therefore ratelimits itself once it exceeds FailChallengeRatelimit.
+func TestMiddlewareWhitelistCountsAsChallengeFailure(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+
+	rec := mwDo(mwRequest("/"))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	firewall.Mutex.RLock()
+	cookieCount := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+	firewall.Mutex.RUnlock()
+
+	if cookieCount != 1 {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 1 (today a whitelisted request is counted as a challenge failure)", mwTimestamp, mwIP, cookieCount)
+	}
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
+// The sliding-window maps are prefilled by the monitor goroutine
+// (evaluateRatelimit). If that goroutine lags, Middleware writes to a nil map
+// WHILE HOLDING firewall.Mutex and the deferred-free Unlock is skipped, so the
+// panic wedges the mutex and freezes the whole proxy. The source comment at
+// middleware.go:89 documents this; this test pins it.
+//
+// BUG (wave 7 flips this): the panic must become an ordinary lazily-created
+// bucket (and the lock must be released with defer).
+func TestMiddlewareMissingWindowBucketPanicsAndWedgesMutex(t *testing.T) {
+	env := mwNewEnv(t)
+	_ = env
+
+	firewall.Mutex.Lock()
+	delete(firewall.WindowAccessIps, mwTimestamp)
+	firewall.Mutex.Unlock()
+
+	rec := httptest.NewRecorder()
+	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
+	if got == nil {
+		t.Fatal("expected a panic when the current window bucket is missing, got none")
+	}
+	if !strings.Contains(mwPanicString(got), "nil map") {
+		t.Errorf("panic = %v, want an 'assignment to entry in nil map' panic", got)
+	}
+
+	// firewall.Mutex is still held by the panicked call. Replace it, otherwise
+	// every later test in this package deadlocks. That this is necessary IS the
+	// defect being pinned.
+	if firewall.Mutex.TryLock() {
+		firewall.Mutex.Unlock()
+		t.Error("firewall.Mutex was released after the panic; the wedge documented in middleware.go:89 no longer reproduces")
+	}
+	firewall.Mutex = &sync.RWMutex{}
+}
+
+func mwPanicString(v any) string {
+	if err, ok := v.(error); ok {
+		return err.Error()
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// A domain present in DomainsData but absent from DomainsMap makes the
+// unchecked type assertion at middleware.go:146 panic on a nil interface.
+// Reachable whenever a reload populates one map before the other.
+func TestMiddlewareDomainsMapMissingPanics(t *testing.T) {
+	env := mwNewEnv(t)
+	_ = env
+
+	domains.DomainsMap.Delete(mwDomain)
+
+	rec := httptest.NewRecorder()
+	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
+	if got == nil {
+		t.Fatal("expected a panic when DomainsMap has no entry for a live domain, got none")
+	}
+	if !strings.Contains(mwPanicString(got), "interface conversion") {
+		t.Errorf("panic = %v, want an interface conversion panic", got)
+	}
+	// This panic happens outside the firewall.Mutex critical section, so unlike
+	// the window-bucket panic it does not wedge the proxy.
+	if !firewall.Mutex.TryLock() {
+		t.Error("firewall.Mutex was left locked by the DomainsMap panic")
+	} else {
+		firewall.Mutex.Unlock()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ratelimits R1 / R2 / R3
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareRatelimits(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(t *testing.T, env *mwEnv)
+		wantBody string
+	}{
+		{
+			name: "R1 repeated challenge failures",
+			setup: func(t *testing.T, env *mwEnv) {
+				firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1
+			},
+			wantBody: "You have been ratelimited. (R1)",
+		},
+		{
+			name: "R2 request flood from one ip",
+			setup: func(t *testing.T, env *mwEnv) {
+				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+			},
+			wantBody: "You have been ratelimited. (R2)",
+		},
+		{
+			name: "R3 unknown fingerprint flood",
+			setup: func(t *testing.T, env *mwEnv) {
+				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+			},
+			wantBody: "You have been ratelimited. (R3)",
+		},
+		{
+			name: "R1 wins over R2 and R3",
+			setup: func(t *testing.T, env *mwEnv) {
+				firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1
+				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+			},
+			wantBody: "You have been ratelimited. (R1)",
+		},
+		{
+			name: "R2 wins over R3",
+			setup: func(t *testing.T, env *mwEnv) {
+				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+			},
+			wantBody: "You have been ratelimited. (R2)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			tc.setup(t, env)
+
+			rec := mwDo(mwRequest("/"))
+
+			// BUG (wave 9 flips this): every ratelimit answers 200 OK, not 429.
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, tc.wantBody)
+			mwAssertBodyContains(t, rec, "Blocked by BalooProxy.")
+			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+				t.Errorf("Content-Type = %q, want text/plain", ct)
+			}
+			if v := rec.Result().Header.Get("baloo-Proxy"); v != "1.5" {
+				t.Errorf("baloo-Proxy = %q, want 1.5", v)
+			}
+			if env.mwBackendHits() != 0 {
+				t.Error("backend was reached despite the ratelimit")
+			}
+			// Ratelimited requests still count towards TotalRequests.
+			if got := env.mwDomainData().TotalRequests; got != 1 {
+				t.Errorf("TotalRequests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// The thresholds are strict ">" comparisons: hitting the limit exactly is
+// allowed, one over is blocked.
+func TestMiddlewareRatelimitBoundaries(t *testing.T) {
+	cases := []struct {
+		name    string
+		set     func()
+		blocked bool
+	}{
+		{name: "ip count equals limit", set: func() { firewall.AccessIps[mwIP] = 500 }, blocked: false},
+		{name: "ip count one over limit", set: func() { firewall.AccessIps[mwIP] = 501 }, blocked: true},
+		{name: "cookie count equals limit", set: func() { firewall.AccessIpsCookie[mwIP] = 40 }, blocked: false},
+		{name: "cookie count one over limit", set: func() { firewall.AccessIpsCookie[mwIP] = 41 }, blocked: true},
+		{name: "unknown fp equals limit", set: func() { firewall.UnkFps[mwFP] = 150 }, blocked: false},
+		{name: "unknown fp one over limit", set: func() { firewall.UnkFps[mwFP] = 151 }, blocked: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0) // whitelist so an allowed request reaches the backend
+			tc.set()
+
+			rec := mwDo(mwRequest("/"))
+			blocked := strings.Contains(rec.Body.String(), "ratelimited")
+			if blocked != tc.blocked {
+				t.Errorf("blocked = %v, want %v (body: %s)", blocked, tc.blocked, mwTrunc(rec.Body.String(), 120))
+			}
+			if !tc.blocked && env.mwBackendHits() != 1 {
+				t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+			}
+		})
+	}
+}
+
+// R3 and the unknown-fingerprint window are skipped entirely when the TLS
+// fingerprint maps to a known browser.
+func TestMiddlewareKnownBrowserSkipsFingerprintRatelimit(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+	firewall.KnownFingerprints[mwFP] = "Chromium"
+	firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1000
+
+	rec := mwDo(mwRequest("/"))
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	mwAssertBodyNotContains(t, rec, "(R3)")
+
+	firewall.Mutex.RLock()
+	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
+	firewall.Mutex.RUnlock()
+	if unk != 0 {
+		t.Errorf("WindowUnkFps[%d][%s] = %d, want 0 for a known browser", mwTimestamp, mwFP, unk)
+	}
+	if got := rec.Result().Header.Get("X-Echo-Proxy-Tls-Name"); got != "Chromium" {
+		t.Errorf("proxy-tls-name forwarded = %q, want Chromium", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// forbidden fingerprints
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareForbiddenFingerprint(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+	firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
+
+	rec := mwDo(mwRequest("/"))
+
+	// BUG (wave 9 flips this): a hard block answers 200 OK, not 403.
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, "Your browser Http-Flood (1) is not allowed.")
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached despite a forbidden fingerprint")
+	}
+
+	// The forbidden check runs AFTER R3, so the unknown-fingerprint window has
+	// already been incremented for a fingerprint we then reject.
+	firewall.Mutex.RLock()
+	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
+	firewall.Mutex.RUnlock()
+	if unk != 1 {
+		t.Errorf("WindowUnkFps[%d][%s] = %d, want 1", mwTimestamp, mwFP, unk)
+	}
+}
+
+// The forbidden-fingerprint block outranks every challenge stage, including a
+// client holding a valid cookie.
+func TestMiddlewareForbiddenFingerprintBeatsValidCookie(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+	firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
+
+	rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+	mwAssertBodyContains(t, rec, "is not allowed.")
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached despite a forbidden fingerprint")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// challenge stages
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareStage1Challenge(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	rec := mwDo(mwRequest("/some/path?a=b"))
+
+	mwAssertStatus(t, rec, http.StatusFound)
+	if got, want := rec.Result().Header.Get("Location"), "/some/path?a=b"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+	wantCookie := "_1__bProxy_v=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure"
+	if got := rec.Result().Header.Get("Set-Cookie"); got != wantCookie {
+		t.Errorf("Set-Cookie = %q, want %q", got, wantCookie)
+	}
+	// BUG (wave 5 flips this): the stage-1 cookie is not HttpOnly, so backend
+	// XSS can read the proxy's challenge token.
+	if strings.Contains(strings.ToLower(rec.Result().Header.Get("Set-Cookie")), "httponly") {
+		t.Error("Set-Cookie is HttpOnly; upstream behaviour was not HttpOnly")
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached during a stage-1 challenge")
+	}
+}
+
+func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
+	token := mwCookieToken()
+
+	cases := []struct {
+		name   string
+		cookie string
+		pass   bool
+	}{
+		{name: "exact cookie", cookie: "__bProxy_v=" + token, pass: true},
+		{name: "stage1 cookie name as set by the proxy", cookie: "_1__bProxy_v=" + token, pass: true},
+		{name: "cookie among others", cookie: "a=1; __bProxy_v=" + token + "; b=2", pass: true},
+		{name: "wrong token", cookie: "__bProxy_v=deadbeef", pass: false},
+		{name: "no cookie", cookie: "", pass: false},
+		// BUG (wave 7 flips this): the check is a raw substring match on the
+		// whole Cookie header, not a parsed cookie lookup. Any cookie whose
+		// VALUE embeds the token passes the challenge.
+		{name: "token smuggled inside an unrelated cookie value", cookie: "junk=xx__bProxy_v=" + token, pass: true},
+		{name: "token in a cookie name suffix", cookie: "evil__bProxy_v=" + token + "=1", pass: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(1)
+
+			opts := []mwReqOpt{}
+			if tc.cookie != "" {
+				opts = append(opts, mwWithCookie(tc.cookie))
+			}
+			rec := mwDo(mwRequest("/", opts...))
+
+			if tc.pass {
+				mwAssertStatus(t, rec, http.StatusOK)
+				mwAssertBodyContains(t, rec, mwBackendBody)
+				if env.mwBackendHits() != 1 {
+					t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+				}
+			} else {
+				mwAssertStatus(t, rec, http.StatusFound)
+				if env.mwBackendHits() != 0 {
+					t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
+				}
+			}
+		})
+	}
+}
+
+func TestMiddlewareStage2Challenge(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(2)
+
+	token := mwJSToken()
+	publicSalt := token[:len(token)-mwStage2Difficulty]
+	hashed := utils.EncryptSha(token, "")
+
+	rec := mwDo(mwRequest("/"))
+
+	mwAssertStatus(t, rec, http.StatusOK)
+	if ct := rec.Result().Header.Get("Content-Type"); ct != "text/html" {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store, no-cache, must-revalidate, max-age=0" {
+		t.Errorf("Cache-Control = %q", cc)
+	}
+	mwAssertBodyContains(t, rec, publicSalt)
+	mwAssertBodyContains(t, rec, hashed)
+	mwAssertBodyContains(t, rec, `document.cookie="_2__bProxy_v=`+publicSalt+`"`)
+	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(mwStage2Difficulty)+`,"`+hashed+`",!1)`)
+	// Upstream loads the proof-of-work library from a third-party CDN.
+	mwAssertBodyContains(t, rec, "https://cdn.jsdelivr.net/gh/41Baloo/balooPow@main/balooPow.min.js")
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached during a stage-2 challenge")
+	}
+
+	// The hashed challenge answer is memoised under the encrypted token itself.
+	cached, ok := firewall.CacheIps.Load(token)
+	if !ok {
+		t.Fatalf("CacheIps has no entry for the stage-2 token")
+	}
+	if cached.(string) != hashed {
+		t.Errorf("cached hash = %q, want %q", cached, hashed)
+	}
+
+	// A second request takes the cache-hit branch, which reloads the hashed
+	// answer from CacheIps rather than recomputing it. The page must be
+	// byte-identical, otherwise the client's in-flight proof of work is void.
+	second := mwDo(mwRequest("/"))
+	if second.Body.String() != rec.Body.String() {
+		t.Error("the cached second challenge page differs from the first")
+	}
+	mwAssertBodyContains(t, second, hashed)
+}
+
+func TestMiddlewareStage2SolvedCookiePasses(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(2)
+
+	rec := mwDo(mwRequest("/", mwWithCookie("_2__bProxy_v="+mwJSToken())))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
+func TestMiddlewareStage3CaptchaFromCache(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(3)
+
+	token := mwCaptchaToken()
+	secretPart := token[:6]
+	publicPart := token[6:]
+	// Pre-seed the image cache so the response is fully deterministic (captcha
+	// generation itself uses math/rand).
+	firewall.CacheImgs.Store(secretPart, [2]string{"CAPTCHA_PNG_DATA", "MASK_PNG_DATA"})
+
+	rec := mwDo(mwRequest("/"))
+
+	mwAssertStatus(t, rec, http.StatusOK)
+	if ct := rec.Result().Header.Get("Content-Type"); ct != "text/html" {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,CAPTCHA_PNG_DATA"`)
+	mwAssertBodyContains(t, rec, `mask_image.src="data:image/png;base64,MASK_PNG_DATA"`)
+	mwAssertBodyContains(t, rec, `document.cookie="`+mwIP+`_3__bProxy_v="+a+"`+publicPart+`; SameSite=Lax; path=/; Secure"`)
+	mwAssertBodyContains(t, rec, `fetch("https://"+location.hostname+"/_bProxy/verified")`)
+	// BUG: the captcha answer is checked against the secret half of the token,
+	// which is handed to the client inside the image; the public half is echoed
+	// into the page. Pinned only as "this is the shape of the page today".
+	mwAssertBodyContains(t, rec, "Drag the <b>slider</b>")
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached during a stage-3 challenge")
+	}
+}
+
+func TestMiddlewareStage3CaptchaGenerationCaches(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(3)
+
+	token := mwCaptchaToken()
+	secretPart := token[:6]
+
+	rec := mwDo(mwRequest("/"))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,iVBOR`)
+
+	got, ok := firewall.CacheImgs.Load(secretPart)
+	if !ok {
+		t.Fatalf("CacheImgs has no entry for secret part %q after generating a captcha", secretPart)
+	}
+	pair, ok := got.([2]string)
+	if !ok {
+		t.Fatalf("CacheImgs entry has type %T, want [2]string", got)
+	}
+	if pair[0] == "" || pair[1] == "" {
+		t.Errorf("cached captcha/mask pair is incomplete: %q / %q", mwTrunc(pair[0], 16), mwTrunc(pair[1], 16))
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached during a stage-3 challenge")
+	}
+}
+
+func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(3)
+
+	// The client sends "<ip>_3__bProxy_v=<answer><publicPart>"; the substring
+	// check only requires "__bProxy_v=<full token>" to appear anywhere.
+	rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCaptchaToken())))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+}
+
+func TestMiddlewareSuspicionLevelBlocked(t *testing.T) {
+	cases := []struct {
+		name     string
+		stage    int
+		wantBody string
+	}{
+		{name: "stage 4", stage: 4, wantBody: "Suspicious request of level 4 (base 4)"},
+		// StageToString maps anything outside 1..4 to "5+".
+		{name: "stage 5", stage: 5, wantBody: "Suspicious request of level 5+ (base 5)"},
+		{name: "stage 9", stage: 9, wantBody: "Suspicious request of level 5+ (base 9)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(tc.stage)
+
+			// Even a client holding every valid token is blocked: the block is
+			// evaluated before the cookie check.
+			rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+
+			// BUG (wave 9 flips this): a suspicion block answers 200 OK.
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, tc.wantBody)
+			if env.mwBackendHits() != 0 {
+				t.Error("backend was reached despite the suspicion block")
+			}
+			// The blocked branch returns before CacheIps.Store, so nothing is
+			// memoised for a blocked suspicion level.
+			if _, ok := firewall.CacheIps.Load(mwAccessKey() + utils.StageToString(tc.stage)); ok {
+				t.Error("CacheIps was populated for a blocked suspicion level")
+			}
+		})
+	}
+}
+
+// BUG (wave 5 flips this): utils.StageToString collapses susLv 0 and susLv >= 5
+// into the same "5+" token, so a whitelisted request and a blocked request share
+// a CacheIps key. Once a whitelisted request has cached an empty token under
+// "<accessKey>5+", a later level-5 request from the same client reuses that empty
+// token: the suspicion block is skipped (cache hit) and the cookie check becomes
+// `strings.Contains(cookieHeader, "__bProxy_v=")`, which ANY leftover proxy
+// cookie satisfies. The blocked client reaches the backend.
+func TestMiddlewareStageToStringCacheKeyCollision(t *testing.T) {
+	env := mwNewEnv(t)
+
+	// 1. whitelisted request populates CacheIps["<accessKey>5+"] = ""
+	env.mwSetStage(0)
+	rec := mwDo(mwRequest("/"))
+	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	cached, ok := firewall.CacheIps.Load(mwAccessKey() + "5+")
+	if !ok {
+		t.Fatal("whitelisted request did not populate CacheIps")
+	}
+	if cached.(string) != "" {
+		t.Fatalf("cached token = %q, want the empty string", cached)
+	}
+
+	// 2. the same client is now at suspicion level 5 (blocked)
+	env.mwSetStage(5)
+
+	t.Run("no cookie still lands in the second switch default", func(t *testing.T) {
+		rec := mwDo(mwRequest("/"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		// Note: no "(base 5)" suffix. The cache hit skipped the first switch, so
+		// the block comes from the SECOND switch's default branch instead.
+		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
+		mwAssertBodyNotContains(t, rec, "(base 5)")
+	})
+
+	t.Run("any stale proxy cookie bypasses the block entirely", func(t *testing.T) {
+		before := env.mwBackendHits()
+		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v=whatever-stale-value")))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != before+1 {
+			t.Errorf("backend hits = %d, want %d: a level-5 request reached the backend today", env.mwBackendHits(), before+1)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// custom firewall rules
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareCustomRules(t *testing.T) {
+	cases := []struct {
+		name       string
+		rules      [][2]string
+		path       string
+		method     string
+		wantBody   string
+		wantStatus int
+		wantHit    bool
+	}{
+		{
+			name:       "static action raises to captcha",
+			rules:      [][2]string{{`http.path eq "/captcha"`, "3"}},
+			path:       "/captcha",
+			wantStatus: http.StatusOK,
+			wantBody:   "Drag the <b>slider</b>",
+		},
+		{
+			name:       "static action raises to js challenge",
+			rules:      [][2]string{{`http.path eq "/js"`, "2"}},
+			path:       "/js",
+			wantStatus: http.StatusOK,
+			wantBody:   "BalooPow",
+		},
+		{
+			name:       "relative action adds to the stage",
+			rules:      [][2]string{{`http.method ne "GET" and http.method ne "POST"`, "+2"}},
+			path:       "/",
+			method:     http.MethodDelete,
+			wantStatus: http.StatusOK,
+			wantBody:   "Drag the <b>slider</b>", // stage 1 + 2 = 3
+		},
+		{
+			name:       "relative action can lower the stage to whitelist",
+			rules:      [][2]string{{`http.path eq "/health"`, "-1"}},
+			path:       "/health",
+			wantStatus: http.StatusOK,
+			wantBody:   mwBackendBody,
+			wantHit:    true,
+		},
+		{
+			name:       "non matching rule leaves the stage alone",
+			rules:      [][2]string{{`http.path eq "/other"`, "3"}},
+			path:       "/",
+			wantStatus: http.StatusFound, // stage 1 redirect
+		},
+		{
+			name:       "additions can push past the block threshold",
+			rules:      [][2]string{{`http.user_agent contains "mw-test"`, "+4"}},
+			path:       "/",
+			wantStatus: http.StatusOK,
+			wantBody:   "Suspicious request of level 5+ (base 1)",
+		},
+		{
+			name: "a static action wins and stops evaluation",
+			rules: [][2]string{
+				{`http.path eq "/stop"`, "0"},
+				{`http.path eq "/stop"`, "+4"},
+			},
+			path:       "/stop",
+			wantStatus: http.StatusOK,
+			wantBody:   mwBackendBody,
+			wantHit:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(1)
+			env.mwSetRules(tc.rules...)
+
+			opts := []mwReqOpt{}
+			if tc.method != "" {
+				opts = append(opts, mwWithMethod(tc.method))
+			}
+			rec := mwDo(mwRequest(tc.path, opts...))
+
+			mwAssertStatus(t, rec, tc.wantStatus)
+			if tc.wantBody != "" {
+				mwAssertBodyContains(t, rec, tc.wantBody)
+			}
+			if hit := env.mwBackendHits() > 0; hit != tc.wantHit {
+				t.Errorf("backend reached = %v, want %v", hit, tc.wantHit)
+			}
+		})
+	}
+}
+
+// BUG (wave 5 flips this): firewall.EvalFirewallRule slices rule.Action[:1]
+// without a length check, so a config rule with an empty action panics the
+// request goroutine. Reachable from a plain config.json.
+func TestMiddlewareEmptyRuleActionPanics(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetRules([2]string{`http.method eq "GET"`, ""})
+
+	rec := httptest.NewRecorder()
+	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
+	if got == nil {
+		t.Fatal("expected a panic from an empty rule action, got none")
+	}
+	if !strings.Contains(mwPanicString(got), "out of range") {
+		t.Errorf("panic = %v, want a slice bounds out of range panic", got)
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// reserved /_bProxy/* paths
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareReservedPaths(t *testing.T) {
+	t.Run("stats", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/stats"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+			t.Errorf("Content-Type = %q, want text/plain", ct)
+		}
+		// BUG (wave 5 flips this): StageToString(0) renders as "5+", so a
+		// whitelisted domain reports itself as the most hostile stage.
+		mwAssertBodyContains(t, rec, "Stage: 5+")
+		mwAssertBodyContains(t, rec, "Total Requests: 1")
+		mwAssertBodyContains(t, rec, "Bypassed Requests: 1")
+		mwAssertBodyContains(t, rec, "Proxy Fingerprint: mw-proxy-fingerprint")
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+
+	t.Run("fingerprint", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		firewall.AccessIps[mwIP] = 7
+		firewall.AccessIpsCookie[mwIP] = 3
+		firewall.KnownFingerprints[mwFP] = "Chromium"
+		firewall.BotFingerprints[mwFP] = "-bot"
+
+		rec := mwDo(mwRequest("/_bProxy/fingerprint"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, "IP: "+mwIP)
+		mwAssertBodyContains(t, rec, "IP Requests: 7")
+		mwAssertBodyContains(t, rec, "IP Challenge Requests: 3")
+		mwAssertBodyContains(t, rec, "SusLV: 0")
+		mwAssertBodyContains(t, rec, "Fingerprint: "+mwFP)
+		mwAssertBodyContains(t, rec, "Browser: Chromium-bot")
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+
+	t.Run("verified", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/verified"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		if body := rec.Body.String(); body != "verified" {
+			t.Errorf("body = %q, want %q", body, "verified")
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+
+	t.Run("credits", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/credits"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		// Required by the GPL. Flips in the wave that rebrands runtime strings.
+		want := "BalooProxy; Lightweight http reverse-proxy https://github.com/41Baloo/balooProxy. Protected by GNU GENERAL PUBLIC LICENSE Version 2, June 1991"
+		if body := rec.Body.String(); body != want {
+			t.Errorf("credits body = %q, want %q", body, want)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+
+	t.Run("reserved prefix that is not a reserved path is proxied", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/not-a-real-endpoint"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if got := rec.Result().Header.Get("X-Echo-Path"); got != "/_bProxy/not-a-real-endpoint" {
+			t.Errorf("backend saw path %q", got)
+		}
+	})
+}
+
+// Reserved paths sit BEHIND the challenge: an unverified client at stage 1 is
+// redirected instead of being served /_bProxy/stats.
+func TestMiddlewareReservedPathsRequireChallenge(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	rec := mwDo(mwRequest("/_bProxy/stats"))
+	mwAssertStatus(t, rec, http.StatusFound)
+	mwAssertBodyNotContains(t, rec, "Total Requests")
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached")
+	}
+}
+
+func TestMiddlewareAdminAPIv1(t *testing.T) {
+	t.Run("correct proxy-secret is served by the api", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		proxy.CpuUsage = "12.5%"
+		proxy.RamUsage = "34.5%"
+
+		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1",
+			mwWithMethod(http.MethodPost),
+			mwWithHeader("proxy-secret", mwAPISecret),
+		)
+		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
+		rec := mwDo(req)
+
+		mwAssertStatus(t, rec, http.StatusOK)
+		if ct := rec.Result().Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		var resp struct {
+			Success bool           `json:"success"`
+			Results map[string]any `json:"results"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode api response: %v (body %q)", err, rec.Body.String())
+		}
+		if !resp.Success {
+			t.Errorf("success = false, want true (body %q)", rec.Body.String())
+		}
+		if resp.Results["CPU_USAGE"] != "12.5%" || resp.Results["RAM_USAGE"] != "34.5%" {
+			t.Errorf("results = %v", resp.Results)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for an authenticated api call")
+		}
+	})
+
+	t.Run("missing proxy-secret falls through to the backend", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/" + mwAdminSecret + "/api/v1"))
+
+		// BUG (wave 5 flips this): api.Process returns false on an auth failure
+		// and the switch case has no return, so an unauthenticated admin request
+		// is forwarded upstream - handing the admin secret to the backend in the
+		// URL and in any backend access log.
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if got := rec.Result().Header.Get("X-Echo-Path"); got != "/_bProxy/"+mwAdminSecret+"/api/v1" {
+			t.Errorf("backend saw path %q, want the admin path including the secret", got)
+		}
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+
+	t.Run("wrong admin secret in the path is not an api call", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		req := mwRequest("/_bProxy/wrong-secret/api/v1",
+			mwWithMethod(http.MethodPost),
+			mwWithHeader("proxy-secret", mwAPISecret),
+		)
+		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
+		rec := mwDo(req)
+
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+}
+
+func TestMiddlewareAPIv2(t *testing.T) {
+	t.Run("proxy action", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		proxy.CpuUsage = "99%"
+
+		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS_CPU_USAGE",
+			mwWithHeader("Proxy-Secret", mwAPISecret)))
+
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, `"CPU_USAGE":"99%"`)
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for an authenticated api call")
+		}
+	})
+
+	t.Run("domain action", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/api/v2/"+mwDomain+"/GET_TOTAL_REQUESTS",
+			mwWithHeader("Proxy-Secret", mwAPISecret)))
+
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, `"TOTAL_REQUESTS":1`)
+	})
+
+	t.Run("unknown domain", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/api/v2/nope.example/GET_TOTAL_REQUESTS",
+			mwWithHeader("Proxy-Secret", mwAPISecret)))
+
+		mwAssertBodyContains(t, rec, `"ERROR":"ERR_DOMAIN_NOT_FOUND"`)
+		mwAssertBodyContains(t, rec, `"success":false`)
+	})
+
+	t.Run("missing secret falls through to the backend", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS"))
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// backend forwarding
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareForwardsClientInfoHeaders(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+	firewall.KnownFingerprints[mwFP] = "Chromium"
+	firewall.BotFingerprints[mwFP] = "-crawler"
+
+	rec := mwDo(mwRequest("/app?x=1"))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	h := rec.Result().Header
+	checks := map[string]string{
+		"X-Echo-X-Real-Ip":      mwIP,
+		"X-Echo-Proxy-Real-Ip":  mwIP,
+		"X-Echo-Proxy-Tls-Fp":   mwFP,
+		"X-Echo-Proxy-Tls-Name": "Chromium-crawler",
+		"X-Echo-Path":           "/app",
+		"X-Echo-Query":          "x=1",
+	}
+	for k, want := range checks {
+		if got := h.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if v := h.Get("baloo-Proxy"); v != "1.5" {
+		t.Errorf("baloo-Proxy = %q, want 1.5", v)
+	}
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
+// BUG (wave 7 flips this): the client-info headers are ADDED, not SET. A client
+// that sends its own x-real-ip keeps it, and the backend sees "spoofed, real".
+// Backends that read the first value are trivially spoofable through the proxy.
+func TestMiddlewareClientSuppliedRealIPIsNotOverwritten(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+
+	rec := mwDo(mwRequest("/",
+		mwWithHeader("X-Real-Ip", "10.0.0.1"),
+		mwWithHeader("Proxy-Tls-Name", "TotallyChrome"),
+	))
+	mwAssertStatus(t, rec, http.StatusOK)
+
+	if got, want := rec.Result().Header.Get("X-Echo-X-Real-Ip"), "10.0.0.1|"+mwIP; got != want {
+		t.Errorf("backend saw x-real-ip = %q, want %q", got, want)
+	}
+	if got, want := rec.Result().Header.Get("X-Echo-Proxy-Tls-Name"), "TotallyChrome|"; got != want {
+		t.Errorf("backend saw proxy-tls-name = %q, want %q", got, want)
+	}
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
+// BUG (wave 5 flips this): the challenge cookies are forwarded verbatim to the
+// backend. A compromised or nosy backend learns the proxy's challenge token.
+func TestMiddlewareProxyCookiesReachBackend(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	cookie := "__bProxy_v=" + mwCookieToken() + "; other=1"
+	rec := mwDo(mwRequest("/", mwWithCookie(cookie)))
+	mwAssertStatus(t, rec, http.StatusOK)
+
+	if got := rec.Result().Header.Get("X-Echo-Cookie"); got != cookie {
+		t.Errorf("backend saw Cookie = %q, want %q", got, cookie)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cloudflare mode
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareCloudflareMode(t *testing.T) {
+	t.Run("Cf-Connecting-Ip becomes the subject ip", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Config.Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/fingerprint",
+			mwWithHeader("Cf-Connecting-Ip", "198.51.100.44")))
+
+		mwAssertBodyContains(t, rec, "IP: 198.51.100.44")
+		// TLS fingerprinting is disabled behind Cloudflare: everything is
+		// reported as the sentinel string "Cloudflare".
+		mwAssertBodyContains(t, rec, "Fingerprint: Cloudflare")
+		mwAssertBodyContains(t, rec, "Browser: Cloudflare")
+
+		firewall.Mutex.RLock()
+		unk := len(firewall.WindowUnkFps[mwTimestamp])
+		access := firewall.WindowAccessIps[mwTimestamp]["198.51.100.44"]
+		firewall.Mutex.RUnlock()
+		if unk != 0 {
+			t.Errorf("WindowUnkFps has %d entries, want 0 in cloudflare mode", unk)
+		}
+		if access != 1 {
+			t.Errorf("WindowAccessIps[%d][198.51.100.44] = %d, want 1", mwTimestamp, access)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+
+	// BUG (wave 5 flips this): the header is trusted unconditionally and is not
+	// validated, so anyone hitting the origin directly picks their own subject IP
+	// (and, by sending a fresh one per request, their own ratelimit bucket).
+	t.Run("Cf-Connecting-Ip is trusted from any peer", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Config.Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		env.mwSetStage(0)
+		firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1000 // the real peer is ratelimited
+
+		rec := mwDo(mwRequest("/",
+			mwWithRemoteAddr("192.0.2.99:1234"),
+			mwWithHeader("Cf-Connecting-Ip", "1.1.1.1")))
+
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if got := rec.Result().Header.Get("X-Echo-X-Real-Ip"); got != "1.1.1.1" {
+			t.Errorf("backend saw x-real-ip = %q, want 1.1.1.1", got)
+		}
+	})
+
+	// BUG (wave 5 flips this): with no Cf-Connecting-Ip header the subject IP is
+	// the empty string, so every such request shares one ratelimit bucket and one
+	// encryption cache key.
+	t.Run("missing Cf-Connecting-Ip yields an empty subject ip", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Config.Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/fingerprint"))
+		mwAssertBodyContains(t, rec, "IP: \n")
+
+		firewall.Mutex.RLock()
+		access := firewall.WindowAccessIps[mwTimestamp][""]
+		firewall.Mutex.RUnlock()
+		if access != 1 {
+			t.Errorf(`WindowAccessIps[%d][""] = %d, want 1`, mwTimestamp, access)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached for a reserved path")
+		}
+	})
+}
+
+// BUG (wave 6 flips this): in origin mode the subject IP is
+// strings.Split(RemoteAddr, ":")[0], which mangles every IPv6 peer down to
+// "[<first hextet>". 2001:db8::1 and 2001:db8::2 - and every other address in
+// the /16 - therefore share one ratelimit bucket, one encryption cache key and
+// one log identity.
+func TestMiddlewareIPv6RemoteAddrIsMangled(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+
+	for _, addr := range []string{"[2001:db8::1]:51000", "[2001:db8:ffff::2]:51001"} {
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithRemoteAddr(addr)))
+		mwAssertBodyContains(t, rec, "IP: [2001\n")
+	}
+
+	firewall.Mutex.RLock()
+	access := firewall.WindowAccessIps[mwTimestamp]["[2001"]
+	firewall.Mutex.RUnlock()
+	if access != 2 {
+		t.Errorf(`WindowAccessIps[%d]["[2001"] = %d, want 2 (two distinct IPv6 clients share one bucket)`, mwTimestamp, access)
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached for a reserved path")
+	}
+}
+
+// The encryption cache is keyed on ip+fingerprint+useragent+hour, so two
+// different clients get different tokens and one client's token is reused.
+func TestMiddlewareEncryptionCacheReuse(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	first := mwDo(mwRequest("/")).Result().Header.Get("Set-Cookie")
+	second := mwDo(mwRequest("/")).Result().Header.Get("Set-Cookie")
+	if first != second {
+		t.Errorf("token changed between requests from the same client:\n%s\n%s", first, second)
+	}
+
+	// A different user agent is a different cache key and a different token.
+	other := mwDo(mwRequest("/", mwWithHeader("User-Agent", "another-agent"))).Result().Header.Get("Set-Cookie")
+	if other == first {
+		t.Error("a different user agent produced the same challenge token")
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached during stage-1 challenges")
+	}
+}
+
+// mwBody wraps a string as a request body.
+func mwBody(s string) mwStringBody {
+	return mwStringBody{Reader: strings.NewReader(s)}
+}
+
+type mwStringBody struct{ *strings.Reader }
+
+func (mwStringBody) Close() error { return nil }
