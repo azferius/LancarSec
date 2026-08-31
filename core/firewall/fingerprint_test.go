@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -173,6 +174,41 @@ func TestFingerprintGolden(t *testing.T) {
 				"0x437572766549442832353629,0x437572766549442832353729,0x0,",
 			known:  "Firefox",
 			reason: "no GREASE, so index-0 truncation discards signal",
+		},
+		{
+			// Safari on iOS. Like Chrome it sends GREASE in the first cipher and
+			// first curve slot, so index-0 truncation lands correctly and the
+			// output byte-matches the shipped "Safari" entry.
+			//
+			// The `known` assertion below is the point of this case: these labels
+			// are the VALUES operators write rules against (`ip.bot eq "Safari"`),
+			// so a relabel during table maintenance silently breaks live configs
+			// with no error anywhere -- iPhone traffic simply stops matching the
+			// rule that was written for it and gets whatever the new label's
+			// rules say instead. Regenerating or hand-editing these tables is
+			// routine, and a swapped label is invisible in review.
+			name: "safari/ios hello maps to the Safari label",
+			hello: tls.ClientHelloInfo{
+				CipherSuites: []uint16{
+					0x0a0a, // GREASE
+					0x1301, 0x1302, 0x1303,
+					0xc02c, 0xc02b, 0xcca9, 0xc030, 0xc02f, 0xcca8,
+					0xc00a, 0xc009, 0xc014, 0xc013,
+					0x009d, 0x009c, 0x0035, 0x002f,
+					0xc008, 0xc012, 0x000a,
+				},
+				SupportedCurves: []tls.CurveID{
+					tls.CurveID(0x0a0a), // GREASE
+					tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
+				},
+				SupportedPoints: []uint8{0},
+			},
+			want: "0x1301,0x1302,0x1303,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8," +
+				"0xc00a,0xc009,0xc014,0xc013,0x9d,0x9c,0x35,0x2f,0xc008,0xc012,0xa," +
+				"0x583235353139,0x437572766550323536,0x437572766550333834," +
+				"0x437572766550353231,0x0,",
+			known:  "Safari",
+			reason: "iOS Safari sends GREASE, so index-0 truncation is correct here",
 		},
 		{
 			// BUG (a later wave should flip this): the three slice expressions in
@@ -524,6 +560,186 @@ func TestFingerprintTablesAreWellFormed(t *testing.T) {
 	}
 }
 
+// TestFingerprintTableLabels pins the exact multiset of labels each shipped
+// table publishes.
+//
+// Labels are not cosmetic: they are the string values operators compare against
+// in firewall rules (`ip.bot eq "Safari"`, `ip.bot eq "Curl"`). Renaming one, or
+// accidentally duplicating an existing name onto a second key -- exactly what a
+// copy-paste during table regeneration produces -- silently reclassifies a whole
+// client population with no error and no log line. The COUNT matters as much as
+// the set: relabelling "Safari" to "Chromium" leaves the set of distinct labels
+// looking almost right while making the Safari rule dead and folding iPhones in
+// with desktop Chrome.
+//
+// If a wave legitimately adds, removes, or renames a fingerprint, update this
+// table in the same commit so the reclassification is visible in the diff.
+func TestFingerprintTableLabels(t *testing.T) {
+	tables := []struct {
+		name  string
+		table map[string]string
+		want  map[string]int
+	}{
+		{
+			name:  "KnownFingerprints",
+			table: KnownFingerprints,
+			want: map[string]int{
+				"Chromium":    1,
+				"Firefox":     1,
+				"Firefox-Dev": 1,
+				"Edge":        1,
+				"Tor":         1,
+				"Safari":      1,
+				"Dalvik":      1,
+			},
+		},
+		{
+			name:  "BotFingerprints",
+			table: BotFingerprints,
+			want: map[string]int{
+				"Checkhost":                 1,
+				"Host-Tracker (http)":       1,
+				"Host-Tracker (page-speed)": 1,
+				"Postman":                   1,
+				"Curl":                      1,
+				"Aio-http":                  1,
+				"DataForSeo":                1,
+				"Python-Requests":           1,
+				"Unsolicited Cralwer":       1, // sic -- pinned typo, see above
+				"Unsolicited Crawler":       1,
+			},
+		},
+		{
+			name:  "ForbiddenFingerprints",
+			table: ForbiddenFingerprints,
+			want:  map[string]int{"Http-Flood (1)": 1},
+		},
+	}
+
+	for _, tt := range tables {
+		t.Run(tt.name, func(t *testing.T) {
+			got := map[string]int{}
+			for _, label := range tt.table {
+				got[label]++
+			}
+			for label, wantN := range tt.want {
+				if got[label] != wantN {
+					t.Errorf("%s has %d entries labelled %q, want %d",
+						tt.name, got[label], label, wantN)
+				}
+			}
+			for label, gotN := range got {
+				if _, ok := tt.want[label]; !ok {
+					t.Errorf("%s has %d unexpected entries labelled %q; if this label was "+
+						"added or renamed deliberately, update this test in the same commit",
+						tt.name, gotN, label)
+				}
+			}
+			if len(tt.table) != len(tt.want) {
+				t.Errorf("%s has %d entries, want %d", tt.name, len(tt.table), len(tt.want))
+			}
+		})
+	}
+}
+
+// httpFloodFingerprint is the single key in ForbiddenFingerprints, transcribed
+// verbatim from core/firewall/fingerprint.go.
+//
+// ForbiddenFingerprints is the only table that gates OUTRIGHT BLOCKING, and it
+// has exactly one entry. A single transposed hex digit in this key -- the
+// classic way a hand-edited or regenerated table goes wrong -- does not break
+// anything loudly. It just means the one TLS signature the proxy ships to
+// hard-block an HTTP flood never matches again, and the flood is served. There
+// is no error, no log line, and no other entry to fall back on.
+const httpFloodFingerprint = "0x1303,0x1302,0xc02f,0xc02b,0xc030,0xc02c,0x9e,0xc027,0x67,0xc028," +
+	"0x6b,0x9f,0xcca9,0xcca8,0xccaa,0xc0af,0xc0ad,0xc0a3,0xc09f,0xc05d,0xc061,0xc053," +
+	"0xc0ae,0xc0ac,0xc0a2,0xc09e,0xc05c,0xc060,0xc052,0xc024,0xc023,0xc00a,0xc014,0x39," +
+	"0xc009,0xc013,0x33,0x9d,0xc0a1,0xc09d,0xc051,0x9c,0xc0a0,0xc09c,0xc050,0x3d,0x3c," +
+	"0x35,0x2f,0xff," +
+	"0x437572766550323536,0x4375727665494428333029,0x437572766550353231," +
+	"0x437572766550333834,0x437572766549442832353629,0x437572766549442832353729," +
+	"0x437572766549442832353829,0x437572766549442832353929,0x437572766549442832363029," +
+	"0x0,"
+
+// TestForbiddenFingerprintIsIntact pins the shipped block-list key exactly, both
+// as a literal and end to end through Fingerprint.
+//
+// The literal assertion catches a corrupted key; the round trip proves the key
+// is still REACHABLE -- that a ClientHello with these parameters actually
+// produces this string, so the entry can fire at all. Together they mean a
+// one-digit edit on either side (the table or the fingerprint derivation) fails
+// the suite instead of quietly disarming the block list.
+func TestForbiddenFingerprintIsIntact(t *testing.T) {
+	t.Run("the shipped key is byte-exact", func(t *testing.T) {
+		if n := len(ForbiddenFingerprints); n != 1 {
+			t.Fatalf("ForbiddenFingerprints has %d entries, want exactly 1; "+
+				"if a wave added one, extend this test rather than deleting it", n)
+		}
+		label, ok := ForbiddenFingerprints[httpFloodFingerprint]
+		if !ok {
+			var shipped string
+			for k := range ForbiddenFingerprints {
+				shipped = k
+			}
+			t.Fatalf("the Http-Flood block-list key changed.\nshipped: %q\n   want: %q\n"+
+				"ForbiddenFingerprints is the only table that hard-blocks, and this is its only "+
+				"entry: a single altered digit disarms it silently.", shipped, httpFloodFingerprint)
+		}
+		if label != "Http-Flood (1)" {
+			t.Errorf("ForbiddenFingerprints[httpFloodFingerprint] = %q, want %q", label, "Http-Flood (1)")
+		}
+	})
+
+	t.Run("a matching hello still derives that key", func(t *testing.T) {
+		withCleanConnections(t)
+
+		const addr = "203.0.113.66:31337"
+		conn := newFakeConn(t, addr)
+
+		// Index 0 of each list is dropped by Fingerprint, so the leading GREASE
+		// values are placeholders for whatever the flood tool actually sent
+		// first; every element after them is the real signature.
+		hello := tls.ClientHelloInfo{
+			CipherSuites: []uint16{
+				0x0a0a, // dropped by CipherSuites[1:]
+				0x1303, 0x1302, 0xc02f, 0xc02b, 0xc030, 0xc02c, 0x009e, 0xc027, 0x0067, 0xc028,
+				0x006b, 0x009f, 0xcca9, 0xcca8, 0xccaa, 0xc0af, 0xc0ad, 0xc0a3, 0xc09f, 0xc05d,
+				0xc061, 0xc053, 0xc0ae, 0xc0ac, 0xc0a2, 0xc09e, 0xc05c, 0xc060, 0xc052, 0xc024,
+				0xc023, 0xc00a, 0xc014, 0x0039, 0xc009, 0xc013, 0x0033, 0x009d, 0xc0a1, 0xc09d,
+				0xc051, 0x009c, 0xc0a0, 0xc09c, 0xc050, 0x003d, 0x003c, 0x0035, 0x002f, 0x00ff,
+			},
+			SupportedCurves: []tls.CurveID{
+				tls.CurveID(0x0a0a), // dropped by SupportedCurves[1:]
+				tls.CurveP256,
+				tls.CurveID(30),
+				tls.CurveP521,
+				tls.CurveP384,
+				tls.CurveID(256), tls.CurveID(257), tls.CurveID(258),
+				tls.CurveID(259), tls.CurveID(260),
+			},
+			SupportedPoints: []uint8{0},
+			Conn:            conn,
+		}
+
+		if _, err := Fingerprint(&hello); err != nil {
+			t.Fatalf("Fingerprint: %v", err)
+		}
+
+		got, ok := readConnection(addr)
+		if !ok {
+			t.Fatalf("Connections[%q] was not written", addr)
+		}
+		if got != httpFloodFingerprint {
+			t.Fatalf("Fingerprint derived a string that no longer matches the shipped "+
+				"block-list key\n got: %q\nwant: %q", got, httpFloodFingerprint)
+		}
+		if label := ForbiddenFingerprints[got]; label != "Http-Flood (1)" {
+			t.Errorf("ForbiddenFingerprints[derived] = %q, want %q; the flood signature the "+
+				"proxy ships to hard-block would be served instead of blocked", label, "Http-Flood (1)")
+		}
+	})
+}
+
 // TestOnStateChangeEvictsFingerprint pins the other half of the Connections
 // lifecycle: entries written by Fingerprint are removed when the connection is
 // hijacked or closed, and are NOT removed on any other state transition.
@@ -573,5 +789,150 @@ func TestOnStateChangeEvictsFingerprint(t *testing.T) {
 				t.Errorf("Connections[%q] was evicted on %s, want it kept", addr, tt.name)
 			}
 		})
+	}
+}
+
+// TestOnStateChangeEvictionHoldsTheMutex proves the eviction actually takes
+// firewall.Mutex, rather than merely proving the entry ends up gone.
+//
+// Why an assertion on the LOCK and not just on the map: Connections is a plain
+// Go map. Fingerprint writes it from a TLS-handshake goroutine; OnStateChange
+// deletes from it on every connection close. Those two run concurrently by
+// construction -- net/http calls ConnState from the connection's own serve
+// goroutine while other connections are still handshaking. An unsynchronised
+// delete racing a write is not a lost update, it is
+// `fatal error: concurrent map writes`, which net/http's per-handler recover
+// cannot catch. The process dies, and it dies hardest exactly when connection
+// churn peaks: during an attack.
+//
+// A test that only checks "the key is gone afterwards" passes with the
+// Lock/Unlock pair deleted, because a single-goroutine delete needs no lock.
+// So this test holds the mutex itself and requires OnStateChange to BLOCK:
+//
+//   - correct code blocks on Mutex.Lock() and can never signal while we hold it,
+//     so the "finished early" branch is unreachable -- no flake in that direction;
+//   - code with the lock removed deletes immediately and signals.
+//
+// The goroutine announces itself before calling OnStateChange, so the wait
+// covers only the handful of instructions between that announcement and the
+// delete.
+//
+// Wave 7 replaces this global RWMutex with sharding or a sync.Map. That is a
+// fine change -- but it must keep eviction and insertion mutually excluded, and
+// if it does, this test needs rewriting against the new primitive rather than
+// deleting.
+func TestOnStateChangeEvictionHoldsTheMutex(t *testing.T) {
+	withCleanConnections(t)
+
+	const addr = "192.0.2.77:8100"
+	conn := newFakeConn(t, addr)
+
+	hello := tls.ClientHelloInfo{
+		CipherSuites:    []uint16{0x0a0a, 0x1301},
+		SupportedPoints: []uint8{0},
+		Conn:            conn,
+	}
+	if _, err := Fingerprint(&hello); err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+	if _, ok := readConnection(addr); !ok {
+		t.Fatalf("precondition failed: Connections[%q] missing", addr)
+	}
+
+	started := make(chan struct{})
+	finished := make(chan struct{})
+
+	// Take the lock the eviction must contend for. releaseOnce guards against a
+	// double Unlock on the failure paths, and the defer makes sure the lock is
+	// released even if the test aborts via t.Fatalf (which runs deferred calls).
+	var releaseOnce sync.Once
+	Mutex.Lock()
+	release := func() { releaseOnce.Do(func() { Mutex.Unlock() }) }
+	defer release()
+
+	go func() {
+		close(started)
+		OnStateChange(conn, http.StateClosed)
+		close(finished)
+	}()
+
+	<-started
+
+	select {
+	case <-finished:
+		release()
+		t.Fatalf("OnStateChange evicted Connections[%q] while the test held firewall.Mutex; "+
+			"the eviction must take the lock, because it races Fingerprint's write to the "+
+			"same map on every connection close", addr)
+	case <-time.After(250 * time.Millisecond):
+		// Expected: blocked on Mutex.Lock().
+	}
+
+	// Entry must still be there -- nothing can have deleted it under our lock.
+	if _, ok := Connections[addr]; !ok {
+		release()
+		t.Fatalf("Connections[%q] disappeared while the test held firewall.Mutex", addr)
+	}
+
+	release()
+
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("OnStateChange never completed after firewall.Mutex was released")
+	}
+
+	if _, ok := readConnection(addr); ok {
+		t.Errorf("Connections[%q] still present after StateClosed, want it evicted", addr)
+	}
+}
+
+// TestOnStateChangeConcurrentWithFingerprint is the -race tripwire for the pair
+// of operations that actually collide in production: a delete on one connection
+// while another connection is being fingerprinted.
+//
+// Under `go test -race` this fails immediately if either side drops its lock.
+// Without -race it is still worth running: the Go runtime's own
+// concurrent-map-writes detector fires on the same access pattern. Treat
+// TestOnStateChangeEvictionHoldsTheMutex as the deterministic assertion and this
+// as the belt-and-braces one.
+func TestOnStateChangeConcurrentWithFingerprint(t *testing.T) {
+	withCleanConnections(t)
+
+	const (
+		goroutines = 16
+		iterations = 50
+	)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		conn := newFakeConn(t, "192.0.2.2:"+strconv.Itoa(50000+i))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				hello := tls.ClientHelloInfo{
+					CipherSuites:    []uint16{0x0a0a, 0x1301, 0x1302},
+					SupportedPoints: []uint8{0},
+					Conn:            conn,
+				}
+				if _, err := Fingerprint(&hello); err != nil {
+					t.Errorf("Fingerprint: %v", err)
+					return
+				}
+				OnStateChange(conn, http.StateClosed)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	// Every goroutine ends on an eviction, so the map must drain completely.
+	if n := connectionCount(); n != 0 {
+		t.Errorf("Connections has %d entries after every connection closed, want 0", n)
 	}
 }

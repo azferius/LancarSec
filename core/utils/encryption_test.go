@@ -239,6 +239,66 @@ func TestRandomStringIsNotConstant(t *testing.T) {
 	}
 }
 
+// The property that makes RandomString usable as a secret generator at all:
+// two calls with the SAME length must not produce the same string. Anything
+// that makes the output a pure function of the length — a zeroed buffer, a
+// reused/positional index, a `rand.Read` whose error is swallowed leaving the
+// slice untouched, or a source that is never advanced — collapses this to a
+// single value and reproduces audit finding #1 ("every secret is identical on
+// every install") in its most extreme form.
+//
+// Not seed- or timing-dependent: eight 32-character draws from a 62-symbol
+// alphabet colliding by chance has probability under 62^-32 (~1e-57) per pair,
+// so this cannot flake. It deliberately does NOT pin the values, only that they
+// differ, so it keeps working unchanged when wave 5 swaps math/rand for
+// crypto/rand.
+func TestRandomStringVariesBetweenCalls(t *testing.T) {
+	const (
+		length  = 32
+		samples = 8
+	)
+
+	seen := make(map[string]bool, samples)
+	order := make([]string, 0, samples)
+	for i := 0; i < samples; i++ {
+		s := RandomString(length)
+		order = append(order, s)
+		seen[s] = true
+	}
+
+	if len(seen) != samples {
+		t.Fatalf("%d calls to RandomString(%d) produced only %d distinct values (%q) — the generator is a pure function of the length, not a source of randomness", samples, length, len(seen), order)
+	}
+}
+
+// Every character of the declared alphabet must be reachable. This is the
+// off-by-one net for the index bound: `rand.Intn(len(rnd)-1)` still produces
+// well-formed, varying, correct-length output and only ever drops the LAST
+// symbol ('9'), silently shrinking the secret alphabet from 62 to 61 and every
+// secret's entropy with it. Nothing else in this file would notice.
+//
+// Non-flaky: a specific character missing from 4000 independent uniform draws
+// over 62 symbols has probability (61/62)^4000 ≈ 1e-28, so even summed over the
+// whole alphabet a spurious failure is ~1e-26.
+func TestRandomStringUsesEveryCharacterOfItsAlphabet(t *testing.T) {
+	const draws = 4000
+
+	seen := make(map[rune]bool, len(randomStringAlphabet))
+	for _, r := range RandomString(draws) {
+		seen[r] = true
+	}
+
+	var missing []string
+	for _, r := range randomStringAlphabet {
+		if !seen[r] {
+			missing = append(missing, string(r))
+		}
+	}
+	if len(missing) != 0 {
+		t.Errorf("RandomString never emitted %v in %d draws; the alphabet is %q (%d symbols) but only %d are reachable — the index bound is wrong", missing, draws, randomStringAlphabet, len(randomStringAlphabet), len(seen))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // HashToInt
 // ---------------------------------------------------------------------------

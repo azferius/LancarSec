@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
 	"github.com/azferius/lancarsec/core/proxy"
 )
 
@@ -240,6 +241,43 @@ func TestAskInt(t *testing.T) {
 	}
 }
 
+// The table above pins only AskInt's RETURN VALUE for an unparseable answer,
+// and that value is 75 whether the function recurses (today) or gives up and
+// returns the default immediately. Both routes produce the same number, so the
+// table cannot tell them apart — and "delete the recursion, just return
+// defaultVal" is the obvious shape of a bounded-loop rewrite.
+//
+// The difference is observable on stdout: recursing means the question is asked
+// a SECOND time, and it is that second (empty, EOF) answer that prints the
+// "Using Default Value" notice. An AskInt that returns the default straight from
+// the error branch asks once and never prints the notice — silently accepting a
+// ratelimit threshold the operator never confirmed. AskInt supplies every
+// threshold in the first-launch wizard (BypassStage1, BypassStage2 and the four
+// disable thresholds), so "did the operator actually answer this?" is the whole
+// point of the prompt.
+func TestAskIntRePromptsAfterAnUnparseableAnswerInsteadOfSilentlyDefaulting(t *testing.T) {
+	saveColorsString(t)
+	ColorsString = "0;31"
+	read := muteStdout(t)
+	withStdin(t, "banana\n")
+
+	const question = "At How Many Bypassing Requests Per Second Would You Like To Activate Stage 2?"
+	if got := AskInt(question, 75); got != 75 {
+		t.Fatalf("AskInt = %d, want 75", got)
+	}
+
+	out := read()
+	if !strings.Contains(out, "The Provided Answer Is Not A Number!") {
+		t.Errorf("the rejection notice was not printed; stdout = %q", out)
+	}
+	if n := strings.Count(out, question); n != 2 {
+		t.Errorf("the question was printed %d time(s), want 2 — AskInt must re-ask after an unparseable answer, not return the default from the error branch; stdout = %q", n, out)
+	}
+	if !strings.Contains(out, "Using Default Value 75") {
+		t.Errorf("the default-value notice was not printed, so the 75 was never announced to the operator — AskInt returned it straight out of the error branch; stdout = %q", out)
+	}
+}
+
 func TestAskHelpersEmitThePromptAndTheDefaultNotice(t *testing.T) {
 	saveColorsString(t)
 	ColorsString = "0;31"
@@ -455,6 +493,200 @@ func TestReadLogsTruncatesLongLines(t *testing.T) {
 	want := FormatLogs(log)[:proxy.TWidth-4]
 	if !strings.Contains(out, want+" ...") {
 		t.Errorf("truncated output does not contain the expected %d-byte prefix\ngot:  %q\nwant prefix: %q", proxy.TWidth-4, out, want)
+	}
+}
+
+// The truncation branch is `if len(parsedOut)+4 > proxy.TWidth`, a STRICT
+// greater-than: a line that exactly fills the terminal is printed whole. The
+// existing tests only exercise the far side of that boundary (a 200-char UA
+// against a 40-column terminal) and the illegal side (TWidth 0), so relaxing
+// the comparison to >= — the single most common way a width threshold drifts
+// — changes nothing they assert. Both sides are pinned here.
+func TestReadLogsTruncationBoundaryIsStrictlyGreaterThan(t *testing.T) {
+	saveColorsString(t)
+	saveDomainsData(t)
+	saveProxyTUIGlobals(t)
+	ColorsString = "0;31"
+	proxy.MaxLogLength = 10
+
+	log := domains.DomainLog{Time: "1", IP: "1.1.1.1", BrowserFP: "Chrome", Useragent: "UA", Path: "/a"}
+	line := FormatLogs(log)
+
+	// The `[-] ` gutter is 4 columns, so a line of exactly len(line)+4 columns
+	// is the widest one that still fits.
+	exactFit := len(line) + 4
+
+	t.Run("a line that exactly fills the terminal is printed whole", func(t *testing.T) {
+		domains.DomainsData["example.com"] = domains.DomainData{Name: "example.com", LastLogs: []domains.DomainLog{log}}
+		proxy.TWidth = exactFit
+
+		read := muteStdout(t)
+		ReadLogs("example.com")
+		out := read()
+
+		if strings.Contains(out, " ...") {
+			t.Errorf("with TWidth == len(line)+4 == %d the line was truncated; the comparison is `> TWidth`, not `>= TWidth`\ngot: %q", exactFit, out)
+		}
+		if !strings.Contains(out, line) {
+			t.Errorf("the full log line was not printed\ngot:  %q\nwant: %q", out, line)
+		}
+	})
+
+	t.Run("one column narrower truncates", func(t *testing.T) {
+		domains.DomainsData["example.com"] = domains.DomainData{Name: "example.com", LastLogs: []domains.DomainLog{log}}
+		proxy.TWidth = exactFit - 1
+
+		read := muteStdout(t)
+		ReadLogs("example.com")
+		out := read()
+
+		if !strings.Contains(out, " ...") {
+			t.Errorf("with TWidth == len(line)+3 == %d the line was NOT truncated\ngot: %q", exactFit-1, out)
+		}
+		if !strings.Contains(out, line[:proxy.TWidth-4]+" ...") {
+			t.Errorf("the truncated prefix is wrong\ngot:  %q\nwant prefix: %q", out, line[:proxy.TWidth-4])
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// ReadLogs — locking.
+//
+// ReadLogs reads (and, when the log slice has overflowed, WRITES)
+// domains.DomainsData, the map the request hot path mutates on every request.
+// Both accesses are guarded by firewall.Mutex today. Neither guard is visible
+// to any single-threaded assertion: drop the RLock and the function still
+// returns the same bytes; downgrade the write's Lock to an RLock and it still
+// compiles, still reads as "locked" in review, and still passes every test
+// above — while in production it is a concurrent map write against the
+// middleware, which is an unrecoverable Go runtime fatal error, not a panic the
+// proxy can survive.
+//
+// Both tests below prove the lock is really taken by holding firewall.Mutex in
+// the conflicting mode from the test goroutine and asserting ReadLogs BLOCKS.
+// The "still blocked" direction cannot flake — while the conflicting lock is
+// held, correct code can never finish, no matter how slow the machine is.
+// ---------------------------------------------------------------------------
+
+// blockWindow is how long a correctly-locked ReadLogs is required to stay
+// blocked. Generous on purpose: it only bounds how long an UNLOCKED (mutated)
+// ReadLogs has to run to completion, and that path does a few map reads and a
+// handful of writes to a temp file.
+const blockWindow = 500 * time.Millisecond
+
+// runReadLogsInBackground starts ReadLogs in a goroutine and returns a channel
+// closed when it returns, plus a func that waits for it. It does not return
+// until the goroutine is actually scheduled and about to call ReadLogs, so the
+// blockWindow measures ReadLogs and not the scheduler.
+func runReadLogsInBackground(t *testing.T, domain string) (<-chan struct{}, func()) {
+	t.Helper()
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		close(started)
+		ReadLogs(domain)
+	}()
+	<-started
+
+	return done, func() {
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("ReadLogs never returned after the lock was released")
+		}
+	}
+}
+
+// ReadLogs must take firewall.Mutex for READING before it touches
+// domains.DomainsData. MaxLogLength is set above the log count so the overflow
+// branch (and its separate write lock) is never reached — the only lock in play
+// is the RLock at the top of the function.
+func TestReadLogsTakesTheReadLockBeforeReadingDomainsData(t *testing.T) {
+	saveColorsString(t)
+	saveDomainsData(t)
+	saveProxyTUIGlobals(t)
+	ColorsString = "0;31"
+	proxy.TWidth = 500
+	proxy.MaxLogLength = 10 // 1 log, no overflow: the write branch is skipped
+
+	domains.DomainsData["example.com"] = domains.DomainData{
+		Name:     "example.com",
+		LastLogs: []domains.DomainLog{{Time: "1", IP: "1.1.1.1", BrowserFP: "Chrome", Useragent: "UA", Path: "/a"}},
+	}
+	muteStdout(t)
+
+	firewall.Mutex.Lock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			firewall.Mutex.Unlock()
+		}
+	}()
+
+	done, wait := runReadLogsInBackground(t, "example.com")
+
+	select {
+	case <-done:
+		t.Fatal("ReadLogs ran to completion while firewall.Mutex was held for WRITING — it is reading domains.DomainsData without taking the read lock, racing every request the middleware is serving")
+	case <-time.After(blockWindow):
+		// Still blocked on the read lock, which is the contract.
+	}
+
+	firewall.Mutex.Unlock()
+	unlocked = true
+	wait()
+}
+
+// ReadLogs must take firewall.Mutex for WRITING before storing the trimmed
+// DomainData back into the map. The test holds a READ lock: a real Lock() has
+// to wait for it, an RLock() sails straight through. MaxLogLength is set below
+// the log count so the overflow branch really runs.
+func TestReadLogsTakesTheWriteLockBeforeStoringTheTrimmedLogs(t *testing.T) {
+	saveColorsString(t)
+	saveDomainsData(t)
+	saveProxyTUIGlobals(t)
+	ColorsString = "0;31"
+	proxy.TWidth = 500
+	proxy.MaxLogLength = 1 // 3 logs, overflow 2: the write branch runs
+
+	domains.DomainsData["example.com"] = domains.DomainData{
+		Name: "example.com",
+		LastLogs: []domains.DomainLog{
+			{Time: "1", IP: "1.1.1.1", BrowserFP: "Chrome", Useragent: "UA", Path: "/a"},
+			{Time: "2", IP: "2.2.2.2", BrowserFP: "Chrome", Useragent: "UA", Path: "/b"},
+			{Time: "3", IP: "3.3.3.3", BrowserFP: "Chrome", Useragent: "UA", Path: "/c"},
+		},
+	}
+	muteStdout(t)
+
+	// A read lock. The RLock at the top of ReadLogs is allowed to share it; only
+	// a genuine writer has to wait.
+	firewall.Mutex.RLock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			firewall.Mutex.RUnlock()
+		}
+	}()
+
+	done, wait := runReadLogsInBackground(t, "example.com")
+
+	select {
+	case <-done:
+		t.Fatal("ReadLogs wrote domains.DomainsData while another reader held firewall.Mutex — the map WRITE is guarded by a read lock (or by nothing), which is a concurrent map write against the middleware and a fatal, unrecoverable runtime error in production")
+	case <-time.After(blockWindow):
+		// Still blocked acquiring the write lock, which is the contract.
+	}
+
+	firewall.Mutex.RUnlock()
+	unlocked = true
+	wait()
+
+	// And it did do the trimming once it got the lock.
+	if stored := domains.DomainsData["example.com"].LastLogs; len(stored) != 1 || stored[0].Path != "/c" {
+		t.Errorf("stored LastLogs = %+v, want just the newest entry (/c)", stored)
 	}
 }
 

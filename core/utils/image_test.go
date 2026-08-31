@@ -30,6 +30,39 @@ func countOpaque(img *image.RGBA) int {
 	return n
 }
 
+// opaqueBounds returns the smallest rectangle covering every non-transparent
+// pixel, plus how many there were. The rectangle is empty when n == 0.
+func opaqueBounds(img *image.RGBA) (image.Rectangle, int) {
+	minX, minY := 1<<30, 1<<30
+	maxX, maxY := -1<<30, -1<<30
+	n := 0
+	b := img.Bounds()
+	for x := b.Min.X; x < b.Max.X; x++ {
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			if img.RGBAAt(x, y).A == 0 {
+				continue
+			}
+			n++
+			if x < minX {
+				minX = x
+			}
+			if y < minY {
+				minY = y
+			}
+			if x > maxX {
+				maxX = x
+			}
+			if y > maxY {
+				maxY = y
+			}
+		}
+	}
+	if n == 0 {
+		return image.Rectangle{}, 0
+	}
+	return image.Rect(minX, minY, maxX+1, maxY+1), n
+}
+
 var (
 	transparent = color.RGBA{}
 	red         = color.RGBA{R: 255, G: 0, B: 0, A: 255}
@@ -92,6 +125,74 @@ func TestAddLabelEdgeCasesDoNotPanic(t *testing.T) {
 				t.Errorf("bounds changed to %v", img.Bounds())
 			}
 		})
+	}
+}
+
+// AddLabel's two int parameters are (x, y) and they are NOT interchangeable:
+// x is the horizontal pen position and y is the BASELINE, so the glyph box sits
+// to the right of x and ABOVE y. Transposing them into the fixed.Point26_6 is
+// the kind of same-type argument swap a refactor of the captcha renderer can
+// introduce for free — middleware.go:246-248 passes two random offsets
+// positionally — and every other AddLabel test here (pixels written, bounds
+// unchanged, no panic, clipped when far outside) is blind to it.
+//
+// Asserted structurally rather than as a pixel golden, so a basicfont bump
+// cannot flip it: the ink must land inside the cell the (x, y) pen position
+// defines, using generous margins around basicfont.Face7x13's 7x13 cell
+// (ascent 11, descent 2). Today "M" at (3, 30) inks x[3..8] y[21..29];
+// transposed it inks x[30..35] y[0..2].
+func TestAddLabelTreatsTheFirstArgumentAsXAndTheSecondAsTheBaseline(t *testing.T) {
+	const penX, baselineY = 3, 30
+
+	img := image.NewRGBA(image.Rect(0, 0, 80, 60))
+	AddLabel(img, penX, baselineY, "M", color.RGBA{R: 255, G: 255, B: 255, A: 255})
+
+	box, n := opaqueBounds(img)
+	if n == 0 {
+		t.Fatal("AddLabel wrote no pixels at all; with an 80x60 canvas the glyph should be fully visible — the pen position was not where the arguments say it is")
+	}
+
+	// Horizontal: the glyph starts at the pen and is one 7px cell wide. Allow
+	// two cells of slack for any future face.
+	if box.Min.X < penX || box.Max.X > penX+14 {
+		t.Errorf("ink spans x[%d..%d), want it inside [%d..%d) — the x argument is not being used as the horizontal pen position", box.Min.X, box.Max.X, penX, penX+14)
+	}
+	// Vertical: the glyph hangs off the baseline, so it sits above y and may
+	// descend a couple of pixels below it. Allow a 16px ascent / 5px descent.
+	if box.Min.Y < baselineY-16 || box.Max.Y > baselineY+5 {
+		t.Errorf("ink spans y[%d..%d), want it inside [%d..%d) — the y argument is not being used as the baseline", box.Min.Y, box.Max.Y, baselineY-16, baselineY+5)
+	}
+}
+
+// The same swap seen from the other side: two labels that differ ONLY in their
+// x argument must move horizontally, and two that differ only in y must move
+// vertically. A transposed point makes each move along the wrong axis.
+func TestAddLabelXAndYMoveTheGlyphAlongTheirOwnAxes(t *testing.T) {
+	draw := func(x, y int) image.Rectangle {
+		img := image.NewRGBA(image.Rect(0, 0, 80, 60))
+		AddLabel(img, x, y, "M", color.RGBA{R: 255, G: 255, B: 255, A: 255})
+		box, n := opaqueBounds(img)
+		if n == 0 {
+			t.Fatalf("AddLabel(%d, %d) wrote nothing", x, y)
+		}
+		return box
+	}
+
+	base := draw(10, 40)
+	movedX := draw(30, 40)
+	movedY := draw(10, 20)
+
+	if movedX.Min.Y != base.Min.Y || movedX.Max.Y != base.Max.Y {
+		t.Errorf("changing only x moved the ink vertically: %v -> %v", base, movedX)
+	}
+	if movedX.Min.X-base.Min.X != 20 {
+		t.Errorf("changing x by +20 moved the ink horizontally by %d (%v -> %v), want 20", movedX.Min.X-base.Min.X, base, movedX)
+	}
+	if movedY.Min.X != base.Min.X || movedY.Max.X != base.Max.X {
+		t.Errorf("changing only y moved the ink horizontally: %v -> %v", base, movedY)
+	}
+	if movedY.Min.Y-base.Min.Y != -20 {
+		t.Errorf("changing y by -20 moved the ink vertically by %d (%v -> %v), want -20", movedY.Min.Y-base.Min.Y, base, movedY)
 	}
 }
 
@@ -238,6 +339,84 @@ func TestWarpImgReadsOnePixelPastTheUpperBound(t *testing.T) {
 	dst2 := WarpImg(src, func(x, y int) (int, int) { return w + 1, h + 1 })
 	if got := countOpaque(dst2); got != 0 {
 		t.Errorf("displacement to (maxX+1, maxY+1) produced %d opaque pixels, want 0", got)
+	}
+}
+
+// WarpImg's guard has FOUR clauses — dx below minX, dx above maxX, dy below
+// minY, dy above maxY — and each one is load-bearing on its own. Deleting
+// either Y clause (the routine casualty of a guard being "simplified" or
+// rewritten) leaves a source read that is out of range on the vertical axis
+// only, which every other WarpImg test here misses: they all displace both axes
+// together, so the surviving X clause covers for the missing Y one.
+//
+// The displacement closure is caller-supplied — the captcha passes an arbitrary
+// wobble function — so an unguarded axis is a genuine out-of-range read on an
+// arbitrary image.Image. funcImage makes that read observable: its At() is
+// defined everywhere and returns an opaque sentinel outside Bounds(), where an
+// *image.RGBA would have quietly returned the zero colour and hidden the bug.
+func TestWarpImgRejectsAnOutOfRangeYEvenWhenXIsInRange(t *testing.T) {
+	const w, h = 4, 4
+	sentinel := color.RGBA{R: 1, G: 2, B: 3, A: 255}
+	inside := color.RGBA{R: 9, G: 9, B: 9, A: 255}
+
+	src := funcImage{
+		rect: image.Rect(0, 0, w, h),
+		at: func(x, y int) color.Color {
+			if x < 0 || x >= w || y < 0 || y >= h {
+				return sentinel // strictly outside Bounds()
+			}
+			return inside
+		},
+	}
+
+	tests := []struct {
+		name string
+		dy   int
+	}{
+		{name: "dy far above maxY", dy: h + 50},
+		{name: "dy one past maxY", dy: h + 1},
+		{name: "dy far below minY", dy: -50},
+		{name: "dy one below minY", dy: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// x is deliberately left in range, so ONLY the Y half of the guard
+			// can reject this displacement.
+			dst := WarpImg(src, func(x, y int) (int, int) { return x, tt.dy })
+
+			if got := countOpaque(dst); got != 0 {
+				t.Fatalf("displacement (x, %d) produced %d opaque pixels, want 0 — WarpImg read outside the source rectangle on the Y axis", tt.dy, got)
+			}
+			if got := dst.RGBAAt(0, 0); got == sentinel {
+				t.Fatalf("dst(0,0) = %v, the out-of-bounds sentinel: the Y half of the bounds guard is not rejecting", got)
+			}
+		})
+	}
+}
+
+// The mirror of the test above, kept next to it so a guard rewrite that drops
+// the X half instead is caught by the same pair.
+func TestWarpImgRejectsAnOutOfRangeXEvenWhenYIsInRange(t *testing.T) {
+	const w, h = 4, 4
+	sentinel := color.RGBA{R: 1, G: 2, B: 3, A: 255}
+	inside := color.RGBA{R: 9, G: 9, B: 9, A: 255}
+
+	src := funcImage{
+		rect: image.Rect(0, 0, w, h),
+		at: func(x, y int) color.Color {
+			if x < 0 || x >= w || y < 0 || y >= h {
+				return sentinel
+			}
+			return inside
+		},
+	}
+
+	for _, dx := range []int{w + 50, w + 1, -1, -50} {
+		dst := WarpImg(src, func(x, y int) (int, int) { return dx, y })
+		if got := countOpaque(dst); got != 0 {
+			t.Errorf("displacement (%d, y) produced %d opaque pixels, want 0 — WarpImg read outside the source rectangle on the X axis", dx, got)
+		}
 	}
 }
 

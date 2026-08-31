@@ -1,6 +1,10 @@
 package firewall
 
 import (
+	"io"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/azferius/lancarsec/core/domains"
@@ -229,6 +233,50 @@ func TestEvalFirewallRuleOrdering(t *testing.T) {
 			want:  2,
 		},
 		{
+			// The FIRST matching absolute rule wins, because `default` returns
+			// immediately. Every later absolute rule is dead. This is the single
+			// place where evaluation ORDER changes the ANSWER rather than just
+			// the arithmetic path taken to it -- increments and decrements are
+			// commutative, so a reordered rule list is invisible everywhere else.
+			//
+			// A wave that reverses the loop, sorts rules by cost, or drains the
+			// slice from the tail flips this from 1 to 9.
+			name: "the first matching absolute rule wins, later absolutes are dead",
+			rules: []domains.Rule{
+				rule(t, match, "1"),
+				rule(t, match, "9"),
+			},
+			susLv: 0,
+			want:  1,
+		},
+		{
+			// The operator-facing shape of the same fact. A config that reads
+			// "trust this healthcheck, then be paranoid about everything else"
+			// grants susLv 0. Reversed, the paranoid rule is reached first and
+			// the healthcheck is challenged. Both rules match, both are
+			// absolute, and nothing anywhere logs which one won.
+			name: "config order decides the policy when two absolute rules both match",
+			rules: []domains.Rule{
+				rule(t, match, "0"),  // allow-healthcheck
+				rule(t, match, "50"), // deny-all
+			},
+			susLv: 0,
+			want:  0,
+		},
+		{
+			// Mixed list: the increments before the first absolute are computed
+			// and then thrown away, and the absolute AFTER it never runs.
+			name: "increments before the first absolute are discarded, later absolutes never run",
+			rules: []domains.Rule{
+				rule(t, match, "+2"),
+				rule(t, match, "3"),
+				rule(t, match, "8"),
+				rule(t, match, "+100"),
+			},
+			susLv: 0,
+			want:  3,
+		},
+		{
 			// BUG (a later wave may flip this): the short-circuit only happens
 			// when Sscan SUCCEEDS. A malformed absolute action falls out of the
 			// switch and the loop continues, so "+100" below still applies. The
@@ -269,6 +317,91 @@ func TestEvalFirewallRuleOrdering(t *testing.T) {
 				t.Errorf("EvalFirewallRule(susLv=%d) = %d, want %d", tt.susLv, got, tt.want)
 			}
 		})
+	}
+}
+
+// captureStdout redirects os.Stdout to a temp file for the duration of fn and
+// returns what was written. EvalFirewallRule reports malformed actions with
+// fmt.Printf, which resolves os.Stdout at call time, so swapping the variable is
+// enough. A temp file (rather than an os.Pipe) means there is no reader
+// goroutine and no way to deadlock on a full pipe buffer.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	f, err := os.CreateTemp(t.TempDir(), "stdout-*.txt")
+	if err != nil {
+		t.Fatalf("os.CreateTemp: %v", err)
+	}
+	saved := os.Stdout
+	t.Cleanup(func() {
+		os.Stdout = saved
+		_ = f.Close()
+	})
+
+	os.Stdout = f
+	fn()
+	os.Stdout = saved
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	out, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return string(out)
+}
+
+// TestEvalFirewallRuleReportsRuleIndexInOrder pins the second observable
+// consequence of the loop order: the diagnostic EvalFirewallRule prints for a
+// malformed action carries the rule's INDEX, and the messages come out in
+// config order.
+//
+// This is the only signal an operator gets that a rule is broken -- there is no
+// validation at config load (see TestEvalFirewallRuleActions) -- so the index
+// has to point at the line they actually wrote. It is also a second, independent
+// tripwire on iteration order: a wave that reverses, sorts, or partitions the
+// rule slice reorders these lines even when the arithmetic happens to be
+// commutative and TestEvalFirewallRuleOrdering stays green.
+func TestEvalFirewallRuleReportsRuleIndexInOrder(t *testing.T) {
+	const match = `http.path eq "/admin"`
+	vars := gofilter.Message{"http.path": "/admin"}
+
+	currDomain := domains.DomainSettings{
+		Name: "example.com",
+		CustomRules: []domains.Rule{
+			rule(t, match, "+bad-increment"), // index 0, '+' branch
+			rule(t, match, "-bad-decrement"), // index 1, '-' branch
+			rule(t, match, "bad-absolute"),   // index 2, default branch
+		},
+	}
+
+	var got int
+	out := captureStdout(t, func() {
+		got = EvalFirewallRule(currDomain, vars, 4)
+	})
+
+	// All three actions are unparseable, so susLv is returned untouched.
+	if got != 4 {
+		t.Errorf("EvalFirewallRule = %d, want 4 (every action failed to parse)", got)
+	}
+
+	// Every branch must report, and each must name its own index.
+	positions := make([]int, 3)
+	for i := range positions {
+		needle := "Rule " + strconv.Itoa(i) + " :"
+		pos := strings.Index(out, needle)
+		if pos < 0 {
+			t.Fatalf("rule %d did not report a parse error; got output:\n%s", i, out)
+		}
+		positions[i] = pos
+	}
+
+	if !(positions[0] < positions[1] && positions[1] < positions[2]) {
+		t.Errorf("rules were reported out of config order (offsets %v); "+
+			"EvalFirewallRule must evaluate CustomRules front to back, because the "+
+			"first matching absolute rule short-circuits every rule after it.\noutput:\n%s",
+			positions, out)
 	}
 }
 

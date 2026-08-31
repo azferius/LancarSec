@@ -8,28 +8,41 @@ package server
 //
 // HONESTY NOTE (read this before trusting the ratelimit coverage below):
 // `evaluateRatelimit` is `for { ...; time.Sleep(5 * time.Second) }`. It cannot
-// be called from a test without either leaking a goroutine that keeps mutating
+// be called in-process without either leaking a goroutine that keeps mutating
 // package globals underneath every later test in this package (guaranteed
 // -race failures) or parking it on firewall.Mutex forever (guaranteed deadlock
-// of the whole test binary). So the sliding-window arithmetic below is driven
-// through `rlPrefillWindows` + `rlSweepWindows`, which are a line-for-line
-// transcription of the loop body. That makes these tests a SPEC, not a direct
-// exercise of the shipped code: if wave 7 changes evaluateRatelimit without
-// changing this file, these tests keep passing. They are still the right
-// tripwire, because wave 7 is expected to delete the transcription along with
-// the original and a reviewer diffing this file sees exactly which arithmetic
-// was replaced. Read `blockers` in the wave 3 report for the full caveat.
+// of the whole test binary). So most of the sliding-window arithmetic below is
+// driven through `rlPrefillWindows` + `rlSweepWindows`, which are a
+// line-for-line transcription of the loop body. Those tests are a SPEC, not an
+// exercise of the shipped code: an edit inside `func evaluateRatelimit` alone
+// leaves every one of them passing.
+//
+// TestRatelimitEvaluateRatelimitOnePass closes that gap. It runs the REAL
+// function once in a child process - which can afford the goroutine leak,
+// because the process exits - and asserts the prefill horizon, the expiry
+// direction and the summation on the output. Keep it: without it the
+// transcription is unanchored.
 //
 // Directly exercised (real production functions, no transcription):
-//   utils.TrimTime, checkAttack, and the nil-map write shape from
+//   utils.TrimTime, evaluateRatelimit (via the child process), checkAttack,
+//   utils.SendWebhook's notification types (via checkAttack, in a
+//   network-isolated child process), and the nil-map write shape from
 //   middleware.go:96.
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
@@ -528,6 +541,251 @@ func TestRatelimitTotalsLagBehindTheCurrentBucketByOnePass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// evaluateRatelimit — the REAL function, run in a child process.
+// ---------------------------------------------------------------------------
+//
+// Everything above this banner drives rlPrefillWindows/rlSweepWindows, which
+// are a transcription of evaluateRatelimit's body: they pin the arithmetic but
+// they do not execute the shipped function, so an edit inside
+// `func evaluateRatelimit` alone changes nothing they assert.
+//
+// evaluateRatelimit cannot be called in-process: it is `for { ...; time.Sleep(5
+// * time.Second) }`, so it either leaks a goroutine that keeps mutating package
+// globals under every later test in this binary, or it has to be parked on
+// firewall.Mutex forever, which deadlocks the binary. The way out is a child
+// process: it runs one real pass, reports what the globals look like
+// afterwards, and exits. The leak dies with it.
+//
+// Synchronisation with the child's evaluateRatelimit goroutine goes entirely
+// through firewall.Mutex. The child seeds firewall.AccessIps with a sentinel
+// key; the sweep's unconditional `firewall.AccessIps = map[string]int{}` drops
+// it, so "sentinel gone" means the whole locked pass has completed, and reading
+// under the same lock gives a proper happens-before edge. The child never reads
+// proxy.Initialised, which evaluateRatelimit publishes outside the lock.
+
+const rlChildEnv = "LANCARSEC_TEST_EVALUATE_RATELIMIT_CHILD"
+
+const (
+	rlChildJSONStart = "<<<RL_EVALUATE_RATELIMIT_JSON"
+	rlChildJSONEnd   = "RL_EVALUATE_RATELIMIT_JSON>>>"
+	rlChildSentinel  = "__rl_pass_not_run_yet__"
+)
+
+// rlChildReport is what the child observes after exactly one real pass.
+type rlChildReport struct {
+	AccessIps       map[string]int `json:"accessIps"`
+	AccessIpsCookie map[string]int `json:"accessIpsCookie"`
+	UnkFps          map[string]int `json:"unkFps"`
+	AccessBuckets   []int          `json:"accessBuckets"`
+	CookieBuckets   []int          `json:"cookieBuckets"`
+	UnkFpBuckets    []int          `json:"unkFpBuckets"`
+}
+
+// TestRatelimitEvaluateRatelimitChild is the child half of
+// TestRatelimitEvaluateRatelimitOnePass. Without the env var it is a no-op, so
+// an ordinary `go test` run never enters it.
+func TestRatelimitEvaluateRatelimitChild(t *testing.T) {
+	if os.Getenv(rlChildEnv) != "1" {
+		t.Skip("child-process helper, driven by TestRatelimitEvaluateRatelimitOnePass")
+	}
+
+	// Fixture. rlBase-1000 is far outside any sane window and must be swept;
+	// rlBase-110, rlBase-10 and rlBase are inside it and must be summed. The
+	// prefill is expected to add rlBase+10 .. rlBase+110 on top.
+	proxy.Last10SecondTimestamp = rlBase
+	proxy.LastSecondTimestamp = rlBase + 5
+	proxy.RatelimitWindow = 120
+
+	firewall.WindowAccessIps = map[int]map[string]int{
+		rlBase - 1000: {"expired.example": 5000},
+		rlBase - 110:  {"1.1.1.1": 90},
+		rlBase - 10:   {"1.1.1.1": 6},
+		rlBase:        {"1.1.1.1": 4, "2.2.2.2": 1},
+	}
+	firewall.WindowAccessIpsCookie = map[int]map[string]int{
+		rlBase - 1000: {"expired.example": 5000},
+		rlBase:        {"1.1.1.1": 2},
+	}
+	firewall.WindowUnkFps = map[int]map[string]int{
+		rlBase - 1000: {"expired-fp": 5000},
+		rlBase:        {"deadbeef": 3},
+	}
+	firewall.AccessIps = map[string]int{rlChildSentinel: 1}
+	firewall.AccessIpsCookie = map[string]int{rlChildSentinel: 1}
+	firewall.UnkFps = map[string]int{rlChildSentinel: 1}
+
+	go evaluateRatelimit()
+
+	var report rlChildReport
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		firewall.Mutex.Lock()
+		_, stillSeeded := firewall.AccessIps[rlChildSentinel]
+		if !stillSeeded {
+			report = rlChildReport{
+				AccessIps:       maps.Clone(firewall.AccessIps),
+				AccessIpsCookie: maps.Clone(firewall.AccessIpsCookie),
+				UnkFps:          maps.Clone(firewall.UnkFps),
+				AccessBuckets:   rlBucketKeys(firewall.WindowAccessIps),
+				CookieBuckets:   rlBucketKeys(firewall.WindowAccessIpsCookie),
+				UnkFpBuckets:    rlBucketKeys(firewall.WindowUnkFps),
+			}
+		}
+		firewall.Mutex.Unlock()
+
+		if !stillSeeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			fmt.Println("evaluateRatelimit did not complete a pass within 30s")
+			os.Exit(2)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	payload, err := json.Marshal(report)
+	if err != nil {
+		fmt.Println("marshal report:", err)
+		os.Exit(3)
+	}
+	fmt.Println(rlChildJSONStart)
+	fmt.Println(string(payload))
+	fmt.Println(rlChildJSONEnd)
+
+	// Exit before evaluateRatelimit's 5-second sleep expires and it mutates
+	// everything again. The leaked goroutine dies with the process.
+	os.Exit(0)
+}
+
+// rlRunChild re-executes this test binary with exactly one test enabled, plus
+// the extra environment the child needs. It fails the calling test - dumping
+// the child's output - if the child exits non-zero.
+func rlRunChild(t *testing.T, testName string, env ...string) string {
+	t.Helper()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate the test binary: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^"+testName+"$", "-test.v")
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child process %s failed: %v\n--- child output ---\n%s", testName, err, out)
+	}
+	return string(out)
+}
+
+// rlRunEvaluateRatelimitChild re-executes this test binary, runs one real
+// evaluateRatelimit pass in it, and returns what the child observed.
+func rlRunEvaluateRatelimitChild(t *testing.T) rlChildReport {
+	t.Helper()
+
+	text := rlRunChild(t, "TestRatelimitEvaluateRatelimitChild", rlChildEnv+"=1")
+	i := strings.Index(text, rlChildJSONStart)
+	j := strings.Index(text, rlChildJSONEnd)
+	if i < 0 || j < 0 || j < i {
+		t.Fatalf("child produced no report\n--- output ---\n%s", text)
+	}
+
+	var report rlChildReport
+	if err := json.Unmarshal([]byte(text[i+len(rlChildJSONStart):j]), &report); err != nil {
+		t.Fatalf("decode child report: %v\n--- output ---\n%s", err, text)
+	}
+	return report
+}
+
+// One real pass of evaluateRatelimit, asserted end to end.
+//
+// Two things are pinned here that nothing else in this package can see:
+//
+//   - the PREFILL HORIZON. The loop runs `i < Last10SecondTimestamp+120` in
+//     steps of 10, i.e. it creates the current bucket plus eleven ahead of it.
+//     That horizon is the only thing keeping Middleware's
+//     `firewall.WindowAccessIps[proxy.Last10SecondTimestamp][ip]++` from writing
+//     into a nil map, and that write happens while holding the write lock with
+//     no defer - so a shorter horizon reintroduces the permanent proxy-wide
+//     deadlock pinned by TestRatelimitMissingBucketWritePanics*.
+//
+//   - the EXPIRY DIRECTION. A bucket is deleted when it is older than the
+//     window and summed otherwise. Inverting that comparison deletes every live
+//     bucket and sums only dead ones, which drives firewall.AccessIps to zero
+//     permanently and stops the R2 per-IP ratelimit from ever firing again.
+func TestRatelimitEvaluateRatelimitOnePass(t *testing.T) {
+	report := rlRunEvaluateRatelimitChild(t)
+
+	// --- prefill horizon: the current bucket plus eleven ahead of it --------
+	wantPrefilled := []int{}
+	for i := rlBase; i < rlBase+120; i += 10 {
+		wantPrefilled = append(wantPrefilled, i)
+	}
+	for _, name := range []struct {
+		label   string
+		buckets []int
+	}{
+		{"WindowAccessIps", report.AccessBuckets},
+		{"WindowAccessIpsCookie", report.CookieBuckets},
+		{"WindowUnkFps", report.UnkFpBuckets},
+	} {
+		for _, want := range wantPrefilled {
+			if !slices.Contains(name.buckets, want) {
+				t.Errorf("%s is missing bucket %d (want the current bucket plus eleven ahead); got %v", name.label, want, name.buckets)
+			}
+		}
+	}
+
+	// --- expiry: only the out-of-window bucket is dropped -------------------
+	for _, tc := range []struct {
+		label   string
+		buckets []int
+	}{
+		{"WindowAccessIps", report.AccessBuckets},
+		{"WindowAccessIpsCookie", report.CookieBuckets},
+		{"WindowUnkFps", report.UnkFpBuckets},
+	} {
+		if slices.Contains(tc.buckets, rlBase-1000) {
+			t.Errorf("%s kept the out-of-window bucket %d: %v", tc.label, rlBase-1000, tc.buckets)
+		}
+		if !slices.Contains(tc.buckets, rlBase) {
+			t.Errorf("%s dropped the CURRENT bucket %d: %v", tc.label, rlBase, tc.buckets)
+		}
+	}
+	if !slices.Contains(report.AccessBuckets, rlBase-110) || !slices.Contains(report.AccessBuckets, rlBase-10) {
+		t.Errorf("WindowAccessIps dropped an in-window past bucket: %v", report.AccessBuckets)
+	}
+
+	// --- summation: live buckets only ---------------------------------------
+	if !maps.Equal(report.AccessIps, map[string]int{"1.1.1.1": 100, "2.2.2.2": 1}) {
+		t.Errorf("AccessIps = %v, want map[1.1.1.1:100 2.2.2.2:1] (90+6+4 across live buckets, nothing from the expired one)", report.AccessIps)
+	}
+	if !maps.Equal(report.AccessIpsCookie, map[string]int{"1.1.1.1": 2}) {
+		t.Errorf("AccessIpsCookie = %v, want map[1.1.1.1:2]", report.AccessIpsCookie)
+	}
+	if !maps.Equal(report.UnkFps, map[string]int{"deadbeef": 3}) {
+		t.Errorf("UnkFps = %v, want map[deadbeef:3]", report.UnkFps)
+	}
+	for label, m := range map[string]map[string]int{
+		"AccessIps":       report.AccessIps,
+		"AccessIpsCookie": report.AccessIpsCookie,
+		"UnkFps":          report.UnkFps,
+	} {
+		if _, ok := m[rlChildSentinel]; ok {
+			t.Errorf("%s still holds the seeded sentinel: the published totals must be rebuilt, not accumulated into", label)
+		}
+		if _, ok := m["expired.example"]; ok {
+			t.Errorf("%s counted an expired bucket: %v", label, m)
+		}
+		if _, ok := m["expired-fp"]; ok {
+			t.Errorf("%s counted an expired bucket: %v", label, m)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The missing-bucket panic (audit finding at core/server/middleware.go:96)
 // ---------------------------------------------------------------------------
 
@@ -644,8 +902,9 @@ func TestRatelimitPrefilledBucketWriteIsSafe(t *testing.T) {
 func rlRegisterDomain(t *testing.T, name string, s domains.DomainSettings) {
 	t.Helper()
 	s.Name = name
-	// Webhook URL stays empty: utils.SendWebhook returns immediately on an
-	// empty URL, so checkAttack makes no network call.
+	// Unless the caller supplied one (see rlWebhookSettings), the webhook URL
+	// stays empty: utils.SendWebhook returns immediately on an empty URL, so
+	// checkAttack makes no network call.
 	domains.DomainsMap.Store(name, s)
 	t.Cleanup(func() {
 		domains.DomainsMap.Delete(name)
@@ -997,5 +1256,230 @@ func TestMonitorCheckAttackTracksPeaksDuringCooldown(t *testing.T) {
 	}
 	if d.PeakRequestsBypassedPerSecond != 90 {
 		t.Errorf("PeakRequestsBypassedPerSecond = %d, want 90", d.PeakRequestsBypassedPerSecond)
+	}
+}
+
+// The cooldown gate is a three-term conjunction:
+//
+//	if !domainData.BypassAttack && !domainData.RawAttack && (domainData.BufferCooldown > 0)
+//
+// Dropping the !RawAttack term is a standard refactor slip and nothing else in
+// this file notices it, because every other cooldown fixture has RawAttack
+// false. It matters: the cooldown is the report window for an attack that is
+// STILL RUNNING, so draining it mid-flood fires the "attack over" webhook and
+// wipes PeakRequests* and RequestLogger while the flood continues.
+//
+// The fixture below holds a raw attack at exactly DisableRawStage2, where
+// neither the raw trigger (`>`) nor the raw clear (`<`) fires, so RawAttack
+// latches on across every tick (see
+// TestMonitorCheckAttackRawAttackLatchesAtExactThreshold).
+func TestMonitorCheckAttackCooldownDoesNotDrainDuringARawAttack(t *testing.T) {
+	const name = "rl-raw-cooldown.test"
+	rlRegisterDomain(t, name, rlThresholds())
+
+	d := domains.DomainData{
+		Name:                          name,
+		Stage:                         1,
+		RawAttack:                     true,
+		BufferCooldown:                2,
+		PeakRequestsPerSecond:         1500,
+		PeakRequestsBypassedPerSecond: 7,
+		RequestLogger:                 []domains.RequestLog{{Total: 1500, Allowed: 7}},
+	}
+
+	// Two ticks - enough for the cooldown to reach zero, fire the attack-over
+	// webhook and wipe the report buffers, if it drained at all.
+	d = rlTick(t, name, d, 1000, 0)
+	d = rlTick(t, name, d, 1000, 0)
+
+	if !d.RawAttack {
+		t.Fatalf("fixture drifted: RawAttack = false, want true (1000 r/s is exactly DisableRawStage2, where the flag latches)")
+	}
+	if d.BypassAttack {
+		t.Fatalf("fixture drifted: BypassAttack = true, want false")
+	}
+	if d.BufferCooldown != 2 {
+		t.Errorf("BufferCooldown = %d, want 2: the cooldown must not drain while a raw attack is still in progress", d.BufferCooldown)
+	}
+	if d.PeakRequestsPerSecond != 1500 || d.PeakRequestsBypassedPerSecond != 7 {
+		t.Errorf("peaks = %d / %d, want 1500 / 7: the report buffers must survive an ongoing raw attack", d.PeakRequestsPerSecond, d.PeakRequestsBypassedPerSecond)
+	}
+	// One sample per tick is appended on top of the seeded one.
+	if len(d.RequestLogger) != 3 {
+		t.Errorf("RequestLogger len = %d, want 3 (seed + one sample per tick, none wiped)", len(d.RequestLogger))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkAttack's two webhook call sites
+// ---------------------------------------------------------------------------
+//
+// checkAttack calls utils.SendWebhook from two places that differ only in the
+// trailing literal: `int(0)` means "an attack started", `int(1)` means "the
+// attack is over". Swapping one for the other is a one-character edit that
+// makes operators get a fresh DDoS alert every time an attack ENDS, and never a
+// resolution notice.
+//
+// SendWebhook is fire-and-forget (`go utils.SendWebhook(...)`) and its only
+// observable is the POST it makes to the configured webhook URL, so these tests
+// point that URL at a local server and read the payload. Note the asymmetry
+// that shapes the assertions: the notificationType 0 branch builds its payload
+// locally and posts immediately, while the notificationType 1 branch first
+// renders a chart through quickchart.io - and when that render fails it posts
+// an empty webhook instead. So "a payload carrying the attack-START message
+// arrived" is a fast, positive signal, and its absence is what a correct
+// attack-over notification looks like from here either way.
+//
+// The cases run in a child process whose proxy environment points every
+// non-loopback request at a closed port, so the notificationType 1 branch's
+// quickchart.io call fails at once and this suite never touches the network.
+// Go's ProxyFromEnvironment never proxies loopback, so the local sink below is
+// unaffected - and the env has to be set before the process starts, which is
+// what the child is for.
+
+const rlWebhookChildEnv = "LANCARSEC_TEST_WEBHOOK_CHILD"
+
+const (
+	rlAttackStartMsg = "RL-WEBHOOK-ATTACK-STARTED"
+	rlAttackStopMsg  = "RL-WEBHOOK-ATTACK-STOPPED"
+	// Field name that appears only in the notificationType 0 payload.
+	rlStartOnlyField = "Total requests per second"
+)
+
+// rlWebhookSink is a local stand-in for the Discord webhook endpoint.
+type rlWebhookSink struct {
+	srv    *httptest.Server
+	bodies chan string
+}
+
+func rlNewWebhookSink(t *testing.T) *rlWebhookSink {
+	t.Helper()
+	sink := &rlWebhookSink{bodies: make(chan string, 8)}
+	sink.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		select {
+		case sink.bodies <- string(body):
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(sink.srv.Close)
+	return sink
+}
+
+// rlWebhookSettings wires the sink into a domain's settings.
+func rlWebhookSettings(url string) domains.DomainSettings {
+	s := rlThresholds()
+	s.DomainWebhooks = domains.WebhookSettings{
+		URL:            url,
+		Name:           "rl-webhook",
+		AttackStartMsg: rlAttackStartMsg,
+		AttackStopMsg:  rlAttackStopMsg,
+	}
+	return s
+}
+
+// rlAwaitWebhook waits up to d for a payload, returning ("", false) if none
+// arrives.
+func rlAwaitWebhook(sink *rlWebhookSink, d time.Duration) (string, bool) {
+	select {
+	case body := <-sink.bodies:
+		return body, true
+	case <-time.After(d):
+		return "", false
+	}
+}
+
+// TestMonitorCheckAttackWebhookNotificationTypes drives both webhook cases in a
+// network-isolated child process.
+func TestMonitorCheckAttackWebhookNotificationTypes(t *testing.T) {
+	rlRunChild(t, "TestMonitorCheckAttackWebhookChild",
+		rlWebhookChildEnv+"=1",
+		"HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9",
+		"http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9",
+		"NO_PROXY=", "no_proxy=",
+	)
+}
+
+// TestMonitorCheckAttackWebhookChild is the child half of the test above.
+func TestMonitorCheckAttackWebhookChild(t *testing.T) {
+	if os.Getenv(rlWebhookChildEnv) != "1" {
+		t.Skip("child-process helper, driven by TestMonitorCheckAttackWebhookNotificationTypes")
+	}
+	t.Run("attack start fires the attack-started notification", rlWebhookAttackStartCase)
+	t.Run("cooldown expiry does not fire an attack-started notification", rlWebhookCooldownExpiryCase)
+}
+
+// Control: the attack-START site really does deliver a notificationType 0
+// payload, and it does so promptly. Without this the absence assertion in the
+// next case would be vacuous.
+func rlWebhookAttackStartCase(t *testing.T) {
+	const name = "rl-webhook-start.test"
+	sink := rlNewWebhookSink(t)
+	rlRegisterDomain(t, name, rlWebhookSettings(sink.srv.URL))
+
+	d := domains.DomainData{Name: name, Stage: 1}
+	got := rlTick(t, name, d, 60, 50) // bypassed 50 > BypassStage1 10
+
+	if !got.BypassAttack {
+		t.Fatalf("fixture drifted: BypassAttack = false, want true")
+	}
+
+	body, ok := rlAwaitWebhook(sink, 10*time.Second)
+	if !ok {
+		t.Fatal("no webhook payload arrived for the attack-start site")
+	}
+	if !strings.Contains(body, rlAttackStartMsg) {
+		t.Errorf("attack-start payload does not carry AttackStartMsg:\n%s", body)
+	}
+	if !strings.Contains(body, rlStartOnlyField) {
+		t.Errorf("attack-start payload does not carry %q:\n%s", rlStartOnlyField, body)
+	}
+	if strings.Contains(body, rlAttackStopMsg) {
+		t.Errorf("attack-start payload carries AttackStopMsg:\n%s", body)
+	}
+}
+
+// The cooldown-expiry site must report the attack as OVER. If it were switched
+// to the attack-started notification type, the payload below would carry
+// AttackStartMsg - and it would arrive immediately, because that branch does no
+// chart rendering.
+func rlWebhookCooldownExpiryCase(t *testing.T) {
+	const name = "rl-webhook-stop.test"
+	sink := rlNewWebhookSink(t)
+	rlRegisterDomain(t, name, rlWebhookSettings(sink.srv.URL))
+
+	// Quiet traffic, no attack flags, one tick left on the cooldown.
+	// RequestLogger must be non-empty: utils.InitPlaceholders indexes
+	// RequestLogger[0] unguarded for BOTH notification types.
+	d := domains.DomainData{
+		Name:                          name,
+		Stage:                         1,
+		BufferCooldown:                1,
+		PeakRequestsPerSecond:         500,
+		PeakRequestsBypassedPerSecond: 400,
+		RequestLogger:                 []domains.RequestLog{{Time: time.Unix(rlBase, 0), Total: 500, Allowed: 400}},
+	}
+
+	got := rlTick(t, name, d, 1, 1)
+	if got.BufferCooldown != 0 {
+		t.Fatalf("fixture drifted: BufferCooldown = %d, want 0 (the cooldown must expire on this tick)", got.BufferCooldown)
+	}
+
+	body, ok := rlAwaitWebhook(sink, 15*time.Second)
+	if !ok {
+		// The attack-over branch renders a chart before it posts. With the
+		// chart host unreachable that render fails fast and an empty webhook is
+		// posted instead, so a payload normally does arrive - but if the
+		// unreachable host stalls instead of refusing, "nothing inside the
+		// window" is still a pass. What must never happen is an attack-STARTED
+		// payload, which is built locally and lands in microseconds.
+		return
+	}
+	if strings.Contains(body, rlAttackStartMsg) {
+		t.Errorf("the cooldown-expiry webhook reports the attack as STARTING, not as over:\n%s", body)
+	}
+	if strings.Contains(body, rlStartOnlyField) {
+		t.Errorf("the cooldown-expiry webhook carries the attack-start field %q:\n%s", rlStartOnlyField, body)
 	}
 }

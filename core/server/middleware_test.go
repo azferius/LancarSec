@@ -11,7 +11,10 @@ package server
 // symbol collisions with monitor_test.go, which lives in the same package.
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -646,6 +649,9 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			env := mwNewEnv(t)
 			tc.setup(t, env)
 
+			// Stage 1 is the default, so if a ratelimit branch ever failed to
+			// return the request would fall through into the stage-1 challenge
+			// and every assertion below would see the difference.
 			rec := mwDo(mwRequest("/"))
 
 			// BUG (wave 9 flips this): every ratelimit answers 200 OK, not 429.
@@ -664,6 +670,37 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			// Ratelimited requests still count towards TotalRequests.
 			if got := env.mwDomainData().TotalRequests; got != 1 {
 				t.Errorf("TotalRequests = %d, want 1", got)
+			}
+
+			// --- the ratelimit is an EARLY EXIT, not a prefix ---------------
+			//
+			// Everything below fails if the `return` after any of the three
+			// SendResponse ratelimit calls is dropped: the response body would
+			// gain the challenge/backend payload, a redirect Location and
+			// Set-Cookie would appear, a lower-ranked limiter would append its
+			// own message, and the challenge-failure window would be bumped.
+			// That is the single most likely slip when these checks are moved
+			// into a helper, and in production it means the proxy prints "you
+			// have been ratelimited" and then serves the flood anyway.
+			wantExact := "Blocked by BalooProxy.\n" + tc.wantBody
+			if got := rec.Body.String(); got != wantExact {
+				t.Errorf("body = %q, want exactly %q (the ratelimit branch must return immediately)", mwTrunc(got, 400), wantExact)
+			}
+			if loc := rec.Result().Header.Get("Location"); loc != "" {
+				t.Errorf("Location = %q, want empty: a ratelimited request must not reach the stage-1 redirect", loc)
+			}
+			if sc := rec.Result().Header.Get("Set-Cookie"); sc != "" {
+				t.Errorf("Set-Cookie = %q, want empty: a ratelimited request must not be handed a challenge token", sc)
+			}
+
+			firewall.Mutex.RLock()
+			cookieWindow := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+			firewall.Mutex.RUnlock()
+			if cookieWindow != 0 {
+				t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 0: a ratelimited request must return before the cookie check", mwTimestamp, mwIP, cookieWindow)
+			}
+			if d := env.mwDomainData(); d.BypassedRequests != 0 || len(d.LastLogs) != 0 {
+				t.Errorf("BypassedRequests = %d, LastLogs = %d entries; want 0/0 for a ratelimited request", d.BypassedRequests, len(d.LastLogs))
 			}
 		})
 	}
@@ -754,6 +791,47 @@ func TestMiddlewareForbiddenFingerprint(t *testing.T) {
 	}
 }
 
+// KnownFingerprints and ForbiddenFingerprints are two independent JSON tables
+// in global/fingerprints. A fingerprint can be in BOTH - which is exactly what
+// a browser-impersonating flood tool produces - and the forbidden block must
+// still fire. Skipping the forbidden lookup for recognised browsers looks like
+// a harmless optimisation and would silently unblock every impersonator.
+func TestMiddlewareForbiddenFingerprintBlocksRecognisedBrowsers(t *testing.T) {
+	cases := []struct {
+		name    string
+		known   string
+		botFp   string
+		wantTls string
+	}{
+		{name: "known browser", known: "Chromium", wantTls: "Chromium"},
+		{name: "known bot", botFp: "-crawler", wantTls: "-crawler"},
+		{name: "known browser and bot", known: "Chromium", botFp: "-crawler", wantTls: "Chromium-crawler"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0) // whitelisted: only the forbidden table can block
+			if tc.known != "" {
+				firewall.KnownFingerprints[mwFP] = tc.known
+			}
+			if tc.botFp != "" {
+				firewall.BotFingerprints[mwFP] = tc.botFp
+			}
+			firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
+
+			rec := mwDo(mwRequest("/"))
+
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, "Your browser Http-Flood (1) is not allowed.")
+			mwAssertBodyNotContains(t, rec, mwBackendBody)
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend hits = %d, want 0: a forbidden fingerprint is blocked even when it is also a known browser (%q)", env.mwBackendHits(), tc.wantTls)
+			}
+		})
+	}
+}
+
 // The forbidden-fingerprint block outranks every challenge stage, including a
 // client holding a valid cookie.
 func TestMiddlewareForbiddenFingerprintBeatsValidCookie(t *testing.T) {
@@ -814,6 +892,27 @@ func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
 		// VALUE embeds the token passes the challenge.
 		{name: "token smuggled inside an unrelated cookie value", cookie: "junk=xx__bProxy_v=" + token, pass: true},
 		{name: "token in a cookie name suffix", cookie: "evil__bProxy_v=" + token + "=1", pass: true},
+
+		// --- the WHOLE token is compared, not a prefix of it ---------------
+		//
+		// The clearance token is 256 bits of blake3 rendered as 64 hex chars.
+		// Comparing a truncated or otherwise derived prefix instead of the
+		// full value - an easy slip when the check moves into a helper - would
+		// cut the guessable material down to whatever is left. These cases
+		// fail the moment any proper prefix of the token is accepted.
+		{name: "first 8 chars of the token only", cookie: "__bProxy_v=" + token[:8], pass: false},
+		{name: "first 8 chars of the token then filler", cookie: "__bProxy_v=" + token[:8] + strings.Repeat("z", len(token)-8), pass: false},
+		{name: "first half of the token only", cookie: "__bProxy_v=" + token[:len(token)/2], pass: false},
+		{name: "token missing its last character", cookie: "__bProxy_v=" + token[:len(token)-1], pass: false},
+
+		// --- the cookie NAME is part of the compared string ----------------
+		//
+		// A half-applied rename that loosens only the acceptance side (say
+		// "__bProxy_v=" -> "bProxy_v=") is invisible unless a cookie carrying
+		// the correct token under a shorter name is rejected.
+		{name: "cookie name without the leading double underscore", cookie: "bProxy_v=" + token, pass: false},
+		{name: "cookie name with a single leading underscore", cookie: "_bProxy_v=" + token, pass: false},
+		{name: "cookie name without the trailing _v", cookie: "__bProxy=" + token, pass: false},
 	}
 
 	for _, tc := range cases {
@@ -956,6 +1055,114 @@ func TestMiddlewareStage3CaptchaGenerationCaches(t *testing.T) {
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-3 challenge")
 	}
+}
+
+// mwStage3InjectToken pre-seeds the encryption cache with a chosen stage-3
+// token so the captcha's secret/public split is controlled by the test instead
+// of by blake3. Middleware takes the cache-hit branch and uses this value
+// verbatim as `encryptedIP`.
+func mwStage3InjectToken(token string) {
+	firewall.CacheIps.Store(mwAccessKey()+utils.StageToString(3), token)
+}
+
+// mwCountOpaqueGreen counts the pixels of a base64 PNG that are exactly the
+// colour utils.AddLabel is given for the captcha ANSWER: RGBA{61,140,64,255}.
+// The other two labels on the captcha are drawn at alpha 20 and alpha 100, and
+// neither WarpImg nor DrawTriangle invents a colour - they only copy, clear or
+// displace existing pixels - so this colour appears if and only if the answer
+// label was drawn with non-blank glyphs.
+func mwCountOpaqueGreen(t *testing.T, b64 string) int {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("decode base64 png: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	n := 0
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, a := img.At(x, y).RGBA()
+			if r>>8 == 61 && g>>8 == 140 && bl>>8 == 64 && a>>8 == 255 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// mwExtractPNG pulls the base64 payload the captcha page assigns to
+// captcha_image.src / mask_image.src.
+func mwExtractPNG(t *testing.T, body, jsVar string) string {
+	t.Helper()
+	marker := jsVar + `.src="data:image/png;base64,`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("captcha page has no %s payload", jsVar)
+	}
+	rest := body[i+len(marker):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		t.Fatalf("unterminated %s payload", jsVar)
+	}
+	return rest[:j]
+}
+
+// The stage-3 answer the proxy checks is encryptedIP[:6]; the string drawn in
+// solid green is what the user is told to type. Those must be the same string.
+// Swapping in any other same-typed piece of the token - publicPart[:6], say -
+// makes every stage-3 captcha unsolvable, which hard-blocks all human traffic
+// the moment the proxy escalates to stage 3.
+//
+// The captcha is generated with the global math/rand, so positions, warp and
+// triangles are not reproducible. The test therefore controls the token
+// instead: with a blank secret half there is no ink to draw in the answer
+// colour, so ANY other string rendered there shows up as opaque-green pixels.
+func TestMiddlewareStage3CaptchaDrawsTheSecretHalf(t *testing.T) {
+	t.Run("a blank secret half leaves no answer-coloured ink", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(3)
+		// secretPart = "      ", publicPart[:6] = "WWWWWW" (very inky),
+		// publicPart[6:] = "MMMMMM".
+		mwStage3InjectToken("      " + "WWWWWW" + "MMMMMM")
+
+		rec := mwDo(mwRequest("/"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		body := rec.Body.String()
+
+		got := mwCountOpaqueGreen(t, mwExtractPNG(t, body, "captcha_image")) +
+			mwCountOpaqueGreen(t, mwExtractPNG(t, body, "mask_image"))
+		if got != 0 {
+			t.Errorf("captcha carries %d pixels in the answer colour, want 0: the answer label must render encryptedIP[:6], which is blank here", got)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached during a stage-3 challenge")
+		}
+	})
+
+	// Control: the same measurement finds plenty of ink when the secret half
+	// is not blank, so the assertion above is not vacuously true.
+	t.Run("an inky secret half does leave answer-coloured ink", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(3)
+		mwStage3InjectToken("WWWWWW" + "      " + "MMMMMM")
+
+		rec := mwDo(mwRequest("/"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		body := rec.Body.String()
+
+		got := mwCountOpaqueGreen(t, mwExtractPNG(t, body, "captcha_image")) +
+			mwCountOpaqueGreen(t, mwExtractPNG(t, body, "mask_image"))
+		if got == 0 {
+			t.Error("captcha carries no pixels in the answer colour even though the secret half is inky; the measurement is broken")
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached during a stage-3 challenge")
+		}
+	})
 }
 
 func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
@@ -1267,6 +1474,99 @@ func TestMiddlewareReservedPathsRequireChallenge(t *testing.T) {
 	}
 }
 
+// The reserved-path dispatch keys off request.URL.Path, i.e. the path with the
+// query string already stripped. Re-keying it off the raw request line
+// (request.RequestURI) is a one-word slip that would silently proxy every
+// reserved endpoint to the customer backend as soon as a query string is
+// present - including the admin API path, which carries the admin secret.
+func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
+	cases := []struct {
+		name     string
+		target   string
+		wantBody string
+	}{
+		{name: "stats", target: "/_bProxy/stats?x=1", wantBody: "Total Requests: 1"},
+		{name: "fingerprint", target: "/_bProxy/fingerprint?x=1", wantBody: "IP: " + mwIP},
+		{name: "verified", target: "/_bProxy/verified?x=1", wantBody: "verified"},
+		{name: "credits", target: "/_bProxy/credits?x=1", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
+		{name: "credits with a bare query marker", target: "/_bProxy/credits?", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
+		{name: "verified with a fragment-looking query", target: "/_bProxy/verified?a=b&c=d", wantBody: "verified"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0)
+
+			rec := mwDo(mwRequest(tc.target))
+
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, tc.wantBody)
+			mwAssertBodyNotContains(t, rec, mwBackendBody)
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend hits = %d, want 0: %q is a reserved path regardless of its query string", env.mwBackendHits(), tc.target)
+			}
+			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+				t.Errorf("Content-Type = %q, want text/plain", ct)
+			}
+		})
+	}
+
+	t.Run("admin api v1 with a query string", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		proxy.CpuUsage = "12.5%"
+
+		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1?x=1",
+			mwWithMethod(http.MethodPost),
+			mwWithHeader("proxy-secret", mwAPISecret),
+		)
+		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
+		rec := mwDo(req)
+
+		mwAssertBodyContains(t, rec, `"CPU_USAGE":"12.5%"`)
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0: the admin path (and its secret) must never reach the backend", env.mwBackendHits())
+		}
+	})
+}
+
+// /_bProxy/stats reports two different counters. Swapping the two same-typed
+// strconv.Itoa arguments would make a fully bypassed attack read as fully
+// blocked, so the fixture below keeps Total and Bypassed deliberately unequal.
+func TestMiddlewareStatsReportsTotalAndBypassedSeparately(t *testing.T) {
+	env := mwNewEnv(t)
+
+	// Three requests that are counted but never bypassed (stage 5 blocks
+	// before the bypass bookkeeping).
+	env.mwSetStage(5)
+	for range 3 {
+		rec := mwDo(mwRequest("/"))
+		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
+	}
+
+	// One request that is both counted and bypassed, then the stats request
+	// itself, which is counted and bypassed before the page is rendered.
+	env.mwSetStage(0)
+	mwDo(mwRequest("/"))
+
+	rec := mwDo(mwRequest("/_bProxy/stats"))
+
+	mwAssertStatus(t, rec, http.StatusOK)
+	// 3 blocked + 1 allowed + this one = 5 total; 1 allowed + this one = 2
+	// bypassed. The two numbers must not be interchangeable.
+	mwAssertBodyContains(t, rec, "Total Requests: 5")
+	mwAssertBodyContains(t, rec, "Bypassed Requests: 2")
+
+	if d := env.mwDomainData(); d.TotalRequests != 5 || d.BypassedRequests != 2 {
+		t.Fatalf("fixture drifted: TotalRequests = %d (want 5), BypassedRequests = %d (want 2)", d.TotalRequests, d.BypassedRequests)
+	}
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
 func TestMiddlewareAdminAPIv1(t *testing.T) {
 	t.Run("correct proxy-secret is served by the api", func(t *testing.T) {
 		env := mwNewEnv(t)
@@ -1387,6 +1687,35 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		mwAssertBodyContains(t, rec, mwBackendBody)
 		if env.mwBackendHits() != 1 {
 			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+
+	// The marker is honoured as a PREFIX of the path only. Loosening that to a
+	// substring test turns the admin API into a route reachable from any
+	// backend path that merely embeds the marker.
+	t.Run("the marker is only honoured at the start of the path", func(t *testing.T) {
+		cases := []string{
+			"/uploads/x/_bProxy/api/v2/GET_PROXY_STATS_CPU_USAGE",
+			"/files/_bProxy/api/v2/" + mwDomain + "/GET_TOTAL_REQUESTS",
+			"/a/_bProxy/api/v2",
+			"/_bProxy/api/v3/_bProxy/api/v2/GET_PROXY_STATS_CPU_USAGE",
+		}
+
+		for _, target := range cases {
+			t.Run(target, func(t *testing.T) {
+				env := mwNewEnv(t)
+				env.mwSetStage(0)
+				proxy.CpuUsage = "99%"
+
+				rec := mwDo(mwRequest(target, mwWithHeader("Proxy-Secret", mwAPISecret)))
+
+				mwAssertBodyContains(t, rec, mwBackendBody)
+				mwAssertBodyNotContains(t, rec, "CPU_USAGE")
+				mwAssertBodyNotContains(t, rec, "ERR_DOMAIN_NOT_FOUND")
+				if env.mwBackendHits() != 1 {
+					t.Errorf("backend hits = %d, want 1: %q merely embeds the api marker, it does not start with it", env.mwBackendHits(), target)
+				}
+			})
 		}
 	})
 }
@@ -1521,6 +1850,65 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		}
 	})
 
+	// Cloudflare mode wires up its OWN pair of counters. Both must be read for
+	// the subject IP, not just the request counter: ipCountCookie is what R1
+	// (the challenge-failure limiter that outranks everything else) consults,
+	// and `cloudflare: true` is the documented production deployment mode.
+	t.Run("both ratelimit counters are wired to the cloudflare subject ip", func(t *testing.T) {
+		const cfIP = "198.51.100.44"
+
+		t.Run("R1 fires on the subject ip's challenge failures", func(t *testing.T) {
+			env := mwNewEnv(t)
+			domains.Config.Proxy.Cloudflare = true
+			proxy.Cloudflare = true
+			env.mwSetStage(0) // whitelisted: only a ratelimit can block
+			firewall.AccessIpsCookie[cfIP] = proxy.FailChallengeRatelimit + 1
+
+			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
+
+			if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R1)"; got != want {
+				t.Errorf("body = %q, want %q", mwTrunc(got, 200), want)
+			}
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
+			}
+		})
+
+		t.Run("R2 fires on the subject ip's request count", func(t *testing.T) {
+			env := mwNewEnv(t)
+			domains.Config.Proxy.Cloudflare = true
+			proxy.Cloudflare = true
+			env.mwSetStage(0)
+			firewall.AccessIps[cfIP] = proxy.IPRatelimit + 1
+
+			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
+
+			if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R2)"; got != want {
+				t.Errorf("body = %q, want %q", mwTrunc(got, 200), want)
+			}
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
+			}
+		})
+
+		t.Run("both counters are reported verbatim", func(t *testing.T) {
+			env := mwNewEnv(t)
+			domains.Config.Proxy.Cloudflare = true
+			proxy.Cloudflare = true
+			env.mwSetStage(0)
+			firewall.AccessIps[cfIP] = 7
+			firewall.AccessIpsCookie[cfIP] = 3
+
+			rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithHeader("Cf-Connecting-Ip", cfIP)))
+
+			mwAssertBodyContains(t, rec, "IP Requests: 7")
+			mwAssertBodyContains(t, rec, "IP Challenge Requests: 3")
+			if env.mwBackendHits() != 0 {
+				t.Error("backend was reached for a reserved path")
+			}
+		})
+	})
+
 	// BUG (wave 5 flips this): with no Cf-Connecting-Ip header the subject IP is
 	// the empty string, so every such request shares one ratelimit bucket and one
 	// encryption cache key.
@@ -1589,6 +1977,99 @@ func TestMiddlewareEncryptionCacheReuse(t *testing.T) {
 	}
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during stage-1 challenges")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// shared counter state under concurrency
+// ---------------------------------------------------------------------------
+
+// Middleware's two counter bumps are read-modify-writes against the shared
+// domains.DomainsData map:
+//
+//	firewall.Mutex.Lock()
+//	...
+//	domainData = domains.DomainsData[domainName]   // re-read UNDER the write lock
+//	domainData.TotalRequests++
+//	domains.DomainsData[domainName] = domainData
+//	firewall.Mutex.Unlock()
+//
+// and the same shape again for BypassedRequests around utils.AddLogs. Two
+// separate mistakes are cheap to make here and invisible to any single-threaded
+// test:
+//
+//  1. reusing the copy already read under the earlier RLock instead of
+//     re-reading under the write lock ("we already have that value"), which
+//     reintroduces lost updates on the very counter checkAttack uses to decide
+//     whether an attack is happening; and
+//  2. dropping or mis-scoping one of the two critical sections, which is a
+//     concurrent map write on domains.DomainsData and on the per-domain log
+//     slice - a hard `fatal error: concurrent map writes` under load.
+//
+// Every request below targets /_bProxy/verified, which is served without a
+// backend round trip: the counter bookkeeping is then a large share of each
+// request, so an unsynchronised read-modify-write loses updates immediately
+// rather than occasionally.
+func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
+	const (
+		workers   = 16
+		perWorker = 400
+		total     = workers * perWorker
+	)
+
+	env := mwNewEnv(t)
+	env.mwSetStage(0) // whitelisted: every request is counted AND bypassed
+
+	// AddLogs appends without bound; ReadLogs (the TUI) is what trims. Raise
+	// the cap so nothing in this test depends on log trimming.
+	proxy.MaxLogLength = total + 1
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range perWorker {
+				// Distinct source ports, one shared source IP: every request
+				// contends for the same DomainsData entry and the same window
+				// buckets.
+				addr := mwIP + ":" + strconv.Itoa(20000+w*perWorker+i)
+				rec := httptest.NewRecorder()
+				Middleware(rec, mwRequest("/_bProxy/verified", mwWithRemoteAddr(addr)))
+				if body := rec.Body.String(); body != "verified" {
+					t.Errorf("body = %q, want %q", mwTrunc(body, 80), "verified")
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	d := env.mwDomainData()
+	if d.TotalRequests != total {
+		t.Errorf("TotalRequests = %d, want %d: %d increments were lost, so the counter bump is not a read-modify-write against current shared state", d.TotalRequests, total, total-d.TotalRequests)
+	}
+	if d.BypassedRequests != total {
+		t.Errorf("BypassedRequests = %d, want %d: %d increments were lost", d.BypassedRequests, total, total-d.BypassedRequests)
+	}
+	if len(d.LastLogs) != total {
+		t.Errorf("LastLogs = %d entries, want %d: appends to the shared log slice were lost", len(d.LastLogs), total)
+	}
+
+	firewall.Mutex.RLock()
+	access := firewall.WindowAccessIps[mwTimestamp][mwIP]
+	cookie := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+	firewall.Mutex.RUnlock()
+	if access != total {
+		t.Errorf("WindowAccessIps[%d][%s] = %d, want %d", mwTimestamp, mwIP, access, total)
+	}
+	// Stage 0 has no cookie to present, so every request also counts as a
+	// challenge failure (see TestMiddlewareWhitelistCountsAsChallengeFailure).
+	if cookie != total {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want %d", mwTimestamp, mwIP, cookie, total)
+	}
+	if env.mwBackendHits() != 0 {
+		t.Errorf("backend hits = %d, want 0 (/_bProxy/verified is served by the proxy)", env.mwBackendHits())
 	}
 }
 
