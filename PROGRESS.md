@@ -21,7 +21,7 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 4 | Config load/reload unification, embed fingerprints, panics→errors | **DONE** |
 | 5 | Secrets, token derivation, admin auth | **DONE** |
 | 6 | Client identity: trusted-proxy resolution, IPv6 | **DONE** |
-| 7 | Hot-path concurrency rewrite | **NEXT** — largest and riskiest |
+| 7 | Hot-path concurrency rewrite | **IN PROGRESS** — request-path clock landed (`d8dffe6`) |
 | 8 | Upstream transport and response path | not started |
 | 9 | Challenge rendering, XSS, middleware decomposition | not started |
 | 10 | Wire-visible rebrand + legal notices (atomic, one commit) | not started |
@@ -189,17 +189,12 @@ comment says.
 
 ---
 
-## Wave 6, config half — MERGE THIS FIRST, IT HAS AN UNWIRED SEAM
+## Wave 6, config half — MERGED
 
-`core/config` landed wave 6's configuration surface ahead of `core/trusted`, so it ships with a
-placeholder where the call into that package goes. **`core/config/trusted.go` is the integration
-point and it is two lines**: import `core/trusted`, set `var loadTrusted = trusted.Load`, delete
-`trustedLoadUnwired`. The file says the same thing at the top. Until that happens the trusted set is
-empty at runtime, which means **no forwarded client-IP header is believed from anyone** — fail-closed
-against spoofing, but in Cloudflare mode it attributes every visitor to Cloudflare's own address, and
-with `cloudflare_enforce_origin` on it rejects every request. The contract is fixed:
-
-    func Load(extra []string) (int, error)
+The seam described below was wired in commit `5b4a2d9`: `core/config/trusted.go` now
+sets `var loadTrusted = trusted.Load` directly and the placeholder is gone. The
+integration contract is kept here because it explains *why* the install runs in
+**publish**, not build, and the config keys' defaults — do not undo either.
 
 New keys, all defaulted in `normalise` and rejected in `validate`, single pipeline, no second path:
 
@@ -240,9 +235,9 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
   invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
   happens once, atomically, after the security work.
 - **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
-- **`core/config/trusted.go` holds an unwired seam.** `loadTrusted` is a placeholder until
-  `core/trusted` is merged in; see the wave-6 section above. `go build` is green with it in place,
-  which is exactly why it is easy to ship by accident.
+- **Wave 7 has started on `main`.** The request-path clock moved to atomics in
+  `core/proxy/clock.go` (commit `d8dffe6`) — the clock goroutine is the only writer, everything
+  else reads. Build on that, not on the old printStats globals.
 
 ---
 
