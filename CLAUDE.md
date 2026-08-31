@@ -83,7 +83,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | --- | --- | --- |
 | 1 | ~~Repo hygiene, secret purge, history rewrite~~ **DONE 2026-08-30** | See "Wave 1 outcome" below. |
 | 2 | ~~Toolchain, dependency graph, module path~~ **DONE 2026-08-30** | See "Wave 2 outcome" below. |
-| 3 | Test harness, benchmark baseline, CI gates | **Nothing after this may start until it lands.** Zero tests exist across 3098 lines, and wave 7 rewrites a 335-line function that decides whether traffic is blocked. |
+| 3 | ~~Test harness, benchmark baseline, CI gates~~ **DONE 2026-08-31** | See "Wave 3 outcome" below. |
 | 4 | Config load unification | `ReloadConfig` is a 131-line divergent copy-paste of `config.Load`. Until they are one function, every fix must be written twice or it silently regresses on `reload`. |
 | 5 | Secrets, token derivation, admin auth | Lands after wave 4 so each fix lands in exactly one place. |
 | 6 | Client identity: trusted-proxy + IPv6 | Changes what the ratelimit map *keys* are. Wave 7's sharding is only meaningful once the key space is bounded. |
@@ -165,7 +165,53 @@ parses and every action SHA resolves, but run `docker build` before cutting a re
 proxy egress, fail loudly rather than build with a stale compiler. That is intended — it is what
 keeps the CVE fixes in — but check your CI runner and build box before merging.
 
-### Quick wins — safe to land immediately, before wave 3
+### Wave 3 outcome (2026-08-31)
+
+The first tests this codebase has ever had. Coverage: `core/firewall` 100%, `core/utils` 67.3%,
+`core/server` 46.1%, green under `-race`.
+
+**Read this before trusting the suite.** The first cut reported 100% coverage on `core/firewall` and
+passed `-race`. Adversarial mutation testing then applied 67 realistic mutations — each one a change
+a later wave could plausibly make — and **30 of them survived**. A 51% kill rate. All 30 are now
+closed, each verified by applying the mutation, watching the new test fail, reverting, and watching
+it pass. Coverage is not the metric here; the kill rate is. **If you add tests, mutation-test them.**
+
+The most dangerous survivor, for calibration: deleting the `Mutex` around
+`delete(Connections, ...)` in `core/firewall/general.go` passed the suite *and* passed `-race`.
+That function runs on every connection close, concurrently with `Fingerprint` writing the same map.
+An unsynchronised delete there is `fatal error: concurrent map read and map write` — which
+`net/http`'s handler recover does **not** catch. The process dies, hardest exactly when connection
+churn peaks.
+
+- **63 defects are pinned as current behaviour**, each with a comment naming the wave that flips the
+  assertion. When your wave fixes a bug, the corresponding test failing is the design working.
+  Flip the assertion; do not weaken the test.
+- **Benchmark baseline** is committed at `core/server/BENCHMARK_BASELINE.md`. The number wave 7 must
+  invert: `BenchmarkMiddlewareDecisionPath` is **429.2 ns/op serial, 1037 ns/op parallel** — 2.4x
+  *slower* under contention. Hot path is 34972 B/op across 31 allocs, dominated by the 32 KiB
+  ReverseProxy buffer wave 8 replaces.
+- **`hack/`** holds what Go benchmarks cannot measure: a stub origin, a throughput/p99 profile, and
+  `memgrowth.sh`, which sends a unique `Cf-Connecting-Ip` per request and records the RSS slope.
+  That slope is the direct measure of the unbounded-map DoS and flattening it is the exit criterion
+  for waves 6 and 7.
+- Still at 0%: `core/api`, `core/config`, `core/domains`, `core/pnc`. `utils.GetOwnIP`,
+  `utils.AddDomain` and the debug profilers are untestable without changing non-test code
+  (hardcoded URLs, hardcoded CWD-relative writes) and were left uncovered rather than tested around.
+
+### Wave 4 notes (in progress)
+
+**There is no import cycle today** — a claim in an earlier version of this file was wrong. The only
+edge is `core/config` → `core/server`, one line: `core/config/init.go:130` assigns
+`&server.RoundTripper{}`. `core/server` does not import `core/config` at all. The cycle is
+*prospective*: it appears the moment `monitor.go`'s `commands()` calls `config.ReloadConfig()`.
+
+`RoundTripper` extracts cleanly — it reads no domain settings (`req.Host` is only a map key), its
+error page is static HTML, and its closure imports nothing from this module. Plan: extract
+`core/transport` as a leaf, then flip the direction so `core/server` imports `core/config`. That
+also unblocks `core/api` → `core/config`, needed to fix the `RELOAD` admin action, which today is a
+`Lock()` immediately followed by an `Unlock()` and does nothing.
+
+### Quick wins — safe to land immediately
 
 - Add `Stage2Difficulty: domain.Stage2Difficulty` + the `== 0 { = 5 }` default to
   `core/server/monitor.go:507-526`. One line; until it lands, any `reload` disables stage 2.
