@@ -304,6 +304,28 @@ CI gates green under `-race`.
   choice; the full `html/template` move stays deferred to W2 alongside item 8's decomposition.
 - Item 1 confirmed dead (wave 6 canonicalization); not claimed as a fix.
 
+### Re-audit folding (2026-08-31) — W2/W3/W4 slices
+
+The ultracode re-audit (dated section at the tail of docs/AUDIT.md; 90 findings → 73 verified,
+1 refuted, 5 already fixed by W1, completeness critic found nothing missed) folds into wave 9:
+
+- **W2** (existing slice, +1 item): middleware decomposition + `html/template` move (item 8 /
+  QUAL-03 — the monolith grew 335 → 509 lines) **plus the `debug` nil-proxy guard** (HTTP-03,
+  new: `Host: debug` reaches a `DomainSettings` with nil `DomainProxy` and panics per
+  connection, trace swallowed by `io.Discard`; ~3 lines).
+- **W3 (new — config correctness)**: reject empty/short challenge secrets (AUTHZ-01/CRYPTO-02 —
+  full challenge bypass, the re-audit's top security finding); ratelimits defaults + load
+  warning when keys are absent (HTTP-05/QUAL-02 — threshold 0 currently blocks everyone after
+  one monitor tick); wire the body limits that are currently dead (AUTHZ-06/QUAL-01/HTTP-02);
+  republish OTP on reload (AUTHZ-02); redact the admin secret from LastLogs (HTTP-06/CRYPTO-06).
+- **W4 (new — concurrency hardening)**: nil-window panic under `firewall.Mutex` without defer
+  (CONC-01, critical — wave 7's claimed lazy bucket creation was never implemented, PERF-10);
+  defer unlocks in supervised workers (CONC-03); window-map cardinality caps (CONC-04);
+  synchronized config publish (CONC-02/AUTHZ-05/CRYPTO-04); unsupervised webhook goroutines
+  (CONC-05); `Initialised` atomic (CONC-06); ReadLogs lock (CONC-07); coarse-lock decomposition
+  + eviction sweep (CONC-08/09, PERF-01/02/05); stdin-EOF spin (CONC-10); domains publish
+  (CONC-11); plus the re-audit's perf mediums/lows.
+
 ### Already fixed — do not re-scope (waves 5/6)
 
 Cookie substring check → exact-match + constant-time compare, stage-1 `HttpOnly`, cookie
@@ -322,7 +344,11 @@ is wasted effort and is **dropped from the plan**. Wave 11 is now:
 
 - **Cf-Ja3-Hash passthrough** (Cloudflare Enterprise add-on): believe `Cf-Ja3-Hash` only from a
   trusted peer (same rules as wave 6's header trust), feed it the same fingerprint slot.
-- **Stage-3 captcha redesign** — unaffected by the deployment mode, still in scope.
+- **Stage-3 captcha redesign** — unaffected by the deployment mode, still in scope; the re-audit
+  adds CRYPTO-03 (the PoW is an offline-verifiable exact preimage whose solution IS the clearance
+  token) as design input.
+- **Go toolchain bump** (re-audit DEPS-01): Go 1.25 has left upstream security support — move to
+  the supported line in this wave.
 - The GREASE fingerprint bug below is fixed separately and earlier (it is real in either mode).
   **FIXED (wave 11 prep, GREASE fix):** the derivation now filters RFC 8701 GREASE values by
   pattern (0x?a?a) instead of blind `[1:]` slicing, and emits every non-GREASE
@@ -406,6 +432,10 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
 
 - **Product name is LancarSec.** One brand, not LancarProxy, not two. Owner decided 2026-08-31.
 - **The rebrand stays in wave 10**, not pulled forward.
+  Re-audit brand inventory (docs/AUDIT.md tail): **BRAND-01 is the critical note** — the BLAKE3
+  KDF context embeds the module path `github.com/azferius/lancarsec`, so a rebrand that changes
+  the module path rotates every derived token (clearance/OTP material): a deploy-time break of
+  the same class as the W1 stage-3 cookie change. Plan the cutover accordingly.
 - Module path is `github.com/azferius/lancarsec` (lower-case; the module cache escapes upper-case
   as `!l!ancar!sec`).
 - `core/gofilter` and `core/screen` are vendored, not dependencies.

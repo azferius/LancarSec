@@ -4947,3 +4947,134 @@ No action needed today — reported so the LancarSec fork does not lose the prot
 
 Sanitise at the log-formatting boundary rather than relying on the transport: in FormatLogs, strip or escape any byte < 0x20 and 0x7F-0x9F from Useragent and Path (`strconv.Quote` on the untrusted fields is the one-line version), and delete the misleading no-op utils.SafeString. Also note the truncation at text.go:59 slices a string containing both ANSI escapes and multi-byte UTF-8 by byte offset, which can emit a partial escape sequence or an invalid rune to the terminal.
 
+
+---
+
+# Re-audit — 2026-08-31 (ultracode pipeline)
+
+The original audit above is preserved untouched. This re-audit re-ran the full pipeline against
+HEAD `0f734e8` (wave-9 W1 landed at `d1d62e9`): 9 dimension finders, 9 hostile refute-first
+verifiers ("default to refuted unless you can verify it yourself"), a completeness critic hunting
+for uncovered areas, and this synthesis. Raw findings with per-finding evidence (file:line,
+commands run) live in `audit-rerun-2026-08-31/*.json` in the HarnessAgents workspace, outside
+the repo.
+
+## Scorecard
+
+| Dimension | Raised | Verified | Refuted | Already fixed by W1 | Unchecked |
+|---|---|---|---|---|---|
+| crypto | 11 | 11 | 0 | 1 (CRYPTO-01) | 0 |
+| deps | 5 | 5 | 0 | 0 | 0 |
+| authz | 7 | 7 | 0 | 2 (AUTHZ-03/04) | 0 |
+| perf | 15 | 15 | 0 | 0 | 0 |
+| quality | 10 | 10 | 0 | 0 | 0 |
+| concurrency | 13 | 12 | 1 (CONC-12) | 0 | 0 |
+| brand | 21 | 5 | 0 | 0 | 16 (wave-10 scope) |
+| ops | 2 | 2 | 0 | 0 | 0 |
+| http | 6 | 6 | 0 | 2 (HTTP-01/04) | 0 |
+| critic | 0 new | — | all proposals self-refuted | — | — |
+| **total** | **90** | **73** | **1** | **5** | **16** |
+
+## Convergence map (multi-dimension dedup)
+
+- `AUTHZ-01 = CRYPTO-02` — empty/short challenge secrets accepted (high)
+- `AUTHZ-03 = HTTP-01` — stage-1 open redirect — **fixed in `d1d62e9`**
+- `AUTHZ-04 = HTTP-04` — cacheable block 200s — **fixed in `d1d62e9`**
+- `AUTHZ-05 = CONC-02 = CRYPTO-04` — reload publishes secrets/flags/thresholds as unsynchronized globals (high)
+- `AUTHZ-06 = QUAL-01 = HTTP-02` — body-size config is dead code (medium)
+- `HTTP-05 = QUAL-02` — omitted `ratelimits` section publishes threshold 0, block-everyone (medium)
+- `HTTP-06 = CRYPTO-06` — admin secret persisted verbatim in LastLogs (low; capped by challenge gate)
+- `CONC-01 = PERF-10` — nil sliding-window bucket: panic under `firewall.Mutex` without defer (critical; PERF-10 additionally notes wave 7's "lazy creation" claim was never implemented)
+- `CONC-09 = PERF-01` — single coarse `firewall.Mutex` serialises the request path (high)
+- `CONC-04 = PERF-02` — sliding-window maps: unbounded cardinality vs O(n) rebuild under lock (two symptoms, one family)
+- `QUAL-08 = HTTP-03` — discarded log output makes handler panics invisible
+
+## Significant live findings (dedup'd, ordered by severity)
+
+1. **[critical] Nil-window panic freezes the whole proxy** (CONC-01, PERF-10;
+   `core/server/monitor.go` sliding-window prefill + firewall request path). A request hitting a
+   missing window bucket panics while holding `firewall.Mutex` with a non-defer unlock — the
+   mutex stays wedged and every subsequent request blocks forever.
+2. **[high] Empty/short challenge secrets accepted** (AUTHZ-01, CRYPTO-02;
+   `core/config/pipeline.go:252-266`). Validation passes on empty secrets; the hourly OTP and
+   every clearance token become publicly derivable — full challenge bypass. Fix: reject
+   empty/short secrets at load.
+3. **[high] Unsynchronized config publish on reload** (AUTHZ-05, CONC-02, CRYPTO-04): bare
+   assignments to ~15 package globals while the request path reads them concurrently — torn
+   reads across the set mid-reload.
+4. **[high] Unbounded sliding-window cardinality** (CONC-04): attacker-controlled key
+   population grows the window maps without a cap — memory exhaustion under high-cardinality
+   sources (botnets, spoofed /64s).
+5. **[high, perf] Coarse `firewall.Mutex` taken 2-3x per request for writing** (PERF-01,
+   CONC-09); `evaluateRatelimit` rebuilds ALL client totals from scratch under the exclusive
+   lock every 5s (PERF-02); `utils.AddLogs` appends unboundedly under the global write lock on
+   every verified request (PERF-03).
+6. **[medium] Body-size limits are dead code** (AUTHZ-06, QUAL-01, HTTP-02;
+   `core/server/middleware.go:706` is the sole reader): `max_body_size` and per-domain
+   `maxBodySize` are normalised, validated and published but never enforced — a 1024-byte domain
+   cap silently enforces 10 MiB, and the `-1` unlimited sentinel is ignored.
+7. **[medium] Omitted `ratelimits` section publishes zero thresholds** (HTTP-05, QUAL-02;
+   `core/config/pipeline.go:547-551`): nil map publishes 0 for every threshold; enforcement has
+   no `limit > 0` guard, so after one monitor tick every non-whitelisted client gets 429. No
+   warning is logged.
+8. **[medium] `debug` pseudo-domain panics** (HTTP-03, NEW this re-audit,
+   `core/config/pipeline.go:675-686`): `Host: debug` reaches a `DomainSettings` with nil
+   `DomainProxy`; `ServeHTTP` on the nil proxy panics per connection (process survives,
+   connection dropped), and `main.go:40` `io.Discard` swallows the trace. Verified with a
+   runtime probe.
+9. **[medium] Reload never republishes the OTP set** (AUTHZ-02): rotated challenge secrets stay
+   inert until the next UTC hour.
+10. **[medium, perf]** eviction sweep under the coarse lock (PERF-05, CONC-08), window
+    granularity gaps (PERF-04), per-request gofilter map + `fmt.Sscan` of rule actions
+    (PERF-06/07), challenge-page string re-materialisation and full captcha regeneration per
+    request (PERF-08/09).
+11. **[low]** unsupervised webhook goroutines (CONC-05), `proxy.Initialised` unsynchronised
+    (CONC-06), `ReadLogs` unlocked iteration (CONC-07), domains slice publish mismatch
+    (CONC-11), stdin-EOF busy-spin (CONC-10), constant-time compare on fresh conversions +
+    admin-path concat per request (PERF-11/12), TUI stop-the-world stats per second (PERF-13),
+    `readCookies` before custom parse (PERF-15), non-constant-time secret compares (CRYPTO-05/09),
+    0644 crash.log beside 0600 secrets (CRYPTO-07), hasher-pool saturation from stale OTP keys
+    (CRYPTO-08), captcha colour bias (CRYPTO-10), dead `HashToInt` (CRYPTO-11), unchecked
+    type-assertion in `checkAttack` (QUAL-06), dead `domains.Get` (QUAL-09), copy-paste clusters
+    (QUAL-10), `APIResponse` error discarded at ~18 sites (QUAL-07).
+12. **[deps, medium] Go 1.25 has left upstream security support** (DEPS-01): toolchain bump
+    belongs in wave 11.
+13. **[ops] quickchart-go still a direct dependency** (ops-2; owner decision pending).
+
+## Already fixed by wave-9 W1 (confirmed at `d1d62e9`)
+
+- Open redirect (HTTP-01, AUTHZ-03): guard rejects `URL.Host != ""` / `Path` starting `//` with
+  400 before the redirect; probe-verified (no Location, no cookie).
+- Cacheable block 200s (HTTP-04, AUTHZ-04): `SendResponseWithStatus` sends real statuses +
+  `Cache-Control: no-store` on every block/ratelimit/404 path; test-asserted.
+- CDN PoW assets (CRYPTO-01): stage 2 now loads first-party immutable embeds
+  (`/_bProxy/balooPow.min.js`, `/_bProxy/crypto-js.min.js`); CDN hosts absent from served bodies.
+
+## Completeness critic
+
+Probed areas the 9 finders had not covered: API handlers beyond GET_LOGS, serve.go listener
+lifecycle/timeouts, transport internals, config parse edges, utils, TUI, test hygiene, deploy
+scripts, docs-vs-code claims. Zero findings survived the critic's own refutation — finder
+coverage was complete at this HEAD. (Terminal-escape log injection into the operator TUI was
+re-checked and remains blocked by Go's header validator, consistent with the original audit;
+the protection is the stdlib's, not this codebase's.)
+
+## Wave folding (2026-08-31)
+
+- **Wave 9 W2** (existing: middleware decomposition + html/template): add the `debug` nil-proxy
+  guard (HTTP-03, ~3 lines) and treat QUAL-03 as the slice's own motivation.
+- **Wave 9 W3** (new — config correctness): reject empty/short secrets (AUTHZ-01/CRYPTO-02),
+  ratelimits defaults + load warning (HTTP-05/QUAL-02), wire body limits (AUTHZ-06/QUAL-01/
+  HTTP-02), republish OTP on reload (AUTHZ-02), redact admin secret from logs (HTTP-06/
+  CRYPTO-06).
+- **Wave 9 W4** (new — concurrency hardening): nil-window fix + defer unlock (CONC-01/PERF-10),
+  defer unlocks in supervised workers (CONC-03), window-map cardinality caps (CONC-04),
+  synchronized/atomic config publish (CONC-02/AUTHZ-05/CRYPTO-04), unsupervised goroutines
+  (CONC-05), Initialised atomic (CONC-06), ReadLogs lock (CONC-07), eviction/lock decomposition
+  (CONC-08/09/PERF-01/02/05), stdin EOF (CONC-10), domains publish (CONC-11), plus the perf
+  mediums/lows above.
+- **Wave 10** (rebrand): brand inventory (5/21 verified so far); **BRAND-01 is the critical
+  note** — the BLAKE3 KDF context embeds the module path, so rebranding rotates every derived
+  token: a deploy-time break of the same class as the W1 stage-3 cookie change.
+- **Wave 11**: add the Go toolchain bump (DEPS-01); CRYPTO-03 feeds the stage-3 captcha
+  redesign; Cf-Ja3-Hash passthrough per the owner's 2026-08-31 decision.
