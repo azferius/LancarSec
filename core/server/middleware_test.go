@@ -94,7 +94,13 @@ const (
 	mwStage2Cookie = "_2__bProxy_v"
 )
 
-func mwStage3Cookie(ip string) string { return ip + "_3__bProxy_v" }
+// WAVE 9: mwStage3Cookie no longer embeds the client ip. The stage-3 name used
+// to be ip+"_3__bProxy_v", but an IPv6 ip carries ':' and browsers reject ':'
+// in document.cookie NAMES, which made stage 3 unsolvable for every IPv6
+// client. Binding the token to the ip lives in the token VALUE (the access key
+// is length-prefixed over the ip as of wave 5), not in the name. The helper
+// keeps its function shape so the flipped call sites below stay visible.
+func mwStage3Cookie() string { return "_3__bProxy_v" }
 
 // ---------------------------------------------------------------------------
 // harness
@@ -506,10 +512,14 @@ func TestMiddlewareUnknownDomain(t *testing.T) {
 			before := env.mwDomainData().TotalRequests
 			rec := mwDo(mwRequest("/", mwWithHost(tc.host)))
 
-			// BUG (wave 9 flips this): the "not found" path answers 200 OK with a
-			// plain-text body that merely says 404. Wave 9 should send a real 404.
-			mwAssertStatus(t, rec, http.StatusOK)
+			// WAVE 9: FLIPPED. The "not found" path used to answer 200 OK with a
+			// plain-text body that merely said 404 - a cacheable lie a shared
+			// CDN would serve to every later visitor. It now answers a real 404.
+			mwAssertStatus(t, rec, http.StatusNotFound)
 			mwAssertBodyContains(t, rec, "404 Not Found")
+			if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", cc)
+			}
 
 			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 				t.Errorf("Content-Type = %q, want text/plain", ct)
@@ -693,9 +703,8 @@ func mwPanicString(v any) string {
 // nil-interface panic is not an acceptable answer to a lookup miss that already
 // has an "unknown domain" response.
 //
-// Note the status code: this path sends a real 404, while the sibling
-// unknown-domain path a few lines above it still answers 200 with a body that
-// merely says "404 Not Found". Wave 9 owns making that one honest too.
+// Note the status code: this path sends a real 404. WAVE 9: the sibling
+// unknown-domain path now answers 404 as well (previously a cacheable 200).
 func TestMiddlewareDomainsMapMissingReturns404(t *testing.T) {
 	env := mwNewEnv(t)
 
@@ -790,10 +799,19 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			// and every assertion below would see the difference.
 			rec := mwDo(mwRequest("/"))
 
-			// BUG (wave 9 flips this): every ratelimit answers 200 OK, not 429.
-			mwAssertStatus(t, rec, http.StatusOK)
+			// WAVE 9: FLIPPED. Every ratelimit used to answer 200 OK - a
+			// cacheable lie a shared CDN would poison the origin's URLs with -
+			// and never told the client when to come back. It now answers 429
+			// with Retry-After matching the 10-second counter window.
+			mwAssertStatus(t, rec, http.StatusTooManyRequests)
 			mwAssertBodyContains(t, rec, tc.wantBody)
 			mwAssertBodyContains(t, rec, "Blocked by BalooProxy.")
+			if ra := rec.Result().Header.Get("Retry-After"); ra != "10" {
+				t.Errorf("Retry-After = %q, want 10", ra)
+			}
+			if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", cc)
+			}
 			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 				t.Errorf("Content-Type = %q, want text/plain", ct)
 			}
@@ -966,9 +984,14 @@ func TestMiddlewareForbiddenFingerprint(t *testing.T) {
 
 	rec := mwDo(mwRequest("/"))
 
-	// BUG (wave 9 flips this): a hard block answers 200 OK, not 403.
-	mwAssertStatus(t, rec, http.StatusOK)
+	// WAVE 9: FLIPPED. A hard block used to answer 200 OK; it now answers a
+	// real 403 with Cache-Control: no-store so no shared cache can serve the
+	// block page to a later, innocent visitor of the same URL.
+	mwAssertStatus(t, rec, http.StatusForbidden)
 	mwAssertBodyContains(t, rec, "Your browser Http-Flood (1) is not allowed.")
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached despite a forbidden fingerprint")
 	}
@@ -1059,7 +1082,9 @@ func TestMiddlewareForbiddenFingerprintBlocksRecognisedBrowsers(t *testing.T) {
 
 			rec := mwDo(mwRequest("/"))
 
-			mwAssertStatus(t, rec, http.StatusOK)
+			// WAVE 9: FLIPPED from 200 OK to a real 403, as everywhere the
+			// forbidden-fingerprint block fires.
+			mwAssertStatus(t, rec, http.StatusForbidden)
 			mwAssertBodyContains(t, rec, "Your browser Http-Flood (1) is not allowed.")
 			mwAssertBodyNotContains(t, rec, mwBackendBody)
 			if env.mwBackendHits() != 0 {
@@ -1114,6 +1139,42 @@ func TestMiddlewareStage1Challenge(t *testing.T) {
 	}
 }
 
+// WAVE 9: a protocol-relative request-target used to become an open redirect.
+// "GET //evil.com/ HTTP/1.1" parses (viaRequest, no scheme) with the '//' left
+// in Path and Host EMPTY - url.ParseRequestURI never reads a scheme-less '//' as
+// an authority - so RequestURI() returned "//evil.com/" unchanged, and
+// http.Redirect re-parsed THAT string with url.Parse, which does read '//' as an
+// authority and skips its relative-URL fixup: "Location: //evil.com/" was
+// emitted verbatim and the browser resolved it scheme-relative to
+// https://evil.com/. The stage-1 branch must refuse such targets instead.
+func TestMiddlewareStage1RefusesUnsafeTargets(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	for _, tc := range []struct {
+		name   string
+		target string
+	}{
+		{name: "protocol-relative target", target: "//evil.com/"},
+		{name: "absolute-form target", target: "http://evil.com/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := mwDo(mwRequest(tc.target))
+
+			mwAssertStatus(t, rec, http.StatusBadRequest)
+			if loc := rec.Result().Header.Get("Location"); loc != "" {
+				t.Errorf("Location = %q, want empty: a refused target must not redirect", loc)
+			}
+			if sc := rec.Result().Header.Get("Set-Cookie"); sc != "" {
+				t.Errorf("Set-Cookie = %q, want none: a refused request must not mint a clearance cookie", sc)
+			}
+			if env.mwBackendHits() != 0 {
+				t.Error("backend was reached despite a refused request-target")
+			}
+		})
+	}
+}
+
 func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
 	token := mwCookieToken()
 
@@ -1140,7 +1201,7 @@ func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
 		// A stage-2 or stage-3 cookie is not a stage-1 cookie, even carrying
 		// the right bytes: the name identifies which challenge was solved.
 		{name: "correct token under the stage-2 name", cookie: mwStage2Cookie + "=" + token, pass: false},
-		{name: "correct token under the stage-3 name", cookie: mwStage3Cookie(mwIP) + "=" + token, pass: false},
+		{name: "correct token under the stage-3 name", cookie: mwStage3Cookie() + "=" + token, pass: false},
 
 		// --- the WHOLE token is compared, not a prefix of it ---------------
 		//
@@ -1214,8 +1275,13 @@ func TestMiddlewareStage2Challenge(t *testing.T) {
 	mwAssertBodyContains(t, rec, hashed)
 	mwAssertBodyContains(t, rec, `document.cookie="_2__bProxy_v=`+publicSalt+`"`)
 	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(mwStage2Difficulty)+`,"`+hashed+`",!1)`)
-	// Upstream loads the proof-of-work library from a third-party CDN.
-	mwAssertBodyContains(t, rec, "https://cdn.jsdelivr.net/gh/41Baloo/balooPow@main/balooPow.min.js")
+	// WAVE 9: FLIPPED. The proof-of-work scripts are vendored (global/pow) and
+	// served first-party; the mutable third-party CDN references with no SRI
+	// that neutered stage 2 whenever a CDN was down are gone.
+	mwAssertBodyContains(t, rec, `/_bProxy/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_bProxy/crypto-js.min.js`)
+	mwAssertBodyNotContains(t, rec, "cdn.jsdelivr.net")
+	mwAssertBodyNotContains(t, rec, "cdnjs.cloudflare.com")
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-2 challenge")
 	}
@@ -1270,7 +1336,11 @@ func TestMiddlewareStage3CaptchaFromCache(t *testing.T) {
 	}
 	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,CAPTCHA_PNG_DATA"`)
 	mwAssertBodyContains(t, rec, `mask_image.src="data:image/png;base64,MASK_PNG_DATA"`)
-	mwAssertBodyContains(t, rec, `document.cookie="`+mwIP+`_3__bProxy_v="+a+"`+publicPart+`; SameSite=Lax; path=/; Secure"`)
+	// WAVE 9: FLIPPED. The stage-3 cookie name no longer embeds the client ip
+	// (an IPv6 ip carries ':' and browsers refuse to store such a cookie), so
+	// the name is the bare stage-3 name and the token binding lives in the
+	// token VALUE.
+	mwAssertBodyContains(t, rec, `document.cookie="`+mwStage3Cookie()+`="+a+"`+publicPart+`; SameSite=Lax; path=/; Secure"`)
 	mwAssertBodyContains(t, rec, `fetch("https://"+location.hostname+"/_bProxy/verified")`)
 	// BUG: the captcha answer is checked against the secret half of the token,
 	// which is handed to the client inside the image; the public half is echoed
@@ -1422,18 +1492,22 @@ func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(3)
 
-	// The client sends "<ip>_3__bProxy_v=<answer><publicPart>", which for a
-	// correct answer is the whole token.
-	// FLIPPED BY WAVE 5: the name is now required to be the stage-3 name for
-	// THIS client's ip; the old substring check took the token under any name.
-	rec := mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie(mwIP)+"="+mwCaptchaToken())))
+	// The client sends "_3__bProxy_v=<answer><publicPart>", which for a correct
+	// answer is the whole token.
+	// WAVE 9: FLIPPED. The name used to be "<ip>_3__bProxy_v"; wave 6 moved the
+	// ip out of the name (IPv6 carries ':' and browsers reject that) and wave 5
+	// already binds the token VALUE to the ip, domain, fingerprint, UA and hour
+	// — so the bare name carries no security weight.
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie()+"="+mwCaptchaToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
-	// The same token under another client's stage-3 cookie name does not clear
-	// this client: the name is bound to the ip the captcha was issued to.
+	// The correct answer bound to ANOTHER client's identity does not clear this
+	// client: the binding lives in the token value now, so a foreign ip inside
+	// the token is what must be rejected, not a foreign cookie name.
 	before := env.mwBackendHits()
-	rec = mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie("198.51.100.9")+"="+mwCaptchaToken())))
+	foreignToken := utils.Encrypt(mwAccessKeyFor(mwDomain, "198.51.100.9", mwFP, mwUA, mwHourStr, 3), mwCaptchaOTP)
+	rec = mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie()+"="+foreignToken)))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, "Drag the <b>slider</b>")
 	if env.mwBackendHits() != before {
@@ -1462,9 +1536,13 @@ func TestMiddlewareSuspicionLevelBlocked(t *testing.T) {
 			// evaluated before the cookie check.
 			rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 
-			// BUG (wave 9 flips this): a suspicion block answers 200 OK.
-			mwAssertStatus(t, rec, http.StatusOK)
+			// WAVE 9: FLIPPED. A suspicion block used to answer 200 OK; it now
+			// answers 403 with Cache-Control: no-store.
+			mwAssertStatus(t, rec, http.StatusForbidden)
 			mwAssertBodyContains(t, rec, tc.wantBody)
+			if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", cc)
+			}
 			if env.mwBackendHits() != 0 {
 				t.Error("backend was reached despite the suspicion block")
 			}
@@ -1516,7 +1594,7 @@ func TestMiddlewareSuspicionLevelCacheKeysAreDistinct(t *testing.T) {
 
 	t.Run("no cookie is blocked by the first switch", func(t *testing.T) {
 		rec := mwDo(mwRequest("/"))
-		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertStatus(t, rec, http.StatusForbidden) // WAVE 9: was 200 OK
 		// The "(base 5)" suffix says the block came from the FIRST switch: the
 		// level-5 request missed the cache instead of hitting the whitelisted
 		// request's entry.
@@ -1526,7 +1604,7 @@ func TestMiddlewareSuspicionLevelCacheKeysAreDistinct(t *testing.T) {
 	t.Run("a stale proxy cookie no longer bypasses the block", func(t *testing.T) {
 		before := env.mwBackendHits()
 		rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"=whatever-stale-value")))
-		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertStatus(t, rec, http.StatusForbidden) // WAVE 9: was 200 OK
 		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
 		mwAssertBodyNotContains(t, rec, mwBackendBody)
 		if env.mwBackendHits() != before {
@@ -1596,10 +1674,11 @@ func TestMiddlewareCustomRules(t *testing.T) {
 			wantStatus: http.StatusFound, // stage 1 redirect
 		},
 		{
-			name:       "additions can push past the block threshold",
-			rules:      [][2]string{{`http.user_agent contains "mw-test"`, "+4"}},
-			path:       "/",
-			wantStatus: http.StatusOK,
+			name:  "additions can push past the block threshold",
+			rules: [][2]string{{`http.user_agent contains "mw-test"`, "+4"}},
+			path:  "/",
+			// WAVE 9: FLIPPED from 200 OK - a hard block is a real 403 now.
+			wantStatus: http.StatusForbidden,
 			wantBody:   "Suspicious request of level 5+ (base 1)",
 		},
 		{
@@ -2183,7 +2262,7 @@ func TestMiddlewareProxyCookiesAreStrippedBeforeForwarding(t *testing.T) {
 		},
 		{
 			name: "every stage prefix goes",
-			sent: "keep=yes; " + mwStage1Cookie + "=" + token + "; " + mwStage2Cookie + "=x; " + mwStage3Cookie(mwIP) + "=y",
+			sent: "keep=yes; " + mwStage1Cookie + "=" + token + "; " + mwStage2Cookie + "=x; " + mwStage3Cookie() + "=y",
 			want: "keep=yes",
 		},
 		{
