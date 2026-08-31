@@ -4969,11 +4969,11 @@ the repo.
 | perf | 15 | 15 | 0 | 0 | 0 |
 | quality | 10 | 10 | 0 | 0 | 0 |
 | concurrency | 13 | 12 | 1 (CONC-12) | 0 | 0 |
-| brand | 21 | 5 | 0 | 0 | 16 (wave-10 scope) |
+| brand | 21 | 20 | 0 | 1 (BRAND-06) | 0 |
 | ops | 2 | 2 | 0 | 0 | 0 |
 | http | 6 | 6 | 0 | 2 (HTTP-01/04) | 0 |
 | critic | 0 new | — | all proposals self-refuted | — | — |
-| **total** | **90** | **73** | **1** | **5** | **16** |
+| **total** | **90** | **88** | **1** | **6** | **0** |
 
 ## Convergence map (multi-dimension dedup)
 
@@ -5073,8 +5073,13 @@ the protection is the stdlib's, not this codebase's.)
   (CONC-05), Initialised atomic (CONC-06), ReadLogs lock (CONC-07), eviction/lock decomposition
   (CONC-08/09/PERF-01/02/05), stdin EOF (CONC-10), domains publish (CONC-11), plus the perf
   mediums/lows above.
-- **Wave 10** (rebrand): brand inventory (5/21 verified so far); **BRAND-01 is the critical
-  note** — the BLAKE3 KDF context embeds the module path, so rebranding rotates every derived
-  token: a deploy-time break of the same class as the W1 stage-3 cookie change.
+- **Wave 10** (rebrand): brand inventory complete (20/21 verified + BRAND-06 already fixed by
+  W1; second-pass verification 2026-09-01 found only line/count drift, 0 refuted); **BRAND-01 is
+  the critical note** — the BLAKE3 KDF context embeds the module path, so rebranding rotates
+  every derived token: a deploy-time break of the same class as the W1 stage-3 cookie change.
+  Concrete rename targets and the dual-accept grace window are already prescribed in the
+  original audit's rebrand section (AUDIT.md :220-253); the test suite pins every rebranded
+  surface (19 baloo lines in middleware_test.go + monitor/bench azferius imports), so the
+  rename and its test-pin flips must land in one atomic commit.
 - **Wave 11**: add the Go toolchain bump (DEPS-01); CRYPTO-03 feeds the stage-3 captcha
   redesign; Cf-Ja3-Hash passthrough per the owner's 2026-08-31 decision.
