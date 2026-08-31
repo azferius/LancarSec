@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
-	"github.com/azferius/lancarsec/core/api"
-	"github.com/azferius/lancarsec/core/domains"
-	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/proxy"
-	"github.com/azferius/lancarsec/core/trusted"
-	"github.com/azferius/lancarsec/core/utils"
+	"html"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -21,6 +17,14 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/azferius/lancarsec/core/api"
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/trusted"
+	"github.com/azferius/lancarsec/core/utils"
+	"github.com/azferius/lancarsec/global/pow"
 
 	"github.com/azferius/lancarsec/core/gofilter"
 )
@@ -35,6 +39,122 @@ const proxyCookieSuffix = "__bProxy_v"
 func SendResponse(str string, buffer *bytes.Buffer, writer http.ResponseWriter) {
 	buffer.WriteString(str)
 	writer.Write(buffer.Bytes())
+}
+
+// setProxyPageHeaders applies the security headers every proxy-generated page
+// carries. It must be called at each proxy-generated response site, NEVER once
+// at the top of Middleware: httputil.ReverseProxy ADDS the backend's response
+// headers to the writer without clearing what the handler already set, so a
+// header set globally would leak onto responses that were proxied to a customer
+// backend. Proxied responses keep exactly the headers the backend chose.
+//
+// WAVE 9: no CSP is set deliberately. The challenge pages run inline scripts -
+// stage 2's solver and stage 3's captcha logic ARE the challenge - so any real
+// CSP would need 'unsafe-inline' and would be security theater: a header that
+// reads as protection while permitting the exact execution it names.
+func setProxyPageHeaders(writer http.ResponseWriter) {
+	header := writer.Header()
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "no-referrer")
+}
+
+// SendResponseWithStatus is SendResponse for every proxy-generated response
+// that is not one of the legitimate 200 bodies (the challenge pages, the
+// verified/stats/credits/fingerprint reports): it sends the security headers,
+// Cache-Control: no-store and a REAL status code ahead of the body.
+//
+// WAVE 9: SendResponse never calls WriteHeader, so every block, ratelimit and
+// unknown-domain page left the proxy as a cacheable 200 OK - a shared CDN
+// poisons itself with "this site is blocked" for every later visitor of the
+// same URL. Callers that need a Content-Type still set it themselves
+// beforehand, exactly as they did; 429 call sites set Retry-After alongside it.
+func SendResponseWithStatus(status int, str string, buffer *bytes.Buffer, writer http.ResponseWriter) {
+	setProxyPageHeaders(writer)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(status)
+	buffer.WriteString(str)
+	writer.Write(buffer.Bytes())
+}
+
+// The paths the vendored stage-2 proof-of-work bundle is served from.
+const (
+	powBalooPowPath = "/_bProxy/balooPow.min.js"
+	powCryptoJSPath = "/_bProxy/crypto-js.min.js"
+)
+
+// servePowAsset writes one of the embedded stage-2 scripts byte for byte.
+//
+// WAVE 9: the stage-2 page used to load balooPow from cdn.jsdelivr.net and
+// crypto-js from cdnjs - mutable third-party references with no SRI. If either
+// CDN was unreachable or mutated, stage 2 was dead for every challenged
+// visitor mid-attack, and every challenged visitor's IP leaked to two third
+// parties. The scripts are now compiled into the binary (global/pow) and
+// served from paths this proxy controls.
+func servePowAsset(writer http.ResponseWriter, asset []byte) {
+	header := writer.Header()
+	header.Set("Content-Type", "text/javascript")
+	header.Set("Cache-Control", "public, max-age=31536000, immutable")
+	setProxyPageHeaders(writer)
+	writer.Write(asset)
+}
+
+// ---------------------------------------------------------------------------
+// escaping of values interpolated into proxy-generated pages (wave 9)
+// ---------------------------------------------------------------------------
+
+// escapeHTML renders a value for insertion into proxy-generated HTML text and
+// attribute content.
+//
+// WAVE 9 SCOPING DECISION: these two helpers exist instead of rewriting the
+// challenge pages to html/template. Every interpolated value is server-derived
+// (utils.Encrypt/EncryptSha output, hex; the captcha payloads, base64) and was
+// canonicalised in wave 6, the pages are pinned byte-for-byte by tests, and
+// there is no browser in this test harness to re-verify a template rewrite
+// against - so the values are escaped in place as defence-in-depth rather than
+// the markup being restructured into a different rendering engine.
+func escapeHTML(s string) string {
+	return html.EscapeString(s)
+}
+
+// escapeJSString renders a value as the CONTENT of a double-quoted JavaScript
+// string literal embedded in proxy-generated HTML. Besides the syntax escapes
+// it neutralises <, > and &, so a value can never close the surrounding
+// <script> element or open a tag of its own inside it.
+func escapeJSString(s string) string {
+	const hexDigits = "0123456789abcdef"
+
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"':
+			b.WriteString(`\"`)
+		case '\'':
+			b.WriteString(`\u0027`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '<':
+			b.WriteString(`\u003c`)
+		case '>':
+			b.WriteString(`\u003e`)
+		case '&':
+			b.WriteString(`\u0026`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if c < 0x20 || c == 0x7f {
+				b.WriteString(`\u00`)
+				b.WriteByte(hexDigits[c>>4])
+				b.WriteByte(hexDigits[c&0xf])
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +526,16 @@ func accessKeyFor(domainName, ip, tlsFp, userAgent, hour string, susLv int) stri
 // challengeCookieName is the name of the cookie a client is expected to
 // present for a given suspicion level. Levels with no challenge (0, and
 // anything from 4 up, which is a hard block) have no cookie and return "".
-func challengeCookieName(susLv int, ip string) string {
+//
+// WAVE 9: the stage-3 name no longer embeds the client ip. An IPv6 ip carries
+// ':', and browsers reject ':' in document.cookie NAMES - the stage-3 page
+// writes this cookie from JavaScript - so stage 3 was unsolvable for every
+// IPv6 client. Binding the token to the ip is NOT lost: the token VALUE is
+// length-prefix encoded over (v1, domain, ip, fingerprint, user agent, hour)
+// as of wave 5, so a token still clears exactly the identity it was minted
+// for. Stage-3 cookies issued before this change no longer match the name the
+// proxy expects; every affected client is re-challenged once.
+func challengeCookieName(susLv int) string {
 	switch susLv {
 	case 1:
 		return "_1" + proxyCookieSuffix
@@ -414,8 +543,9 @@ func challengeCookieName(susLv int, ip string) string {
 		return "_2" + proxyCookieSuffix
 	case 3:
 		// The stage-3 page writes this name from JavaScript; see the
-		// document.cookie call in the captcha template below.
-		return ip + "_3" + proxyCookieSuffix
+		// document.cookie call in the captcha template below, which derives
+		// the name from THIS function so the two can never drift apart.
+		return "_3" + proxyCookieSuffix
 	default:
 		return ""
 	}
@@ -429,11 +559,13 @@ func requestCookie(request *http.Request, name string) (string, bool) {
 	}
 
 	// net/http silently drops any cookie pair whose NAME is not a valid HTTP
-	// token, and the stage-3 cookie name embeds the client IP - an IPv6
-	// address contains ':' and '[', neither of which is a token character. So
-	// fall back to walking the header ourselves rather than making stage 3
-	// permanently unsolvable for those clients. This is still an exact name
-	// match on a properly split header, never a substring test.
+	// token, and a cookie name is client-chosen junk the moment an attacker
+	// invents one. So fall back to walking the header ourselves rather than
+	// letting a name that does not parse as a token hide a presented cookie.
+	// WAVE 9: the stage-3 name the proxy issues ("_3__bProxy_v") is itself a
+	// valid token now that it no longer embeds the client ip, so the primary
+	// request.Cookie lookup covers it; the walk remains for exact-match
+	// robustness and is still never a substring test.
 	for _, header := range request.Header.Values("Cookie") {
 		for _, pair := range strings.Split(header, ";") {
 			cookieName, cookieValue, found := strings.Cut(strings.TrimSpace(pair), "=")
@@ -516,8 +648,7 @@ func authorisedProxyEndpoint(request *http.Request) bool {
 // do not have the secret" apart from "there is no such endpoint".
 func proxyEndpointNotFound(writer http.ResponseWriter, buffer *bytes.Buffer) {
 	writer.Header().Set("Content-Type", "text/plain")
-	writer.WriteHeader(http.StatusNotFound)
-	SendResponse("404 Not Found", buffer, writer)
+	SendResponseWithStatus(http.StatusNotFound, "404 Not Found", buffer, writer)
 }
 
 func Middleware(writer http.ResponseWriter, request *http.Request) {
@@ -544,8 +675,22 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// outright rather than filtered.
 	if request.Method == http.MethodConnect {
 		writer.Header().Set("Content-Type", "text/plain")
-		writer.WriteHeader(http.StatusMethodNotAllowed)
-		SendResponse("405 Method Not Allowed", buffer, writer)
+		SendResponseWithStatus(http.StatusMethodNotAllowed, "405 Method Not Allowed", buffer, writer)
+		return
+	}
+
+	// WAVE 9: the vendored stage-2 proof-of-work scripts are served before ANY
+	// bookkeeping - the counters, the domain lookup and above all the challenge
+	// logic. A browser fetches them while it is being challenged, so the
+	// request carries no clearance cookie; if this route were served after the
+	// challenge logic the browser would receive a challenge page instead of
+	// JavaScript and stage 2 would silently die. See servePowAsset.
+	switch request.URL.Path {
+	case powBalooPowPath:
+		servePowAsset(writer, pow.BalooPow)
+		return
+	case powCryptoJSPath:
+		servePowAsset(writer, pow.CryptoJS)
 		return
 	}
 
@@ -570,7 +715,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	if !domainFound {
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("404 Not Found", buffer, writer)
+		// WAVE 9: a real 404 with no-store; this body used to leave as a
+		// cacheable 200 that merely said "404".
+		SendResponseWithStatus(http.StatusNotFound, "404 Not Found", buffer, writer)
 		return
 	}
 
@@ -601,8 +748,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if domains.Config.Proxy.Cloudflare && proxy.CloudflareEnforceOrigin {
 		if peer := peerAddr(request.RemoteAddr); !peer.IsValid() || !trusted.IsTrusted(peer) {
 			writer.Header().Set("Content-Type", "text/plain")
-			writer.WriteHeader(http.StatusForbidden)
-			SendResponse("403 Forbidden", buffer, writer)
+			SendResponseWithStatus(http.StatusForbidden, "403 Forbidden", buffer, writer)
 			return
 		}
 	}
@@ -667,8 +813,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// worth keeping for a lookup that has a perfectly good "unknown domain"
 		// answer already.
 		writer.Header().Set("Content-Type", "text/plain")
-		writer.WriteHeader(http.StatusNotFound)
-		SendResponse("404 Not Found", buffer, writer)
+		SendResponseWithStatus(http.StatusNotFound, "404 Not Found", buffer, writer)
 		return
 	}
 
@@ -738,14 +883,20 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		//Ratelimit faster if client repeatedly fails the verification challenge (feel free to play around with the threshhold)
 		if ipCountCookie > proxy.FailChallengeRatelimit {
 			writer.Header().Set("Content-Type", "text/plain")
-			SendResponse("Blocked by BalooProxy.\nYou have been ratelimited. (R1)", buffer, writer)
+			// WAVE 9: real 429s with Retry-After; these bodies used to leave
+			// as cacheable 200s. 10 matches the 10-second window granularity
+			// the counters above are kept in, which is the soonest the same
+			// client's count can have drained.
+			writer.Header().Set("Retry-After", "10")
+			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R1)", buffer, writer)
 			return
 		}
 
 		//Ratelimit spamming Ips (feel free to play around with the threshhold)
 		if ipCount > proxy.IPRatelimit {
 			writer.Header().Set("Content-Type", "text/plain")
-			SendResponse("Blocked by BalooProxy.\nYou have been ratelimited. (R2)", buffer, writer)
+			writer.Header().Set("Retry-After", "10")
+			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R2)", buffer, writer)
 			return
 		}
 
@@ -753,7 +904,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		if browser == "" {
 			if fpCount > proxy.FPRatelimit {
 				writer.Header().Set("Content-Type", "text/plain")
-				SendResponse("Blocked by BalooProxy.\nYou have been ratelimited. (R3)", buffer, writer)
+				writer.Header().Set("Retry-After", "10")
+				SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R3)", buffer, writer)
 				return
 			}
 
@@ -772,7 +924,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	forbiddenFp := firewall.ForbiddenFingerprints[tlsFp]
 	if forbiddenFp != "" {
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("Blocked by BalooProxy.\nYour browser "+forbiddenFp+" is not allowed.", buffer, writer)
+		// WAVE 9: a hard block answers 403, not a cacheable 200.
+		SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nYour browser "+forbiddenFp+" is not allowed.", buffer, writer)
 		return
 	}
 
@@ -808,7 +961,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			encryptedIP = utils.Encrypt(accessKey, otp.Captcha)
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
-			SendResponse("Blocked by BalooProxy.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
+			// WAVE 9: a hard block answers 403, not a cacheable 200.
+			SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
 			return
 		}
 		firewall.CacheIps.Store(accessKey, encryptedIP)
@@ -830,7 +984,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// name an attacker picked ("evil__bProxy_v=<token>"), or - when encryptedIP
 	// was empty, as it is for a whitelisted or cache-collided request - on the
 	// strength of any leftover proxy cookie at all.
-	cookieName := challengeCookieName(susLv, ip)
+	cookieName := challengeCookieName(susLv)
 	verified := false
 	if cookieName != "" && encryptedIP != "" {
 		if presented, found := requestCookie(request, cookieName); found {
@@ -858,6 +1012,21 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		case 0:
 			//This request is not to be challenged (whitelist)
 		case 1:
+			// WAVE 9: refuse any request-target that is not clean origin-form.
+			// A protocol-relative target like "GET //evil.com/ HTTP/1.1" parses
+			// (viaRequest, no scheme) with the '//' left in Path and Host empty
+			// - url.ParseRequestURI never reads a scheme-less '//' as an
+			// authority - so RequestURI() returns "//evil.com/", and
+			// http.Redirect re-parses THAT string with url.Parse, which DOES
+			// read '//' as an authority and skips its relative-URL fixup:
+			// Location: //evil.com/ is emitted verbatim, an open redirect off
+			// the protected site. Absolute-form targets (URL.Host set) are
+			// refused too; only a relative URI reaches the redirect below.
+			if request.URL.Host != "" || strings.HasPrefix(request.URL.Path, "//") {
+				writer.Header().Set("Content-Type", "text/plain")
+				SendResponseWithStatus(http.StatusBadRequest, "400 Bad Request", buffer, writer)
+				return
+			}
 			// HttpOnly. Stage 1 is issued by the proxy and read back by the
 			// proxy; no page ever needs it from script, so script - including
 			// script injected into the backend - must not be able to read the
@@ -869,13 +1038,16 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			// to let script set an HttpOnly cookie. Adding the flag to those
 			// two would make both challenges permanently unsolvable.
 			writer.Header().Set("Set-Cookie", "_1"+proxyCookieSuffix+"="+encryptedIP+"; SameSite=Lax; path=/; Secure; HttpOnly")
+			setProxyPageHeaders(writer)
+			writer.Header().Set("Cache-Control", "no-store")
 			http.Redirect(writer, request, request.URL.RequestURI(), http.StatusFound)
 			return
 		case 2:
 			publicSalt := encryptedIP[:len(encryptedIP)-domainData.Stage2Difficulty]
 			writer.Header().Set("Content-Type", "text/html")
 			writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0") // Prevent special(ed) browsers from caching the challenge
-			SendResponse(`<!doctypehtml><html lang=en><meta charset=UTF-8><meta content="width=device-width,initial-scale=1"name=viewport><title>Completing challenge ...</title><style>body,html{height:100%;width:100%;margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background-color:#f0f0f0;font-family:Arial,sans-serif}.loader{display:flex;justify-content:space-around;align-items:center;width:100px;height:100px}.loader div{width:20px;height:20px;background-color:#333;border-radius:50%;animation:bounce .6s infinite alternate}.loader div:nth-child(2){animation-delay:.2s}.loader div:nth-child(3){animation-delay:.4s}@keyframes bounce{to{transform:translateY(-30px)}}.message{text-align:center;margin-top:20px;color:#333}.subtext{text-align:center;color:#666;font-size:.9em;margin-top:5px}.placeholder-container{width:25%;text-align:center;margin:10px 0}.placeholder-label{font-weight:700;margin-bottom:5px}.placeholder{background-color:#e0e0e0;padding:10px;border-radius:5px;word-break:break-all;font-family:monospace;cursor:pointer;}</style><div class=loader><div></div><div></div><div></div></div><div class=message><p>Completing challenge ...<div class=subtext>The process is automatic and shouldn't take too long. Please be patient.</div></div><div class=placeholder-container><div class=placeholder-label>publicSalt:</div><div class=placeholder id=publicSalt onclick='ctc("publicSalt")'><span>`+publicSalt+`</span></div></div><div class=placeholder-container><div class=placeholder-label>challenge:</div><div class=placeholder id=challenge onclick='ctc("challenge")'><span>`+hashedEncryptedIP+`</span></div></div><script>function ctc(t){navigator.clipboard.writeText(document.getElementById(t).innerText)}</script><script src="https://cdn.jsdelivr.net/gh/41Baloo/balooPow@main/balooPow.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.0.0/crypto-js.min.js"></script><script>function solved(e){document.cookie="_2__bProxy_v=`+publicSalt+`"+e.solution+"; SameSite=Lax; path=/; Secure",location.href=location.href}new BalooPow("`+publicSalt+`",`+strconv.Itoa(domainData.Stage2Difficulty)+`,"`+hashedEncryptedIP+`",!1).Solve().then(e=>{if(e.match == ""){solved(e)}else alert("Navigator Missmatch ("+e.match+"). Please contact @ddosmitigation")});</script>`, buffer, writer)
+			setProxyPageHeaders(writer)
+			SendResponse(`<!doctypehtml><html lang=en><meta charset=UTF-8><meta content="width=device-width,initial-scale=1"name=viewport><title>Completing challenge ...</title><style>body,html{height:100%;width:100%;margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background-color:#f0f0f0;font-family:Arial,sans-serif}.loader{display:flex;justify-content:space-around;align-items:center;width:100px;height:100px}.loader div{width:20px;height:20px;background-color:#333;border-radius:50%;animation:bounce .6s infinite alternate}.loader div:nth-child(2){animation-delay:.2s}.loader div:nth-child(3){animation-delay:.4s}@keyframes bounce{to{transform:translateY(-30px)}}.message{text-align:center;margin-top:20px;color:#333}.subtext{text-align:center;color:#666;font-size:.9em;margin-top:5px}.placeholder-container{width:25%;text-align:center;margin:10px 0}.placeholder-label{font-weight:700;margin-bottom:5px}.placeholder{background-color:#e0e0e0;padding:10px;border-radius:5px;word-break:break-all;font-family:monospace;cursor:pointer;}</style><div class=loader><div></div><div></div><div></div></div><div class=message><p>Completing challenge ...<div class=subtext>The process is automatic and shouldn't take too long. Please be patient.</div></div><div class=placeholder-container><div class=placeholder-label>publicSalt:</div><div class=placeholder id=publicSalt onclick='ctc("publicSalt")'><span>`+escapeHTML(publicSalt)+`</span></div></div><div class=placeholder-container><div class=placeholder-label>challenge:</div><div class=placeholder id=challenge onclick='ctc("challenge")'><span>`+escapeHTML(hashedEncryptedIP)+`</span></div></div><script>function ctc(t){navigator.clipboard.writeText(document.getElementById(t).innerText)}</script><!-- WAVE 9: both scripts are vendored (global/pow) and served first-party below; they used to be mutable CDN references with no SRI that neuters stage 2 when the CDN is unavailable --><script src="`+powBalooPowPath+`"></script><script src="`+powCryptoJSPath+`"></script><script>function solved(e){document.cookie="_2__bProxy_v=`+escapeJSString(publicSalt)+`"+e.solution+"; SameSite=Lax; path=/; Secure",location.href=location.href}new BalooPow("`+escapeJSString(publicSalt)+`",`+strconv.Itoa(domainData.Stage2Difficulty)+`,"`+escapeJSString(hashedEncryptedIP)+`",!1).Solve().then(e=>{if(e.match == ""){solved(e)}else alert("Navigator Missmatch ("+e.match+"). Please contact @ddosmitigation")});</script>`, buffer, writer)
 			return
 		case 3:
 			secretPart := encryptedIP[:6]
@@ -919,11 +1091,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 				var captchaBuf, maskBuf bytes.Buffer
 				if err := png.Encode(&captchaBuf, captchaImg); err != nil {
-					SendResponse("BalooProxy Error: Failed to encode captcha: "+err.Error(), buffer, writer)
+					// WAVE 9: the internal error string used to be echoed to
+					// the client. The client gets a generic 500 with no
+					// internal detail; the cause goes to the log, consistent
+					// with the stdlib-log pattern used elsewhere in this tree.
+					log.Printf("BalooProxy: failed to encode stage-3 captcha image: %v", err)
+					writer.Header().Set("Content-Type", "text/plain")
+					SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
 					return
 				}
 				if err := png.Encode(&maskBuf, maskImg); err != nil {
-					SendResponse("BalooProxy Error: Failed to encode captchaMask: "+err.Error(), buffer, writer)
+					log.Printf("BalooProxy: failed to encode stage-3 captcha mask: %v", err)
+					writer.Header().Set("Content-Type", "text/plain")
+					SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
 					return
 				}
 
@@ -939,11 +1119,20 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 			writer.Header().Set("Content-Type", "text/html")
 			writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0") // Prevent special(ed) browsers from caching the challenge
-			SendResponse(`<style>body{background-color:#f5f5f5;font-family:Arial,sans-serif}.center{display:flex;align-items:center;justify-content:center;height:100vh}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px}canvas{display:block;margin:0 auto;max-width:100%;width:100%;height:auto}input[type=text]{width:100%;padding:12px 20px;margin:8px 0;box-sizing:border-box;border:2px solid #ccc;border-radius:4px}button{width:100%;background-color:#4caf50;color:#fff;padding:14px 20px;margin:8px 0;border:none;border-radius:4px;cursor:pointer}button:hover{background-color:#45a049}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px;transition:height .1s;position:block}.box *{transition:opacity .1s}.success{background-color:#dff0d8;border:1px solid #d6e9c6;border-radius:4px;color:#3c763d;padding:20px}.failure{background-color:#f0d8d8;border:1px solid #e9c6c6;border-radius:4px;color:#763c3c;padding:20px}.collapsible{background-color:#f5f5f5;color:#444;cursor:pointer;padding:18px;width:100%;border:none;text-align:left;outline:0;font-size:15px}.collapsible:after{content:'\002B';color:#777;font-weight:700;float:right;margin-left:5px}.collapsible.active:after{content:"\2212"}.collapsible:hover{background-color:#e5e5e5}.collapsible-content{padding:0 18px;max-height:0;overflow:hidden;transition:max-height .2s ease-out;background-color:#f5f5f5}.captcha-wrapper{position:relative;width:100%;height:200px}.captcha-wrapper canvas{position:absolute}input[type=range]{-webkit-appearance:none;width:100%;height:25px;background:#ddd;outline:0;opacity:.7;transition:opacity .2s;border-radius:4px;margin:8px 0}input[type=range]:hover{opacity:1}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}input[type=range]::-moz-range-thumb{width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}</style><div class=center id=center><div class=box id=box><h1>Drag the <b>slider</b> and enter the <b>green</b> text you see in the picture</h1><div class=captcha-wrapper><canvas height=37 id=captcha width=100></canvas><canvas height=37 id=mask width=100></canvas></div><input id=captcha-slider max=50 min=-50 type=range><form onsubmit="return checkAnswer(event)"><input id=text type=text maxlength=6 placeholder=Solution required> <button type=submit>Submit</button></form><div class=success id=successMessage style=display:none>Success! Redirecting ...</div><div class=failure id=failMessage style=display:none>Failed! Please try again.</div><button class=collapsible>Why am I seeing this page?</button><div class=collapsible-content><p>The website you are trying to visit needs to make sure that you are not a bot. This is a common security measure to protect websites from automated spam and abuse. By entering the characters you see in the picture, you are helping to verify that you are a real person.</div></div></div><script>let captcha_canvas=document.getElementById("captcha"),captcha_ctx=captcha_canvas.getContext("2d"),mask_canvas=document.getElementById("mask"),mask_ctx=mask_canvas.getContext("2d"),slider=document.getElementById("captcha-slider"),demo_slider=!1,demo_val=1;var i,captcha_image=new Image,mask_image=new Image;function checkAnswer(e){e.preventDefault();var a=document.getElementById("text").value;document.cookie="`+ip+`_3__bProxy_v="+a+"`+publicPart+`; SameSite=Lax; path=/; Secure",fetch("https://"+location.hostname+"/_bProxy/verified").then(function(e){return e.text()}).then(function(e){"verified"===e?(document.getElementById("successMessage").style.display="block",setInterval(function(){var e=document.getElementById("box"),a=e.offsetHeight,t=setInterval(function(){a-=20,e.style.height=a+"px";for(var c=e.children,s=0;s<c.length;s++)c[s].style.opacity=0;a<=0&&(e.style.height="0",e.remove(),clearInterval(t),location.href=location.href)},20)},1e3)):(document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3))}).catch(function(e){document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3)})}captcha_image.onload=function(){captcha_ctx.drawImage(captcha_image,(captcha_canvas.width-captcha_image.width)/2,(captcha_canvas.height-captcha_image.height)/2)},captcha_image.src="data:image/png;base64,`+captchaData+`",mask_image.onload=function(){mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2,(mask_canvas.height-mask_image.height)/2)},mask_image.src="data:image/png;base64,`+maskData+`";let demo_int=setInterval(()=>{if(!demo_slider){clearInterval(demo_int);return}slider.value<=-50&&(demo_val=1),slider.value>=50&&(demo_val=-1),slider.value=parseInt(slider.value)+demo_val,updateCaptcha()},50);function updateCaptcha(){let e=parseInt(slider.value);mask_ctx.clearRect(0,0,mask_canvas.width,mask_canvas.height),mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2+e,0)}slider.oninput=function(){demo_slider=!1,updateCaptcha()};var coll=document.getElementsByClassName("collapsible");for(i=0;i<coll.length;i++)coll[i].addEventListener("click",function(){this.classList.toggle("active");var e=this.nextElementSibling;e.style.maxHeight?e.style.maxHeight=null:e.style.maxHeight=e.scrollHeight+"px"});</script>`, buffer, writer)
+			setProxyPageHeaders(writer)
+			// WAVE 9: the stage-3 cookie NAME no longer embeds the client ip -
+			// ':' in an IPv6 name is rejected by browsers, which made stage 3
+			// unsolvable for IPv6 clients. The name is derived from
+			// challengeCookieName so the page's document.cookie and the
+			// server-side validation can never disagree; the token VALUE is
+			// still bound to the ip via the access key (wave 5).
+			stage3CookieName := challengeCookieName(3)
+			SendResponse(`<style>body{background-color:#f5f5f5;font-family:Arial,sans-serif}.center{display:flex;align-items:center;justify-content:center;height:100vh}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px}canvas{display:block;margin:0 auto;max-width:100%;width:100%;height:auto}input[type=text]{width:100%;padding:12px 20px;margin:8px 0;box-sizing:border-box;border:2px solid #ccc;border-radius:4px}button{width:100%;background-color:#4caf50;color:#fff;padding:14px 20px;margin:8px 0;border:none;border-radius:4px;cursor:pointer}button:hover{background-color:#45a049}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px;transition:height .1s;position:block}.box *{transition:opacity .1s}.success{background-color:#dff0d8;border:1px solid #d6e9c6;border-radius:4px;color:#3c763d;padding:20px}.failure{background-color:#f0d8d8;border:1px solid #e9c6c6;border-radius:4px;color:#763c3c;padding:20px}.collapsible{background-color:#f5f5f5;color:#444;cursor:pointer;padding:18px;width:100%;border:none;text-align:left;outline:0;font-size:15px}.collapsible:after{content:'\002B';color:#777;font-weight:700;float:right;margin-left:5px}.collapsible.active:after{content:"\2212"}.collapsible:hover{background-color:#e5e5e5}.collapsible-content{padding:0 18px;max-height:0;overflow:hidden;transition:max-height .2s ease-out;background-color:#f5f5f5}.captcha-wrapper{position:relative;width:100%;height:200px}.captcha-wrapper canvas{position:absolute}input[type=range]{-webkit-appearance:none;width:100%;height:25px;background:#ddd;outline:0;opacity:.7;transition:opacity .2s;border-radius:4px;margin:8px 0}input[type=range]:hover{opacity:1}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}input[type=range]::-moz-range-thumb{width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}</style><div class=center id=center><div class=box id=box><h1>Drag the <b>slider</b> and enter the <b>green</b> text you see in the picture</h1><div class=captcha-wrapper><canvas height=37 id=captcha width=100></canvas><canvas height=37 id=mask width=100></canvas></div><input id=captcha-slider max=50 min=-50 type=range><form onsubmit="return checkAnswer(event)"><input id=text type=text maxlength=6 placeholder=Solution required> <button type=submit>Submit</button></form><div class=success id=successMessage style=display:none>Success! Redirecting ...</div><div class=failure id=failMessage style=display:none>Failed! Please try again.</div><button class=collapsible>Why am I seeing this page?</button><div class=collapsible-content><p>The website you are trying to visit needs to make sure that you are not a bot. This is a common security measure to protect websites from automated spam and abuse. By entering the characters you see in the picture, you are helping to verify that you are a real person.</div></div></div><script>let captcha_canvas=document.getElementById("captcha"),captcha_ctx=captcha_canvas.getContext("2d"),mask_canvas=document.getElementById("mask"),mask_ctx=mask_canvas.getContext("2d"),slider=document.getElementById("captcha-slider"),demo_slider=!1,demo_val=1;var i,captcha_image=new Image,mask_image=new Image;function checkAnswer(e){e.preventDefault();var a=document.getElementById("text").value;document.cookie="`+stage3CookieName+`="+a+"`+escapeJSString(publicPart)+`; SameSite=Lax; path=/; Secure",fetch("https://"+location.hostname+"/_bProxy/verified").then(function(e){return e.text()}).then(function(e){"verified"===e?(document.getElementById("successMessage").style.display="block",setInterval(function(){var e=document.getElementById("box"),a=e.offsetHeight,t=setInterval(function(){a-=20,e.style.height=a+"px";for(var c=e.children,s=0;s<c.length;s++)c[s].style.opacity=0;a<=0&&(e.style.height="0",e.remove(),clearInterval(t),location.href=location.href)},20)},1e3)):(document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3))}).catch(function(e){document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3)})}captcha_image.onload=function(){captcha_ctx.drawImage(captcha_image,(captcha_canvas.width-captcha_image.width)/2,(captcha_canvas.height-captcha_image.height)/2)},captcha_image.src="data:image/png;base64,`+escapeJSString(captchaData)+`",mask_image.onload=function(){mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2,(mask_canvas.height-mask_image.height)/2)},mask_image.src="data:image/png;base64,`+escapeJSString(maskData)+`";let demo_int=setInterval(()=>{if(!demo_slider){clearInterval(demo_int);return}slider.value<=-50&&(demo_val=1),slider.value>=50&&(demo_val=-1),slider.value=parseInt(slider.value)+demo_val,updateCaptcha()},50);function updateCaptcha(){let e=parseInt(slider.value);mask_ctx.clearRect(0,0,mask_canvas.width,mask_canvas.height),mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2+e,0)}slider.oninput=function(){demo_slider=!1,updateCaptcha()};var coll=document.getElementsByClassName("collapsible");for(i=0;i<coll.length;i++)coll[i].addEventListener("click",function(){this.classList.toggle("active");var e=this.nextElementSibling;e.style.maxHeight?e.style.maxHeight=null:e.style.maxHeight=e.scrollHeight+"px"});</script>`, buffer, writer)
 			return
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
-			SendResponse("Blocked by BalooProxy.\nSuspicious request of level "+susLvStr, buffer, writer)
+			// WAVE 9: a hard block answers 403, not a cacheable 200.
+			SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nSuspicious request of level "+susLvStr, buffer, writer)
 			return
 		}
 	}
