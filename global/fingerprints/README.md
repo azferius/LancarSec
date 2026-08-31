@@ -44,13 +44,17 @@ startup, before any listener opens.
 Edit the JSON in place and rebuild. Keep these invariants, which `parse` enforces:
 
 - Top-level value is a JSON object of string → string.
-- No empty keys (an empty key is exactly what a fully truncated ClientHello derives, so it would
-  match one).
+- No empty keys (an empty key is exactly what an all-GREASE ClientHello derives — the only
+  fingerprint left empty since the wave 11 prep GREASE fix — so it would match one).
 - No empty labels (firewall rules compare against the label).
 - Every key ends in `,` — `firewall.Fingerprint` comma-terminates every element it emits, so a
   key without one is unreachable.
 
 Keys must also match the string `firewall.Fingerprint` actually derives, which is *not* a
-standard JA3/JA4: it drops index 0 of the cipher and curve lists, keeps only index 0 of the point
-formats, and renders curves via `tls.CurveID`'s `String()` hex (so X25519 is `0x583235353139`).
-See the comments in `core/firewall/fingerprint_test.go` before hand-writing an entry.
+standard JA3/JA4: it skips RFC 8701 GREASE values (0x?a?a for ciphers and curves, 0x?a for point
+formats) wherever they sit, emits every non-GREASE element of each list, and renders curves via
+`tls.CurveID`'s `String()` hex (so X25519 is `0x583235353139`). Since the wave 11 prep GREASE fix
+it no longer drops index 0 blindly, so a non-GREASE client keeps its first cipher and curve —
+entries generated before that fix from non-GREASE clients (Firefox-family keys were regenerated;
+Dalvik and the bot table were not) are missing those leading elements until a live-traffic
+refresh. See the comments in `core/firewall/fingerprint_test.go` before hand-writing an entry.

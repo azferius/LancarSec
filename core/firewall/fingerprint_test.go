@@ -115,9 +115,11 @@ func TestFingerprintGolden(t *testing.T) {
 	}{
 		{
 			// Chrome/Chromium sends a GREASE value in the first cipher slot and
-			// the first curve slot. Dropping index 0 is exactly right here --
-			// this is the case the "ignore first elements" comment was written
-			// for -- and the result byte-matches a shipped Chromium entry.
+			// the first curve slot. The GREASE-pattern filter removes exactly
+			// those two values, so the output byte-matches the shipped
+			// "Chromium Old" entry both before and after the wave 11 prep fix:
+			// index-0 truncation and pattern filtering agree whenever the
+			// only GREASE values sit in slot 0.
 			//
 			// FLIPPED (wave 4, fingerprint embedding): this key is labelled
 			// "Chromium Old" in the bundled global/fingerprints data, not
@@ -145,24 +147,26 @@ func TestFingerprintGolden(t *testing.T) {
 				"0xc013,0xc014,0x9c,0x9d,0x2f,0x35," +
 				"0x583235353139,0x437572766550323536,0x437572766550333834,0x0,",
 			known:  "Chromium Old",
-			reason: "GREASE occupies index 0, so dropping it recovers the real suite list",
+			reason: "the two GREASE values are all that is filtered; the real suites and curves survive",
 		},
 		{
-			// BUG (a later wave should flip this): Firefox does NOT send GREASE.
-			// Index 0 of its cipher list is a genuine suite (0x1301,
-			// TLS_AES_128_GCM_SHA256) and index 0 of its curve list is a genuine
-			// curve (X25519) -- and the code throws both away regardless. The
-			// shipped "Firefox" entry in KnownFingerprints was itself generated
-			// from this lossy output, so the two agree, but the fingerprint is
-			// strictly weaker than it needs to be: any client differing from
-			// Firefox ONLY in its first cipher suite or first curve is
-			// indistinguishable from Firefox today.
+			// FLIPPED (wave 11 prep, GREASE fix): Firefox does NOT send GREASE,
+			// and the old index-0 truncation threw away its first REAL cipher
+			// (0x1301, TLS_AES_128_GCM_SHA256) and first REAL curve (X25519)
+			// regardless. The shipped "Firefox" entry in KnownFingerprints had
+			// itself been generated from that lossy output, so the table agreed
+			// with the code -- but the fingerprint was strictly weaker than it
+			// needed to be: any client differing from Firefox ONLY in its first
+			// cipher suite or first curve was indistinguishable from Firefox.
 			//
-			// When a wave switches to GREASE-pattern filtering (drop 0x?a?a
-			// values) instead of blind index-0 truncation, this expectation must
-			// gain a leading "0x1301," and a "0x583235353139," before the curves,
-			// and the KnownFingerprints table must be regenerated with it.
-			name: "firefox-like hello without GREASE loses a real cipher and a real curve",
+			// The derivation now filters GREASE by pattern instead of slicing,
+			// so both real elements survive, and the shipped "Firefox" key was
+			// regenerated to this exact string in the same commit. Without the
+			// regeneration every real Firefox hello would have slid into the
+			// unknown-fingerprint ratelimit (R3, `if browser == ""` in
+			// core/server/middleware.go) and `ip.fingerprint` rules written
+			// against the old key would have gone dead.
+			name: "firefox-like hello without GREASE keeps its first cipher and curve",
 			hello: tls.ClientHelloInfo{
 				CipherSuites: []uint16{
 					0x1301, 0x1303, 0x1302,
@@ -176,17 +180,18 @@ func TestFingerprintGolden(t *testing.T) {
 				},
 				SupportedPoints: []uint8{0},
 			},
-			want: "0x1303,0x1302,0xc02b,0xc02f,0xcca9,0xcca8,0xc02c,0xc030," +
+			want: "0x1301,0x1303,0x1302,0xc02b,0xc02f,0xcca9,0xcca8,0xc02c,0xc030," +
 				"0xc00a,0xc009,0xc013,0xc014,0x9c,0x9d,0x2f,0x35," +
-				"0x437572766550323536,0x437572766550333834,0x437572766550353231," +
+				"0x583235353139,0x437572766550323536,0x437572766550333834,0x437572766550353231," +
 				"0x437572766549442832353629,0x437572766549442832353729,0x0,",
 			known:  "Firefox",
-			reason: "no GREASE, so index-0 truncation discards signal",
+			reason: "no GREASE, so nothing is filtered and the full hello is fingerprinted",
 		},
 		{
 			// Safari on iOS. Like Chrome it sends GREASE in the first cipher and
-			// first curve slot, so index-0 truncation lands correctly and the
-			// output byte-matches the shipped "Safari" entry.
+			// first curve slot, which the pattern filter removes, so the output
+			// byte-matches the shipped "Safari" entry both before and after the
+			// wave 11 prep fix.
 			//
 			// The `known` assertion below is the point of this case: these labels
 			// are the VALUES operators write rules against (`ip.bot eq "Safari"`),
@@ -216,38 +221,36 @@ func TestFingerprintGolden(t *testing.T) {
 				"0x583235353139,0x437572766550323536,0x437572766550333834," +
 				"0x437572766550353231,0x0,",
 			known:  "Safari",
-			reason: "iOS Safari sends GREASE, so index-0 truncation is correct here",
+			reason: "iOS Safari sends GREASE, which the pattern filter removes wherever it sits",
 		},
 		{
-			// BUG (a later wave should flip this): the three slice expressions in
-			// Fingerprint are NOT symmetrical.
+			// FLIPPED (wave 11 prep, GREASE fix): the three slice expressions in
+			// Fingerprint used to be asymmetrical --
 			//
 			//     CipherSuites[1:]     -> drop the first element
 			//     SupportedCurves[1:]  -> drop the first element
 			//     SupportedPoints[:1]  -> keep ONLY the first element
 			//
-			// The comment directly above them says "ignore first elements of
-			// arrays", which describes [1:] and contradicts [:1]. In practice
-			// ec_point_formats is almost always the single byte 0x00, so the two
-			// readings coincide and the defect hides -- but a client that offers
-			// several point formats contributes exactly one byte of signal, and
-			// always the same one. This case forces the asymmetry into the open
-			// with three point formats: only 0x0 appears.
-			//
-			// If a wave "fixes" [:1] to [1:], this expectation flips from
-			// "...,0x0," to "...,0x1,0x2,".
-			name: "multiple point formats: [:1] keeps the first instead of dropping it",
+			// [:1] contradicted the comment above the loops ("ignore first
+			// elements") and handed every multi-format client one byte of
+			// signal, always the same one. The fix is deliberately NOT the
+			// naive [1:] this test once predicted -- that would have traded a
+			// head-take for a tail-take and dropped 0x0, a REAL format
+			// (uncompressed), while keeping 0x1 and 0x2 that no browser sends.
+			// All three lists are GREASE-filtered now, so every non-GREASE
+			// point format is emitted and no real signal is dropped.
+			name: "multiple point formats: every non-GREASE format is emitted",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0x0a0a, 0x1301, 0x1302},
 				SupportedCurves: []tls.CurveID{tls.CurveID(0x0a0a), tls.X25519},
 				SupportedPoints: []uint8{0, 1, 2},
 			},
-			want:   "0x1301,0x1302,0x583235353139,0x0,",
-			reason: "SupportedPoints[:1] is a head-take, not a tail-take",
+			want:   "0x1301,0x1302,0x583235353139,0x0,0x1,0x2,",
+			reason: "0x0, 0x1 and 0x2 are all real formats, so all three are emitted",
 		},
 		{
-			// len(SupportedCurves) == 0 is guarded, so [1:] is never evaluated
-			// and the curve section is simply absent.
+			// An empty curve list contributes nothing: the range loop simply
+			// does not run.
 			name: "empty SupportedCurves contributes nothing",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0x0a0a, 0x1301, 0x1302},
@@ -255,7 +258,7 @@ func TestFingerprintGolden(t *testing.T) {
 				SupportedPoints: []uint8{0},
 			},
 			want:   "0x1301,0x1302,0x0,",
-			reason: "the len() > 0 guard skips the whole curve loop",
+			reason: "ranging over an empty slice writes nothing",
 		},
 		{
 			name: "nil SupportedCurves behaves the same as empty",
@@ -265,7 +268,7 @@ func TestFingerprintGolden(t *testing.T) {
 				SupportedPoints: []uint8{0},
 			},
 			want:   "0x1301,0x1302,0x0,",
-			reason: "nil slices have len 0",
+			reason: "ranging over a nil slice writes nothing",
 		},
 		{
 			name: "empty SupportedPoints contributes nothing",
@@ -275,60 +278,92 @@ func TestFingerprintGolden(t *testing.T) {
 				SupportedPoints: []uint8{},
 			},
 			want:   "0x1301,0x1302,0x583235353139,",
-			reason: "the len() > 0 guard skips the point loop",
+			reason: "ranging over an empty slice writes nothing",
 		},
 		{
-			// A single curve is entirely consumed by the [1:] truncation.
-			name: "single-element SupportedCurves is erased by [1:]",
+			// FLIPPED (wave 11 prep, GREASE fix): [1:] on a length-1 curve list
+			// erased the only element it had. A lone REAL curve is signal, not
+			// padding, so the GREASE filter keeps it.
+			name: "single-element SupportedCurves survives the GREASE filter",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0x0a0a, 0x1301},
 				SupportedCurves: []tls.CurveID{tls.X25519},
 				SupportedPoints: []uint8{0},
 			},
-			want:   "0x1301,0x0,",
-			reason: "[1:] on a length-1 slice yields an empty slice, not a panic",
+			want:   "0x1301,0x583235353139,0x0,",
+			reason: "the lone X25519 is not GREASE, so it is emitted",
 		},
 		{
-			// BUG (a later wave should flip this): a hello offering exactly ONE
-			// cipher suite survives the len() > 0 guard, then [1:] erases the
-			// only suite it had. Every such client -- regardless of WHICH suite
-			// it offered -- collapses onto the same fingerprint, keyed only by
-			// its curves and point formats. Two different single-suite scanners
-			// are literally indistinguishable.
-			name: "single-element CipherSuites is erased by [1:] (no panic)",
+			// FLIPPED (wave 11 prep, GREASE fix): a hello offering exactly ONE
+			// cipher suite had it erased by [1:]; every such client -- regardless
+			// of WHICH suite it offered -- collapsed onto the same fingerprint,
+			// keyed only by its curves and point formats, and two different
+			// single-suite scanners were literally indistinguishable. The only
+			// suite is real, so the filter keeps it.
+			//
+			// This now derives the SAME string as the previous case, which is
+			// correct: the two hellos differ only by a GREASE value, which
+			// carries no fingerprint signal.
+			name: "single-element CipherSuites survives the GREASE filter",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0x1301},
 				SupportedCurves: []tls.CurveID{tls.CurveID(0x0a0a), tls.X25519},
 				SupportedPoints: []uint8{0},
 			},
-			want:   "0x583235353139,0x0,",
-			reason: "[1:] on a length-1 slice is legal Go and yields an empty slice",
+			want:   "0x1301,0x583235353139,0x0,",
+			reason: "the only suite is not GREASE, so it is emitted",
 		},
 		{
-			// The degenerate end of the same defect: one suite, one curve, no
-			// points leaves the fingerprint completely EMPTY. Connections then
-			// maps this peer to "", which is the same value an unfingerprinted
-			// peer would look up as a miss.
-			name: "everything truncated away yields an empty fingerprint string",
+			// FLIPPED (wave 11 prep, GREASE fix): one suite, one curve and no
+			// points used to truncate to a completely EMPTY fingerprint, and
+			// Connections mapped the peer to "" -- the same value an
+			// unfingerprinted peer would look up as a miss. Nothing in this
+			// hello is GREASE, so everything is kept and the fingerprint is no
+			// longer empty. The only way to derive "" today is a hello whose
+			// EVERY element is GREASE, which the following case pins.
+			name: "a hello with only real elements is never empty",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0x1301},
 				SupportedCurves: []tls.CurveID{tls.X25519},
 				SupportedPoints: nil,
 			},
+			want:   "0x1301,0x583235353139,",
+			reason: "no element is GREASE, so nothing is dropped",
+		},
+		{
+			// The residual path to an empty fingerprint after the wave 11 prep
+			// fix: a hello whose every element is GREASE. No real client sends
+			// one -- GREASE always accompanies real values -- but this is the
+			// one hello that still derives "", which is why the table
+			// validators keep rejecting an empty KEY.
+			name: "an all-GREASE hello is the only remaining empty fingerprint",
+			hello: tls.ClientHelloInfo{
+				CipherSuites:    []uint16{0x0a0a, 0x1a1a},
+				SupportedCurves: []tls.CurveID{tls.CurveID(0xfafa)},
+				SupportedPoints: []uint8{0x0a},
+			},
 			want:   "",
-			reason: "all three sections truncate to nothing",
+			reason: "every element matches the GREASE pattern",
 		},
 		{
 			// Sanity check that suite values above 0x00ff render without any
 			// zero padding, and values below render without a leading zero.
+			//
+			// FLIPPED (wave 11 prep, GREASE fix): the old want was
+			// "0x5,0xff,0x100,0xf," because index-0 truncation discarded
+			// 0xffff as collateral. 0xffff is NOT GREASE -- its bytes are
+			// equal but its low nibble is 0xf, not 0xa -- so the pattern
+			// filter keeps it, which is exactly the point: a value must be
+			// dropped only when it matches the GREASE pattern, never because
+			// of where it sits.
 			name: "hex rendering has no zero padding",
 			hello: tls.ClientHelloInfo{
 				CipherSuites:    []uint16{0xffff, 0x0005, 0x00ff, 0x0100},
 				SupportedCurves: nil,
 				SupportedPoints: []uint8{0x0f},
 			},
-			want:   "0x5,0xff,0x100,0xf,",
-			reason: "%x is unpadded",
+			want:   "0xffff,0x5,0xff,0x100,0xf,",
+			reason: "%x is unpadded, and 0xffff's low nibble is f so it is not GREASE",
 		},
 	}
 
@@ -374,10 +409,12 @@ func TestFingerprintGolden(t *testing.T) {
 // TestFingerprintEmptyCipherSuites pins the "invalid TLS" early-return path:
 // the connection is CLOSED and nothing is recorded.
 //
-// Note this is also what stops CipherSuites[1:] from panicking on a zero-length
-// slice -- the guard, not the slice expression, is doing the work. If a future
-// wave removes or reorders that guard, [1:] on an empty slice panics inside the
-// TLS handshake callback.
+// The len() > 0 guard remains the invalid-TLS gate. Since the wave 11 prep
+// (GREASE fix) the derivation ranges over the full lists rather than slicing
+// them, so an empty list can no longer panic -- but a hello with NO cipher
+// suites is refused outright regardless, and that contract is what this test
+// pins. If a future wave removes or reorders the guard, that is the behaviour
+// it breaks.
 func TestFingerprintEmptyCipherSuites(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -504,6 +541,238 @@ func TestFingerprintConcurrentWrites(t *testing.T) {
 	}
 }
 
+// TestGREASEPattern pins the GREASE detector itself, element by element.
+//
+// The 16-bit pattern is RFC 8701's: both bytes equal and the low nibble 0xa,
+// i.e. 0x0a0a, 0x1a1a, ... 0xfafa. The near-misses matter as much as the
+// hits: 0xffff (low nibble 0xf), 0x0a0b (low nibble 0xb), 0x0a1a / 0x1a0a /
+// 0x0100 (bytes differ) and every real suite below must all SURVIVE
+// filtering -- a false positive here would silently rewrite a legitimate
+// fingerprint, which is the same class of defect the [1:] truncation had.
+// The single-byte analogue for ec_point_formats (0x?a) cannot misfire on the
+// formats browsers actually send (0, 1, 2).
+func TestGREASEPattern(t *testing.T) {
+	sixteen := []struct {
+		v    uint16
+		want bool
+	}{
+		{0x0a0a, true},
+		{0x1a1a, true},
+		{0x2a2a, true},
+		{0xaaaa, true},
+		{0xfafa, true},
+		{0x0a1a, false}, // bytes differ
+		{0x1a0a, false}, // bytes differ
+		{0x0a0b, false}, // low nibble is b
+		{0x0a00, false}, // low byte is 0x00
+		{0x0100, false}, // bytes differ
+		{0x1301, false}, // TLS_AES_128_GCM_SHA256 -- must never be filtered
+		{0x1302, false}, // TLS_AES_256_GCM_SHA384
+		{0x1303, false}, // TLS_CHACHA20_POLY1305_SHA256
+		{0x009c, false}, // RSA_AES_128_GCM_SHA256
+		{0xc02b, false}, // ECDHE_ECDSA_AES128_GCM_SHA256
+		{0x00ff, false}, // empty renegotiation info
+		{0xffff, false}, // low nibble is f
+	}
+	for _, tc := range sixteen {
+		if got := isGREASE(tc.v); got != tc.want {
+			t.Errorf("isGREASE(0x%04x) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+
+	single := []struct {
+		v    uint8
+		want bool
+	}{
+		{0x0a, true},
+		{0x1a, true},
+		{0xfa, true},
+		{0x00, false}, // uncompressed -- the format every browser sends
+		{0x01, false}, // ansiX962 compressed prime
+		{0x02, false}, // ansiX962 compressed char2
+		{0x0b, false}, // low nibble is b
+	}
+	for _, tc := range single {
+		if got := isGREASE8(tc.v); got != tc.want {
+			t.Errorf("isGREASE8(0x%02x) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+}
+
+// TestFingerprintGREASEIsPositionAgnostic pins the property the old [1:]
+// slicing could not deliver: a GREASE value ANYWHERE in a list -- first,
+// middle, last -- is skipped, and every real element survives. The two hellos
+// below carry the same signal and MUST derive the same fingerprint; with the
+// index-0 truncation the second one kept its mid-list GREASE in the output and
+// lost its leading real suite and curve instead. This is the round trip that
+// also proves a GREASE-sending hello and a non-GREASE hello fingerprint
+// identically whenever -- and only whenever -- their real signal matches.
+func TestFingerprintGREASEIsPositionAgnostic(t *testing.T) {
+	withCleanConnections(t)
+
+	base := tls.ClientHelloInfo{
+		CipherSuites:    []uint16{0x1301, 0x1302, 0x1303},
+		SupportedCurves: []tls.CurveID{tls.X25519, tls.CurveP256},
+		SupportedPoints: []uint8{0, 1},
+	}
+	greased := tls.ClientHelloInfo{
+		CipherSuites: []uint16{
+			0x0a0a, // leading GREASE, the one position [1:] happened to handle
+			0x1301,
+			0x1a1a, // mid-list GREASE, which [1:] kept in the output
+			0x1302, 0x1303,
+			0xfafa, // trailing GREASE
+		},
+		SupportedCurves: []tls.CurveID{
+			tls.CurveID(0x0a0a), tls.X25519, tls.CurveID(0x1a1a), tls.CurveP256,
+		},
+		SupportedPoints: []uint8{0x0a, 0, 0x1a, 1, 0xfa},
+	}
+	want := "0x1301,0x1302,0x1303,0x583235353139,0x437572766550323536,0x0,0x1,"
+
+	for _, tc := range []struct {
+		name  string
+		addr  string
+		hello tls.ClientHelloInfo
+	}{
+		{"no GREASE", "203.0.113.7:44321", base},
+		{"GREASE in first, middle and last positions", "203.0.113.7:44322", greased},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newFakeConn(t, tc.addr)
+			hello := tc.hello
+			hello.Conn = conn
+
+			cfg, err := Fingerprint(&hello)
+			if cfg != nil || err != nil {
+				t.Fatalf("Fingerprint returned (%v, %v), want (nil, nil)", cfg, err)
+			}
+
+			got, ok := readConnection(tc.addr)
+			if !ok {
+				t.Fatalf("Connections[%q] was not written", tc.addr)
+			}
+			if got != want {
+				t.Errorf("fingerprint = %q, want %q; GREASE must be skipped wherever it "+
+					"sits and every real element kept", got, want)
+			}
+		})
+	}
+}
+
+// TestRegeneratedFirefoxFamilyKeysAreReachable round-trips every
+// known_fingerprints.json key that wave 11 prep (GREASE fix) regenerated,
+// proving the shipped keys are still derivable -- the same guarantee
+// TestForbiddenFingerprintIsIntact provides for the block list. A key that
+// nothing derives can never match anything: it reads as a populated table
+// while Firefox-family traffic silently slides into the unknown-fingerprint
+// ratelimit, with no error anywhere.
+//
+// The hellos are the inverse of the regeneration. Firefox-family clients send
+// no GREASE, so each regenerated key is the pre-fix key with its first REAL
+// cipher (0x1301, TLS_AES_128_GCM_SHA256) and first REAL curve (X25519,
+// rendered as its CurveID-String() hex 0x583235353139) put back -- the
+// elements the old index-0 truncation had discarded. If a future wave changes
+// the derivation again, these round trips fail and the keys must be
+// regenerated in the same commit, exactly as the Firefox golden case above
+// prescribes.
+func TestRegeneratedFirefoxFamilyKeysAreReachable(t *testing.T) {
+	cases := []struct {
+		label string
+		hello tls.ClientHelloInfo
+	}{
+		{
+			label: "Firefox",
+			hello: tls.ClientHelloInfo{
+				CipherSuites: []uint16{
+					0x1301, 0x1303, 0x1302,
+					0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030,
+					0xc00a, 0xc009, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+				},
+				SupportedCurves: []tls.CurveID{
+					tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
+					tls.CurveID(256), tls.CurveID(257),
+				},
+				SupportedPoints: []uint8{0},
+			},
+		},
+		{
+			// Firefox-Dev ships the same TLS defaults minus 0xc00a/0xc009.
+			label: "Firefox-Dev",
+			hello: tls.ClientHelloInfo{
+				CipherSuites: []uint16{
+					0x1301, 0x1303, 0x1302,
+					0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030,
+					0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+				},
+				SupportedCurves: []tls.CurveID{
+					tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
+					tls.CurveID(256), tls.CurveID(257),
+				},
+				SupportedPoints: []uint8{0},
+			},
+		},
+		{
+			// Tor Browser is Firefox ESR; the long Tor key is the Firefox list
+			// plus trailing 0x000a (3DES), which Tor keeps for legacy relays.
+			label: "Tor",
+			hello: tls.ClientHelloInfo{
+				CipherSuites: []uint16{
+					0x1301, 0x1303, 0x1302,
+					0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030,
+					0xc00a, 0xc009, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035, 0x000a,
+				},
+				SupportedCurves: []tls.CurveID{
+					tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
+					tls.CurveID(256), tls.CurveID(257),
+				},
+				SupportedPoints: []uint8{0},
+			},
+		},
+		{
+			// The short Tor key: a Tor build without the 3DES-era suites.
+			label: "Tor",
+			hello: tls.ClientHelloInfo{
+				CipherSuites: []uint16{
+					0x1301, 0x1303, 0x1302,
+					0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0x009c, 0x009d,
+				},
+				SupportedCurves: []tls.CurveID{
+					tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
+					tls.CurveID(256), tls.CurveID(257),
+				},
+				SupportedPoints: []uint8{0},
+			},
+		},
+	}
+
+	withCleanConnections(t)
+	for i, tc := range cases {
+		uniqueAddr := "203.0.113.7:" + strconv.Itoa(44320+i)
+		conn := newFakeConn(t, uniqueAddr)
+		hello := tc.hello
+		hello.Conn = conn
+
+		cfg, err := Fingerprint(&hello)
+		if cfg != nil || err != nil {
+			t.Fatalf("%s: Fingerprint returned (%v, %v), want (nil, nil)", tc.label, cfg, err)
+		}
+
+		got, ok := readConnection(uniqueAddr)
+		if !ok {
+			t.Fatalf("%s: Connections[%q] was not written", tc.label, uniqueAddr)
+		}
+		if label := KnownFingerprints[got]; label != tc.label {
+			t.Errorf("%s: hello derives %q, which maps to %q in KnownFingerprints; "+
+				"the regenerated key and the derivation have drifted", tc.label, got, label)
+		}
+		if label := ForbiddenFingerprints[got]; label != "" {
+			t.Errorf("%s: hello derives %q, which is BLOCKED as %q; the regeneration "+
+				"collided with the block list", tc.label, got, label)
+		}
+	}
+}
+
 // TestFingerprintTablesAreWellFormed pins two properties of the shipped
 // fingerprint tables that a regeneration in a later wave must not break.
 func TestFingerprintTablesAreWellFormed(t *testing.T) {
@@ -520,7 +789,7 @@ func TestFingerprintTablesAreWellFormed(t *testing.T) {
 		for fp, label := range table {
 			if fp == "" {
 				t.Errorf("%s has an empty fingerprint key mapping to %q; an empty "+
-					"fingerprint is exactly what a fully-truncated hello produces", name, label)
+					"fingerprint is exactly what an all-GREASE hello produces", name, label)
 			}
 			// Fingerprint always emits a trailing comma after every element, so
 			// every table key must end in one.
@@ -778,12 +1047,14 @@ func TestForbiddenFingerprintIsIntact(t *testing.T) {
 		const addr = "203.0.113.66:31337"
 		conn := newFakeConn(t, addr)
 
-		// Index 0 of each list is dropped by Fingerprint, so the leading GREASE
-		// values are placeholders for whatever the flood tool actually sent
-		// first; every element after them is the real signature.
+		// The leading GREASE values are filtered out by pattern, not by index,
+		// and are placeholders for whatever the flood tool actually sent
+		// first; every element after them is the real signature. Because they
+		// match the GREASE pattern wherever they sit, this round trip derives
+		// the shipped key identically before and after the wave 11 prep fix.
 		hello := tls.ClientHelloInfo{
 			CipherSuites: []uint16{
-				0x0a0a, // dropped by CipherSuites[1:]
+				0x0a0a, // GREASE, filtered wherever it sits
 				0x1303, 0x1302, 0xc02f, 0xc02b, 0xc030, 0xc02c, 0x009e, 0xc027, 0x0067, 0xc028,
 				0x006b, 0x009f, 0xcca9, 0xcca8, 0xccaa, 0xc0af, 0xc0ad, 0xc0a3, 0xc09f, 0xc05d,
 				0xc061, 0xc053, 0xc0ae, 0xc0ac, 0xc0a2, 0xc09e, 0xc05c, 0xc060, 0xc052, 0xc024,
@@ -791,7 +1062,7 @@ func TestForbiddenFingerprintIsIntact(t *testing.T) {
 				0xc051, 0x009c, 0xc0a0, 0xc09c, 0xc050, 0x003d, 0x003c, 0x0035, 0x002f, 0x00ff,
 			},
 			SupportedCurves: []tls.CurveID{
-				tls.CurveID(0x0a0a), // dropped by SupportedCurves[1:]
+				tls.CurveID(0x0a0a), // GREASE, filtered wherever it sits
 				tls.CurveP256,
 				tls.CurveID(30),
 				tls.CurveP521,

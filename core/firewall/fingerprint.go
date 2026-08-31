@@ -39,6 +39,38 @@ var (
 	ForbiddenFingerprints = fingerprints.Malicious()
 )
 
+// isGREASE reports whether a 16-bit ClientHello value (a cipher suite, a
+// supported curve) is a GREASE value as defined by RFC 8701: both bytes equal
+// and the low nibble 0xa, i.e. one of 0x0a0a, 0x1a1a, ... 0xfafa. Real cipher
+// suites and curve IDs never collide with the pattern.
+//
+// WAVE 11 PREP (GREASE fix): the derivation used to drop index 0 of the
+// cipher and curve lists instead. Only Chrome-family clients send GREASE --
+// and they send it in the FIRST slot, which is why index-0 truncation ever
+// worked at all. Every Firefox-family hello has a REAL cipher (0x1301) and a
+// REAL curve (X25519) in its first slots, so [1:] threw away legitimate
+// signal and produced a wrong fingerprint: any client differing from Firefox
+// only in its first suite or curve was indistinguishable from Firefox, and a
+// single-suite hello collapsed onto whatever its curves said. GREASE-pattern
+// filtering skips exactly the randomised values, wherever they sit, and keeps
+// everything else.
+func isGREASE(v uint16) bool {
+	return v&0x0f == 0x0a && v>>8 == v&0xff
+}
+
+// isGREASE8 is the single-byte analogue used for ec_point_formats values,
+// which arrive as uint8: the 0x?a form (0x0a, 0x1a, ... 0xfa). Real point
+// formats are 0 (uncompressed), 1 and 2, so nothing legitimate is filtered.
+//
+// WAVE 11 PREP (GREASE fix): the point list used to be emitted as
+// SupportedPoints[:1] -- ONE byte, always the first -- the exact opposite of
+// the "ignore first elements" comment above the old loops. A client offering
+// several point formats contributed exactly one byte of signal, and always
+// the same one. Every non-GREASE format is emitted now.
+func isGREASE8(v uint8) bool {
+	return v&0x0f == 0x0a
+}
+
 func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 
 	//Invalid TLS
@@ -51,21 +83,29 @@ func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 
 	var fingerprint strings.Builder
 
-	//Loop over clientHello parameters and ignore first elements of arrays since they may be randomised by certain browsers
+	//Loop over ClientHello parameters and skip GREASE values wherever they
+	//appear (RFC 8701; see isGREASE). Ranging over the full lists replaces the
+	//old [1:] / [:1] slicing, so empty and nil lists simply contribute
+	//nothing and the len() guards are no longer needed.
 
-	for _, suite := range clientHello.CipherSuites[1:] {
+	for _, suite := range clientHello.CipherSuites {
+		if isGREASE(suite) {
+			continue
+		}
 		fingerprint.WriteString(fmt.Sprintf("0x%x,", suite))
 	}
 
-	if len(clientHello.SupportedCurves) > 0 {
-		for _, curve := range clientHello.SupportedCurves[1:] {
-			fingerprint.WriteString(fmt.Sprintf("0x%x,", curve))
+	for _, curve := range clientHello.SupportedCurves {
+		if isGREASE(uint16(curve)) {
+			continue
 		}
+		fingerprint.WriteString(fmt.Sprintf("0x%x,", curve))
 	}
-	if len(clientHello.SupportedPoints) > 0 {
-		for _, point := range clientHello.SupportedPoints[:1] {
-			fingerprint.WriteString(fmt.Sprintf("0x%x,", point))
+	for _, point := range clientHello.SupportedPoints {
+		if isGREASE8(point) {
+			continue
 		}
+		fingerprint.WriteString(fmt.Sprintf("0x%x,", point))
 	}
 
 	//Remember what connection has what fingerprint for later use
