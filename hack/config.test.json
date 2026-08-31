@@ -1,0 +1,54 @@
+{
+    "proxy": {
+        "cloudflare": true,
+        "ratelimit_time": 120,
+        "adminsecret": "harness-admin-not-a-real-secret",
+        "apisecret": "harness-api-not-a-real-secret",
+        "secrets": {
+            "cookie": "harness-cookie-not-a-real-secret",
+            "javascript": "harness-js-not-a-real-secret",
+            "captcha": "harness-captcha-not-a-real-secret"
+        },
+        "timeout": {
+            "idle": 30,
+            "read": 10,
+            "write": 10,
+            "read_header": 10
+        },
+        "ratelimits": {
+            "requests": 1000000000,
+            "unknownFingerprint": 1000000000,
+            "challengeFailures": 1000000000,
+            "noRequestsSent": 1000000000
+        }
+    },
+    "domains": [
+        {
+            "name": "bench.local",
+            "backend": "127.0.0.1:8080",
+            "scheme": "http",
+            "certificate": "",
+            "key": "",
+            "webhook": {
+                "url": "",
+                "name": "",
+                "avatar": "",
+                "attack_start_msg": "",
+                "attack_stop_msg": ""
+            },
+            "firewallRules": [
+                {
+                    "expression": "(http.path eq \"/bench\")",
+                    "action": "0"
+                }
+            ],
+            "bypassStage1": 1000000000,
+            "bypassStage2": 1000000000,
+            "stage2Difficulty": 5,
+            "disableBypassStage3": 1000000000,
+            "disableRawStage3": 1000000000,
+            "disableBypassStage2": 1000000000,
+            "disableRawStage2": 1000000000
+        }
+    ]
+}
