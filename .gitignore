@@ -98,6 +98,11 @@ go.work.sum
 # Uncomment only if this project ever vendors its dependencies.
 # vendor/
 
+# --- Agent and tooling scratch -------------------------------------------
+# Claude Code puts subagent git worktrees under .claude/worktrees/. They are
+# real checkouts of this repo and must never be committed into it.
+.claude/
+
 # --- Editors and OS noise -------------------------------------------------
 .vscode/*
 !.vscode/settings.json
