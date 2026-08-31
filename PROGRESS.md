@@ -250,6 +250,17 @@ is wasted effort and is **dropped from the plan**. Wave 11 is now:
   trusted peer (same rules as wave 6's header trust), feed it the same fingerprint slot.
 - **Stage-3 captcha redesign** — unaffected by the deployment mode, still in scope.
 - The GREASE fingerprint bug below is fixed separately and earlier (it is real in either mode).
+  **FIXED (wave 11 prep, GREASE fix):** the derivation now filters RFC 8701 GREASE values by
+  pattern (0x?a?a) instead of blind `[1:]` slicing, and emits every non-GREASE
+  `ec_point_format` instead of only the first. Chrome-family output is byte-identical, so the
+  Chromium/Edge/Safari keys keep matching. The Firefox-family keys in
+  `known_fingerprints.json` (Firefox, Firefox-Dev, both Tor builds) were regenerated to the new
+  derivation in the same commit — without that, real Firefox-family traffic would slide into the
+  unknown-fingerprint ratelimit (R3) and `ip.fingerprint` rules written against the old keys
+  would go dead; `TestRegeneratedFirefoxFamilyKeysAreReachable` round-trips all four. Still owed
+  on a live-traffic refresh (a rebuild, per the bundle's own rule): Dalvik, the bot table and the
+  block list were generated from the old lossy output and their clients' true first elements are
+  not recorded here, so those keys can only be regenerated from captured hellos.
 
 There is a real bug there regardless of the decision, in `core/firewall/fingerprint.go`:
 `CipherSuites[1:]` and `SupportedCurves[1:]` drop the first element to skip GREASE, but only
@@ -307,7 +318,13 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
 - **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
 - **Wave 7 has started on `main`.** The request-path clock moved to atomics in
   `core/proxy/clock.go` (commit `d8dffe6`) — the clock goroutine is the only writer, everything
-  else reads. Build on that, not on the old printStats globals.
+  else reads. The CPU/RAM gauges followed in `core/proxy/usage.go` (commit `a7a3254`) — same
+  pattern, `printStats` is the single writer via `SetCpuUsage`/`SetRamUsage`, readers (webhook
+  literals, clearProxyCache eviction parse, admin API, discord placeholder substitution) are
+  lock-free calls. Build on those, not on the old printStats globals. The remaining wave-7
+  candidate, the self-disabling cache-eviction gate (AUDIT.md :4822 — `Alloc/Sys` plateaus so
+  the `(cpu<15 && mem>25) || mem>95` test never fires under load), is deferred to wave 8 where
+  the cache work lives.
 
 ---
 
