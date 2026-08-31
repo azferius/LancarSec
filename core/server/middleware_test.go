@@ -1627,23 +1627,26 @@ func TestMiddlewareAdminAPIv1(t *testing.T) {
 		}
 	})
 
-	t.Run("missing proxy-secret falls through to the backend", func(t *testing.T) {
+	t.Run("missing proxy-secret is a 404 and never reaches the backend", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
 		rec := mwDo(mwRequest("/_bProxy/" + mwAdminSecret + "/api/v1"))
 
-		// BUG (wave 5 flips this): api.Process returns false on an auth failure
-		// and the switch case has no return, so an unauthenticated admin request
-		// is forwarded upstream - handing the admin secret to the backend in the
-		// URL and in any backend access log.
-		mwAssertStatus(t, rec, http.StatusOK)
-		mwAssertBodyContains(t, rec, mwBackendBody)
-		if got := rec.Result().Header.Get("X-Echo-Path"); got != "/_bProxy/"+mwAdminSecret+"/api/v1" {
-			t.Errorf("backend saw path %q, want the admin path including the secret", got)
+		// Wave 5 flipped this. api.Process used to return false on an auth
+		// failure, and the switch case has no return, so an unauthenticated
+		// admin request was forwarded upstream - handing proxy.AdminSecret to
+		// the backend in the URL and in every backend access log, and making
+		// the admin surface discoverable by diffing response codes. It now
+		// answers 404 and reports the request as handled, so the middleware
+		// returns without proxying.
+		mwAssertStatus(t, rec, http.StatusNotFound)
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if got := rec.Result().Header.Get("X-Echo-Path"); got != "" {
+			t.Errorf("backend saw path %q, want the admin path (and its secret) never to reach the backend", got)
 		}
-		if env.mwBackendHits() != 1 {
-			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
 		}
 	})
 
@@ -1703,14 +1706,19 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		mwAssertBodyContains(t, rec, `"success":false`)
 	})
 
-	t.Run("missing secret falls through to the backend", func(t *testing.T) {
+	t.Run("missing secret is a 404 and never reaches the backend", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
+		// Wave 5 flipped this, for the same reason as the v1 case above: an
+		// unauthenticated admin request used to be proxied to the customer
+		// backend, so the endpoint could be located by response-code
+		// differencing without guessing the secret.
 		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS"))
-		mwAssertBodyContains(t, rec, mwBackendBody)
-		if env.mwBackendHits() != 1 {
-			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		mwAssertStatus(t, rec, http.StatusNotFound)
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
 		}
 	})
 

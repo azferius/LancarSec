@@ -13,7 +13,14 @@ import (
 	"github.com/azferius/lancarsec/core/server"
 )
 
-var Fingerprint string = "S3LF_BU1LD_0R_M0D1F13D" // 455b9300-0a6f-48f1-82ee-bb1f6cf43500
+// Fingerprint identifies the build. Official releases stamp it at link time
+// with `go build -ldflags "-X main.Fingerprint=<value>"`, so a binary still
+// reporting the default below was built from source or patched after release.
+// The released value is deliberately not recorded here: publishing it in the
+// source file it is meant to protect lets anyone with a checkout stamp a
+// modified build with the genuine value, which is the whole thing this guards
+// against. It is distributed with the release artefacts instead.
+var Fingerprint string = "S3LF_BU1LD_0R_M0D1F13D"
 
 func main() {
 
