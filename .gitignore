@@ -6,7 +6,7 @@
 #
 # Two things are deliberately NOT ignored and must stay tracked:
 #   examples/config.json        - the template operators copy to config.json
-#   global/fingerprints/*.json  - bundled TLS fingerprint data read at startup
+#   global/fingerprints/*.json  - TLS fingerprint data, //go:embed'd at build
 # Defensive re-includes for both are at the bottom of this file.
 
 # --- Operator config: never commit a live one -----------------------------
