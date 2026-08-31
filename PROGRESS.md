@@ -20,8 +20,8 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 3 | Test harness, benchmark baseline, CI gates | **DONE** |
 | 4 | Config load/reload unification, embed fingerprints, panics→errors | **DONE** |
 | 5 | Secrets, token derivation, admin auth | **DONE** |
-| 6 | Client identity: trusted-proxy resolution, IPv6 | **NEXT** |
-| 7 | Hot-path concurrency rewrite | not started |
+| 6 | Client identity: trusted-proxy resolution, IPv6 | **DONE** |
+| 7 | Hot-path concurrency rewrite | **NEXT** — largest and riskiest |
 | 8 | Upstream transport and response path | not started |
 | 9 | Challenge rendering, XSS, middleware decomposition | not started |
 | 10 | Wire-visible rebrand + legal notices (atomic, one commit) | not started |
@@ -122,6 +122,47 @@ length-extendable), and the access key changed shape.
 design said to make the API `RELOAD` action actually work; the agent deleted it instead, on the
 grounds that remote config reload is a lateral-movement primitive and the TUI `reload` covers the
 operator need. If you want remote reload back, that is a deliberate re-add, not a bug fix.
+
+**Wave 6.** Client identity. This closes the most directly exploitable finding in the whole audit:
+`ip = request.Header.Get("Cf-Connecting-Ip")` from **any** peer, with no check. One header defeated
+every ratelimit, every ban, and the token binding wave 5 had just hardened.
+
+- New `core/trusted`: 22 Cloudflare prefixes `//go:embed`ed from `global/trusted/` (fetched
+  2026-08-31, source URLs in that README), plus operator CIDRs from `proxy.trusted_proxies`.
+  `IsTrusted` is 7-19 ns, 0 allocs. **An empty set trusts nobody** — deliberately, and there is no
+  bundled default installed at init, so a pipeline that never calls `trusted.Load` degrades to
+  "ignore all headers" rather than "believe everyone".
+- `0.0.0.0/0` and `::/0` are **rejected** as config entries: a default route is not an allowlist,
+  it is the absence of one.
+- Two `net/netip` traps the agent found empirically rather than assuming: `Prefix.Contains` does
+  **not** match an IPv4-mapped address (`::ffff:1.2.3.4`) against an IPv4 prefix — a dual-stack
+  listener hands out exactly that form, so without `Unmap()` the entire IPv4 allowlist would be
+  silently dead. And `Contains` returns false for **any** zoned address, so `fe80::1%eth0` never
+  matches `fe80::/10`. Both handled and pinned by tests that fail if a Go release changes them.
+- `realClientIP` is the single source of truth. `X-Forwarded-For` takes the **rightmost** element:
+  the leftmost is whatever the client wrote, and taking it reintroduces the exact bug being fixed.
+- IPv6 ratelimits key on the **/64**, not the address — a residential allocation is a /64 or
+  larger, so per-address limiting is free rotation. Logs keep the full address; the key and the
+  logged value are deliberately different things.
+- `strings.Split(RemoteAddr, ":")[0]` is gone. It turned `[2001:db8::1]:443` into the key `"[2001"`,
+  collapsing every IPv6 client sharing a first hextet into one bucket.
+- Backend identity headers use `Set`, not `Add`, and inbound
+  `X-Forwarded-For`/`X-Real-Ip`/`Forwarded`/`proxy-*` are `Del`eted first. `Add` appended, so a
+  client-supplied `x-real-ip` survived and arrived **first**.
+- `CONNECT` is refused with 405 (`httputil.ReverseProxy` forwards it verbatim, which turns a DDoS
+  front end into an open relay running from the proxy's IP). Bodies are capped with
+  `http.MaxBytesReader`.
+- Firewall rules now evaluate **before** the ratelimits, so `action: 0` is a real whitelist.
+  Previously the request was already counted and could already be blocked before its rule was read.
+
+**Cost, measured, not estimated.** `BenchmarkMiddlewareDecisionPath` 429 → 525 ns/op serial and
+1037 → 1274 ns/op parallel: roughly +22% for the trusted lookup and proper address parsing. Allocs
+fell 80 → 64 B/op. Wave 7 should more than reclaim this; do not let it be attributed there.
+
+**Caught in integration, worth knowing:** the config agent added
+`proxy.cloudflare_enforce_origin` and the pipeline published it, but **nothing read it** — an
+operator could switch on origin enforcement and get none. Wired separately with a four-case test.
+A security option that silently does nothing is worse than an absent one, because it is believed.
 
 ---
 
