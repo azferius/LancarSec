@@ -1,20 +1,27 @@
 package utils
 
 import (
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // ---------------------------------------------------------------------------
 // Encrypt / EncryptSha — golden vectors
 //
-// These pin the EXACT hex output of the two hash helpers as they behave today.
-// They are the derivation used for every clearance cookie the proxy issues
+// These pin the EXACT hex output of the two hash helpers. They are the
+// derivation used for every clearance cookie the proxy issues
 // (core/server/middleware.go:192-198) and for the hourly OTP rotation
-// (core/server/monitor.go:650-652), so any change to them invalidates every
-// cookie in the wild. Wave 5 moves Encrypt to keyed BLAKE3 and EncryptSha to
-// HMAC-SHA256; when it does, every `want` in these two tables changes and the
-// reviewer sees exactly which token derivations moved.
+// (core/server/monitor.go), so any change to them invalidates every cookie in
+// the wild.
+//
+// WAVE 5 REBASELINED EVERY VALUE HERE. Encrypt moved from
+// blake3.Sum256(input+key) to BLAKE3 keyed with a KDF-derived subkey, and
+// EncryptSha moved from sha256(input+key) to HMAC-SHA256. Both old forms were
+// plain concatenations with no message/key boundary. The digests below are the
+// new ones; a diff against the wave-3 values is the audit trail of exactly
+// which token derivations moved and therefore which cookies were invalidated.
 // ---------------------------------------------------------------------------
 
 func TestEncryptGolden(t *testing.T) {
@@ -27,22 +34,22 @@ func TestEncryptGolden(t *testing.T) {
 		{
 			name:  "empty input and key",
 			input: "", key: "",
-			want: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+			want: "b5a09005eb0d121be0f46aa57bd862795521249428aaa65369634de19111c1bb",
 		},
 		{
 			name:  "short input short key",
 			input: "ab", key: "cdef",
-			want: "b34b56076712fd7fb9c067245a6c85e16174b3ef2e35df7b56b7f164e5c36446",
+			want: "39fd879c348f31520b260737b6016c4eb7dcbb1752af45328c42128b79465adb",
 		},
 		{
 			name:  "access-key shaped input",
 			input: "1.2.3.4|Mozilla/5.0|/index.html", key: "s3cr3t",
-			want: "6ab033f8a48ba816adb280b20cd0622f6e92359d4700765d2202da7df4dfa342",
+			want: "6f58bf6d5fd7bdbbdb970cb19e8a317090bbb063bdcf663d4b52aaf873188b51",
 		},
 		{
 			name:  "otp shaped input",
 			input: "lancarsec", key: "2026-08-30",
-			want: "8866887ecdc8d2c0cd0616b39167c20dfa2e8a49a027b799f380bc9e45b931c8",
+			want: "ee2629a3bba606bc3f59c3b1d8854e70b7cef9327eafcd738bbf5bbe7856550c",
 		},
 	}
 
@@ -69,22 +76,22 @@ func TestEncryptShaGolden(t *testing.T) {
 		{
 			name:  "empty input and key",
 			input: "", key: "",
-			want: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			want: "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad",
 		},
 		{
 			name:  "short input short key",
 			input: "ab", key: "cdef",
-			want: "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+			want: "dfdf3499593c6fd2eefcb7d41868ebbf42f035a75c03e7c79d61c8e3b013688b",
 		},
 		{
 			name:  "hashed encrypted ip (key is empty in middleware.go:195)",
 			input: "1.2.3.4|Mozilla/5.0|/index.html", key: "s3cr3t",
-			want: "e223573ac0f1cc0696d8aa612f5bbd529f6060f1181847378a911ff2171c8e3e",
+			want: "1b45bb8de8e94eca9cd3fc929b0f8b0a6f6a17ebe2f6cac2cf5e67ff14e88468",
 		},
 		{
 			name:  "otp shaped input",
 			input: "lancarsec", key: "2026-08-30",
-			want: "6e51b60e52309a6d87fb35d52dc3fd38f655723f71091dc7b2eb027e4e29243d",
+			want: "aa4f8b49b24b322a2516939cf704cf364651d54d501f5a91cf422c068f042b1e",
 		},
 	}
 
@@ -101,49 +108,50 @@ func TestEncryptShaGolden(t *testing.T) {
 	}
 }
 
-// BUG (wave 5 flips this): Encrypt is blake3(input + key) — a plain string
-// concatenation, not a keyed hash. The boundary between message and key is
-// therefore invisible to the hash, so any two (input, key) pairs whose
-// concatenation is equal produce the same digest. Encrypt("ab","cdef") ==
-// Encrypt("abc","def"). In the proxy this means a clearance token derived from
-// one (accessKey, OTP) split is valid for a different split of the same joined
-// string — an attacker who controls part of accessKey can shift bytes across
-// the boundary and reuse a token. When wave 5 moves to keyed BLAKE3, these two
-// digests MUST differ and this test flips to a `==` failure / `!=` assertion.
-func TestEncryptLengthExtensionAmbiguityCollides(t *testing.T) {
+// FIXED IN WAVE 5 (this assertion was inverted; it used to require the
+// collision). Encrypt was blake3.Sum256(input + key) — a plain string
+// concatenation, not a keyed hash — so the boundary between message and key was
+// invisible and any two (input, key) pairs with an equal concatenation produced
+// the same digest: Encrypt("ab","cdef") == Encrypt("abc","def"). In the proxy
+// that meant a clearance token derived from one (accessKey, OTP) split was
+// valid for a different split of the same joined string, and accessKey is built
+// from bytes the client controls (User-Agent above all), so the shift was
+// reachable. Encrypt is now BLAKE3 keyed with a subkey derived from key, which
+// makes the split part of the computation. These digests must now DIFFER.
+func TestEncryptBoundaryIsNotAmbiguous(t *testing.T) {
 	a := Encrypt("ab", "cdef")
 	b := Encrypt("abc", "def")
-	if a != b {
-		t.Fatalf("expected today's concatenation collision: Encrypt(\"ab\",\"cdef\")=%q != Encrypt(\"abc\",\"def\")=%q", a, b)
+	if a == b {
+		t.Fatalf("Encrypt(\"ab\",\"cdef\") == Encrypt(\"abc\",\"def\") == %q — the message/key boundary is not part of the hash", a)
 	}
 
-	// The same defect, in the shape it actually appears in middleware: the
-	// subject identity and the secret are concatenated, so moving one byte from
-	// the identity into the secret is undetectable.
+	// The same property, in the shape it appears in middleware: moving one byte
+	// from the subject identity into the secret must change the digest.
 	c := Encrypt("1.2.3.4|UA|/pathS", "ECRET")
 	d := Encrypt("1.2.3.4|UA|/path", "SECRET")
-	if c != d {
-		t.Fatalf("expected today's boundary collision: %q != %q", c, d)
+	if c == d {
+		t.Fatalf("Encrypt collided across the identity/secret boundary: both = %q", c)
 	}
 }
 
-// BUG (wave 5 flips this): EncryptSha is sha256(input + key), same defect class
-// as Encrypt above, and additionally sha256 is length-extendable so a raw
-// concatenation MAC is forgeable. Wave 5 replaces it with HMAC-SHA256, after
-// which these digests must differ.
-func TestEncryptShaConcatenationAmbiguityCollides(t *testing.T) {
+// FIXED IN WAVE 5 (this assertion was inverted; it used to require the
+// collision). EncryptSha was sha256(input + key): the same boundary ambiguity
+// as Encrypt, plus SHA-256's length-extension property, which makes a bare
+// concatenation MAC forgeable from a digest and a length alone. It is now
+// HMAC-SHA256, which has neither. These digests must now DIFFER.
+func TestEncryptShaBoundaryIsNotAmbiguous(t *testing.T) {
 	a := EncryptSha("ab", "cdef")
 	b := EncryptSha("abc", "def")
-	if a != b {
-		t.Fatalf("expected today's concatenation collision: EncryptSha(\"ab\",\"cdef\")=%q != EncryptSha(\"abc\",\"def\")=%q", a, b)
+	if a == b {
+		t.Fatalf("EncryptSha(\"ab\",\"cdef\") == EncryptSha(\"abc\",\"def\") == %q — the message/key boundary is not part of the MAC", a)
 	}
 
-	// monitor.go:650 does EncryptSha(secret, date). A secret ending in "2" and a
-	// date starting one char later hash identically.
+	// The OTP rotation does EncryptSha(secret, bucket). A secret ending in "2"
+	// and a bucket starting one character later must no longer collide.
 	c := EncryptSha("secret2", "026-08-30")
 	d := EncryptSha("secret", "2026-08-30")
-	if c != d {
-		t.Fatalf("expected today's secret/date boundary collision: %q != %q", c, d)
+	if c == d {
+		t.Fatalf("EncryptSha collided across the secret/bucket boundary: both = %q", c)
 	}
 }
 
@@ -163,24 +171,123 @@ func TestEncryptIsDeterministic(t *testing.T) {
 	}
 }
 
+// NEW IN WAVE 5. Encrypt and EncryptSha recycle their hash states through a
+// per-key sync.Pool, because a blake3.Hasher is 10840 bytes and allocating one
+// per call cost 3 us and 22 KiB — on a path the middleware runs for every
+// token-cache miss, i.e. every request of a flood from rotating addresses.
+//
+// Pooling is where a correct hash function turns into a wrong one: a hasher
+// returned to the pool with input still buffered would make the NEXT token a
+// hash of both requests concatenated. That does not fail loudly — it silently
+// issues a token the verifier will reject, re-challenging the visitor forever.
+// These two tests interleave inputs through the pool and assert every digest
+// still matches the single-shot value.
+func TestEncryptPoolDoesNotCarryStateBetweenCalls(t *testing.T) {
+	const key = "pool-state-key"
+
+	inputs := []string{"", "a", "ab", "abc", strings.Repeat("x", 5000), strings.Repeat("y", 20000), "final"}
+
+	// 5000 bytes stays inside the blake3 hasher's 8 KiB internal buffer and
+	// 20000 spills past it into the chaining-value stack. Both are state a bad
+	// Reset would leave behind for the next caller.
+	want := make([]string, len(inputs))
+	for i, in := range inputs {
+		want[i] = Encrypt(in, key)
+	}
+
+	// Now churn the same key's pool repeatedly and in a different order.
+	for round := 0; round < 50; round++ {
+		for i := len(inputs) - 1; i >= 0; i-- {
+			if got := Encrypt(inputs[i], key); got != want[i] {
+				t.Fatalf("round %d: Encrypt(%.20q, key) = %q, want %q — a pooled hasher carried state", round, inputs[i], got, want[i])
+			}
+		}
+	}
+
+	for round := 0; round < 50; round++ {
+		for i, in := range inputs {
+			if got := EncryptSha(in, key); got != EncryptSha(in, key) {
+				t.Fatalf("round %d input %d: EncryptSha is not stable across pooled calls", round, i)
+			}
+		}
+	}
+}
+
+// The pool must also be safe to share. Run under -race this is the regression
+// test for a hasher escaping to two goroutines at once.
+func TestEncryptIsConcurrencySafe(t *testing.T) {
+	const (
+		key        = "concurrent-key"
+		goroutines = 16
+		iterations = 500
+	)
+
+	inputs := []string{"alpha", "beta", "gamma", "delta"}
+	want := make([]string, len(inputs))
+	wantSha := make([]string, len(inputs))
+	for i, in := range inputs {
+		want[i] = Encrypt(in, key)
+		wantSha[i] = EncryptSha(in, key)
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for it := 0; it < iterations; it++ {
+				i := (g + it) % len(inputs)
+				if got := Encrypt(inputs[i], key); got != want[i] {
+					t.Errorf("Encrypt(%q) = %q, want %q", inputs[i], got, want[i])
+					return
+				}
+				if got := EncryptSha(inputs[i], key); got != wantSha[i] {
+					t.Errorf("EncryptSha(%q) = %q, want %q", inputs[i], got, wantSha[i])
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+}
+
+// The per-key cache is bounded so that a caller with an unbounded key space
+// cannot grow it without limit. Past the bound the result must still be
+// correct — only unmemoised. This walks well past encryptKeyCacheMax with
+// distinct keys and checks both the digests and that the counter stops.
+func TestEncryptKeyCacheIsBounded(t *testing.T) {
+	for i := 0; i < encryptKeyCacheMax*8; i++ {
+		key := "bounded-key-" + strconv.Itoa(i)
+		first := Encrypt("payload", key)
+		if second := Encrypt("payload", key); second != first {
+			t.Fatalf("key %q: uncached path is not deterministic: %q vs %q", key, first, second)
+		}
+		if sha := EncryptSha("payload", key); sha != EncryptSha("payload", key) {
+			t.Fatalf("key %q: uncached EncryptSha is not deterministic", key)
+		}
+	}
+
+	if n := encryptKeyCacheLen.Load(); n > encryptKeyCacheMax {
+		t.Errorf("encryptKeyCacheLen = %d, must not exceed the bound %d", n, encryptKeyCacheMax)
+	}
+	if n := macKeyCacheLen.Load(); n > encryptKeyCacheMax {
+		t.Errorf("macKeyCacheLen = %d, must not exceed the bound %d", n, encryptKeyCacheMax)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RandomString
 //
-// NO GOLDEN TEST IS POSSIBLE. RandomString uses the top-level math/rand
-// generator. Under Go 1.20+ that global source is seeded from the OS at
-// program start (the Go 1.19 behaviour of an implicit seed of 1 — audit
-// finding #1 — no longer applies), so output differs on every run and a fixed
-// expected string would be permanently red. There is also no seeding hook to
-// pin it with, because RandomString takes no source argument and the package
-// exposes no way to inject one. So we test SHAPE only: length, alphabet
-// membership, and the boundary cases.
+// NO GOLDEN TEST IS POSSIBLE, and after wave 5 that is by construction rather
+// than by accident. RandomString now draws from crypto/rand, which has no seed
+// and no injectable source, so output differs on every run and a fixed expected
+// string would be permanently red. We test SHAPE and DISTRIBUTION: length,
+// alphabet membership, the boundary cases, and — new in wave 5 — that the
+// modulo reduction is unbiased.
 //
-// Note for wave 5: it is still math/rand, i.e. a non-cryptographic PRNG whose
-// state is recoverable from enough output, and it is still what generates
-// AdminSecret / APISecret / the three challenge secrets in
-// core/config/generate.go:24-35. Wave 5 moves it to crypto/rand; when it does,
-// these shape assertions should all continue to hold unchanged, which is
-// exactly what makes them useful as a regression net.
+// Every shape assertion below is unchanged from wave 3. That is the point: the
+// math/rand -> crypto/rand swap is meant to be invisible to every caller, and
+// these tests are the net that proves it.
 // ---------------------------------------------------------------------------
 
 const randomStringAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -296,6 +403,72 @@ func TestRandomStringUsesEveryCharacterOfItsAlphabet(t *testing.T) {
 	}
 	if len(missing) != 0 {
 		t.Errorf("RandomString never emitted %v in %d draws; the alphabet is %q (%d symbols) but only %d are reachable — the index bound is wrong", missing, draws, randomStringAlphabet, len(randomStringAlphabet), len(seen))
+	}
+}
+
+// NEW IN WAVE 5. The modulo-bias net.
+//
+// The alphabet has 62 symbols and a byte has 256 values. 256 = 4*62 + 8, so the
+// naive `randomByte % 62` maps FIVE byte values onto each of the first 8
+// symbols ('a'..'h') and only FOUR onto the other 54 — those 8 symbols come up
+// 25% more often than the rest. That is invisible to every other test in this
+// file: the output is still varying, still correct-length, still covers the
+// whole alphabet. It only shows up as a distribution, and it silently costs
+// entropy from every secret the first-launch wizard writes into config.json.
+// RandomString rejects bytes >= 248 to make the reduction exact.
+//
+// Non-flaky by design. With n = 620000 draws the expected count per symbol is
+// 10000 with sd = sqrt(n*p*(1-p)) ≈ 99.2. The biased implementation would put
+// the first 8 symbols at 5/248 * n ≈ 12500 — 25 sd above expectation, which is
+// not a coincidence any run produces. The tolerance below is 6 sd (±600, i.e.
+// ±6%), so a correct implementation fails with probability ~1e-9 per symbol and
+// the biased one fails every single time.
+func TestRandomStringIsNotModuloBiased(t *testing.T) {
+	const (
+		draws     = 620000
+		expected  = draws / len(randomStringAlphabet)
+		tolerance = 600
+	)
+
+	counts := make(map[rune]int, len(randomStringAlphabet))
+	for _, r := range RandomString(draws) {
+		counts[r]++
+	}
+
+	// The 8 symbols a naive `% 62` over a full byte would over-represent.
+	biasedHead := randomStringAlphabet[:256%len(randomStringAlphabet)]
+
+	for _, r := range randomStringAlphabet {
+		got := counts[r]
+		if got < expected-tolerance || got > expected+tolerance {
+			note := ""
+			if strings.ContainsRune(biasedHead, r) {
+				note = " (this symbol is in the head of the alphabet that an unrejected `byte % 62` over-weights by 25%)"
+			}
+			t.Errorf("symbol %q appeared %d times in %d draws, want %d±%d%s", r, got, draws, expected, tolerance, note)
+		}
+	}
+}
+
+// NEW IN WAVE 5. RandomString reads crypto/rand in chunks and rejects samples,
+// so the accepted-sample bookkeeping has an off-by-one shape that a
+// single-length test would miss: a chunk boundary landing exactly on the last
+// needed character, or a rejection run at the end of a chunk, both force the
+// refill loop. Sweeping every length from 0 to 200 exercises every remainder of
+// the chunk size and asserts the invariant that matters — the result is exactly
+// `length` characters, all in the alphabet, with no zero byte left behind by a
+// short read.
+func TestRandomStringChunkRefillBoundaries(t *testing.T) {
+	for length := 0; length <= 200; length++ {
+		got := RandomString(length)
+		if len(got) != length {
+			t.Fatalf("RandomString(%d) returned %d bytes", length, len(got))
+		}
+		for i := 0; i < len(got); i++ {
+			if !strings.ContainsRune(randomStringAlphabet, rune(got[i])) {
+				t.Fatalf("RandomString(%d) byte %d = %q, outside the alphabet — a refill left an unwritten slot", length, i, got[i])
+			}
+		}
 	}
 }
 

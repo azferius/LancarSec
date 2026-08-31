@@ -43,23 +43,26 @@ func TestStageToString(t *testing.T) {
 		{name: "stage 3", in: 3, want: "3"},
 		{name: "stage 4", in: 4, want: "4"},
 
-		// BUG (wave 5 flips this): the switch has no case for 0, so susLv 0
-		// falls through to the default and maps to "5+" — the same token as a
-		// blocked/high-suspicion request. susLvStr is spliced into the cookie
-		// derivation at core/server/middleware.go:183-198, so a whitelisted
-		// request (susLv 0) and an escalated one (susLv >= 5) share a
-		// token-cache key. When wave 5 fixes it, this assertion must be changed
-		// to expect "0".
-		{name: "susLv 0 collides with 5+", in: 0, want: "5+"},
+		// FIXED IN WAVE 5 (this case used to expect "5+"). The old switch had no
+		// case for 0, so susLv 0 — the WHITELIST verdict — fell through to the
+		// default and rendered as "5+", the same token as a blocked request.
+		// susLvStr is appended to the token cache key at
+		// core/server/middleware.go:196, so a whitelisted request and an
+		// escalated one shared a cache entry and the block was bypassable. See
+		// TestStageToStringIsCollisionFreeForCacheKeys below and the doc comment
+		// on StageToString for the full exploit path.
+		{name: "susLv 0 is its own bucket", in: 0, want: "0"},
 
 		{name: "stage 5 is 5+", in: 5, want: "5+"},
 		{name: "stage 6 is 5+", in: 6, want: "5+"},
 		{name: "stage 99 is 5+", in: 99, want: "5+"},
 
-		// Same defect on the other side: no negative case either. Any negative
-		// suspicion level also collides with the 5+ bucket.
-		{name: "negative stage collides with 5+", in: -1, want: "5+"},
-		{name: "large negative collides with 5+", in: -1000, want: "5+"},
+		// FIXED IN WAVE 5 (these cases used to expect "5+"). Same defect on the
+		// other side: negatives also fell into the default. gofilter rules can
+		// lower susLv, so a negative level is reachable, and it too shared the
+		// blocked bucket.
+		{name: "negative stage is its own bucket", in: -1, want: "-1"},
+		{name: "large negative is its own bucket", in: -1000, want: "-1000"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,6 +70,41 @@ func TestStageToString(t *testing.T) {
 				t.Errorf("StageToString(%d) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// NEW IN WAVE 5. StageToString's output is a component of the token cache key
+// (core/server/middleware.go:196 does CacheIps.Load(accessKey + susLvStr)), so
+// two suspicion levels that render to the same string share a cache entry.
+//
+// The only levels that may legally share are 5 and above: that branch returns
+// before CacheIps.Store is ever reached, so no entry exists for them to
+// collide on, and the string is purely a display value there. Every level that
+// CAN reach the cache — 4 and below, including 0 and negatives — must map to a
+// distinct string. This is the assertion that would have caught the original
+// defect directly, rather than through its downstream effect in middleware.
+func TestStageToStringIsCollisionFreeForCacheKeys(t *testing.T) {
+	seen := make(map[string]int)
+	for stage := -1000; stage <= 4; stage++ {
+		got := StageToString(stage)
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("StageToString(%d) and StageToString(%d) both render as %q — they would share a token cache key", prev, stage, got)
+		}
+		seen[got] = stage
+	}
+
+	// And no cacheable level may land in the blocked bucket's string.
+	for stage := -1000; stage <= 4; stage++ {
+		if got := StageToString(stage); got == "5+" {
+			t.Fatalf("StageToString(%d) = %q — a cacheable level shares the blocked bucket's key", stage, got)
+		}
+	}
+
+	// 5 and above deliberately still share one string.
+	for _, stage := range []int{5, 6, 99, 1 << 20} {
+		if got := StageToString(stage); got != "5+" {
+			t.Errorf("StageToString(%d) = %q, want %q", stage, got, "5+")
+		}
 	}
 }
 

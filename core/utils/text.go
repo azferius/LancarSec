@@ -169,19 +169,35 @@ func SafeString(str string) string {
 	return string([]byte(str))
 }
 
+// StageToString renders a suspicion level as the string component that
+// core/server/middleware.go appends to the token cache key
+// ("<ip><tlsFp><userAgent><hourBucket>" + this), and that the same file prints
+// in the "Suspicious request of level ..." block page and in /_bProxy/stats.
+//
+// It used to be a switch over 1..4 with everything else — including 0 and every
+// negative — falling into "5+". susLv 0 is the whitelist verdict and susLv >= 5
+// is the block verdict, so the two most opposed outcomes in the request path
+// shared a cache key. Concretely: a whitelisted request stores the empty token
+// under "<accessKey>5+"; a later request from the same client at susLv 5 finds
+// that entry, skips the first switch (and therefore the block that lives in its
+// default branch), and reaches the cookie check with encryptedIP == "". That
+// check is strings.Contains(cookieHeader, "__bProxy_v="+encryptedIP), which
+// with an empty token degenerates to a search for the literal "__bProxy_v=" —
+// satisfied by ANY leftover proxy cookie, including the stale
+// "_1__bProxy_v=<anything>" the client already has. The blocked request is then
+// proxied to the backend. Both the whitelist and the block are attacker-
+// reachable through firewall rules and through stage escalation, so this was a
+// full bypass of the block verdict, not a theoretical collision.
+//
+// It is now total and collision-free for cache-key purposes: every level that
+// can reach the cache gets its own string. 5 and above still share "5+" because
+// that branch returns before anything is cached and the token is only ever a
+// display string there.
 func StageToString(stage int) string {
-	switch stage {
-	case 1:
-		return "1"
-	case 2:
-		return "2"
-	case 3:
-		return "3"
-	case 4:
-		return "4"
-	default:
+	if stage >= 5 {
 		return "5+"
 	}
+	return strconv.Itoa(stage)
 }
 
 func closestTo10(n int) int {

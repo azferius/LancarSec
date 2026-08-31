@@ -1358,7 +1358,7 @@ func TestMiddlewareSuspicionLevelCacheKeysAreDistinct(t *testing.T) {
 
 	cached, ok := firewall.CacheIps.Load(mwAccessKey(0))
 	if !ok {
-		t.Fatal("whitelisted request did not populate CacheIps")
+		t.Fatal("whitelisted request did not populate CacheIps under the susLv-0 key")
 	}
 	if cached.(string) != "" {
 		t.Fatalf("cached token = %q, want the empty string", cached)

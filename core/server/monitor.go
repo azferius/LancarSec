@@ -90,7 +90,12 @@ func Monitor() {
 	proxy.LastSecondTimestamp = int(proxy.LastSecondTime.Unix())
 	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
 	proxy.CurrHour, _, _ = proxy.LastSecondTime.Clock()
-	proxy.CurrHourStr = strconv.Itoa(proxy.CurrHour)
+
+	// Publish one OTP set synchronously before any job — and therefore before
+	// Serve is allowed to start — so the first request cannot be derived
+	// against an empty bucket. generateOTPSecrets republishes the same value
+	// immediately; publishOTP is idempotent within an hour.
+	publishOTP(proxy.LastSecondTime)
 
 	for _, job := range monitorJobs {
 		pnc.Supervise(job.name, job.run)
@@ -248,7 +253,10 @@ func printStats() {
 	proxy.LastSecondTimestamp = int(proxy.LastSecondTime.Unix())
 	proxy.Last10SecondTimestamp = utils.TrimTime(proxy.LastSecondTimestamp)
 	proxy.CurrHour, _, _ = proxy.LastSecondTime.Clock()
-	proxy.CurrHourStr = strconv.Itoa(proxy.CurrHour)
+	// The hour bucket used by the request path is no longer derived here. It is
+	// part of the OTP set published by generateOTPSecrets, so it rotates with
+	// the secrets it is paired with instead of being rewritten every second by
+	// the stats loop while requests read it.
 
 	result, err := cpu.Percent(0, false)
 	if err != nil {
@@ -569,24 +577,76 @@ func evaluateRatelimit() {
 	}
 }
 
+// otpRotationSkew is how far past the hour boundary the rotation wakes up. It
+// absorbs timer granularity and coarse clock resolution so a wake-up that fires
+// a millisecond early does not format the hour that is about to end and then
+// sleep a full further hour on the wrong bucket.
+const otpRotationSkew = 250 * time.Millisecond
+
+// publishOTP derives the three challenge OTPs for the aligned UTC hour that t
+// falls in, and publishes them together with that bucket string as one
+// immutable set.
+//
+// Deriving from an aligned bucket, in UTC, is what lets independent instances
+// agree. The previous code slept a fixed hour from whenever the process
+// happened to start and keyed off a LOCAL calendar date: two instances behind
+// one load balancer therefore rotated at different wall-clock instants, and any
+// instance in a different timezone used a different key for most of the day. A
+// client bounced between them by the balancer derived a token under instance
+// A's OTP and failed instance B's check, so it was re-challenged on every
+// switch — a self-inflicted challenge storm that got worse the more instances
+// were added. Alignment removes the dependency on start time entirely: every
+// instance in the fleet computes the same bucket for the same instant.
+func publishOTP(t time.Time) {
+	bucket := t.UTC().Format(proxy.OTPBucketLayout)
+
+	proxy.StoreOTP(proxy.OTP{
+		Hour:    bucket,
+		Cookie:  utils.EncryptSha(proxy.CookieSecret, bucket),
+		JS:      utils.EncryptSha(proxy.JSSecret, bucket),
+		Captcha: utils.EncryptSha(proxy.CaptchaSecret, bucket),
+	})
+}
+
+// nextOTPRotation returns how long to sleep from t to just past the next
+// wall-clock hour boundary. Split out from the loop so the alignment is
+// testable without waiting an hour.
+func nextOTPRotation(t time.Time) time.Duration {
+	utc := t.UTC()
+	d := utc.Truncate(time.Hour).Add(time.Hour).Sub(utc) + otpRotationSkew
+	if d <= 0 {
+		// Unreachable for a sane clock: Truncate/Add always lands strictly
+		// after utc. Kept so a clock jump can never spin this loop.
+		return time.Second
+	}
+	return d
+}
+
+// rotateOTPOnce publishes the set for now and returns how long to sleep before
+// the next rotation.
+//
+// It takes ONE instant and uses it for both halves on purpose. Reading the
+// clock twice — publishOTP(time.Now()) followed by
+// nextOTPRotation(time.Now()) — skips a whole bucket whenever the two reads
+// straddle an hour boundary: publish at 12:59:59.999 stores the 12:00 set, then
+// the second read at 13:00:00.001 schedules the next wake for 14:00, so the
+// 13:00 bucket is never published and every client is challenged against a
+// stale OTP for an hour. One instant makes that unrepresentable.
+func rotateOTPOnce(now time.Time) time.Duration {
+	publishOTP(now)
+	return nextOTPRotation(now)
+}
+
 func generateOTPSecrets() {
 
 	defer pnc.PanicHndl()
 
-	//You can change this to use hours as the hash key, to make it even more secure against offline bruteforcing, however, if you use multiple servers make sure they all start within the same timeframe, e.g.
-	//Server1 starts at 23:59:50, Server2 starts at 00:00:01. In this case the keys are mismatched and clients would have to solve challenges again whenever they access a different server than before.
-	//To avoid this and help you, this function runs every minute, reducing this offset to only 1 minute maximum of mismatch per day
-	//This has now been changed to an hour, for better performance
+	// The OTPs are keyed on an ALIGNED UTC hour bucket, so every instance
+	// behind the same load balancer derives identical secrets for the same
+	// instant no matter when it was started or what timezone it runs in. See
+	// publishOTP for what the unaligned, local-date version cost.
 
 	for {
-
-		currTime := time.Now()
-		currDate := currTime.Format("2006-01-02")
-
-		proxy.CookieOTP = utils.EncryptSha(proxy.CookieSecret, currDate)
-		proxy.JSOTP = utils.EncryptSha(proxy.JSSecret, currDate)
-		proxy.CaptchaOTP = utils.EncryptSha(proxy.CaptchaSecret, currDate)
-
-		time.Sleep(1 * time.Hour)
+		time.Sleep(rotateOTPOnce(time.Now()))
 	}
 }

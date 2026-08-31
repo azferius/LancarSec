@@ -206,3 +206,64 @@ BenchmarkMiddlewareHarnessBaseline-16            	39356520	        30.71 ns/op	 
 BenchmarkMiddlewareHarnessBaseline-16            	39611150	        31.87 ns/op	       0 B/op	       0 allocs/op
 BenchmarkMiddlewareHarnessBaseline-16            	38193448	        31.65 ns/op	       0 B/op	       0 allocs/op
 ```
+
+---
+
+# Wave 5 (secrets, token derivation)
+
+Appended by wave 5. The wave-3 numbers above are untouched.
+
+## Machine
+
+Same box, same command as above.
+
+| | |
+| --- | --- |
+| Date | 2026-08-31 |
+| Commit | wave 5 head |
+| Go | go1.25.14 windows/amd64, GOAMD64=v1 |
+| CPU | AMD Ryzen 7 5700X, 8 cores / 16 threads |
+
+## Medians (n=5)
+
+| Benchmark | -cpu 1 | -cpu 4 | -cpu 16 | B/op | allocs/op |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MiddlewareHotPath | 8532 ns | 10014 ns | 10842 ns | 34943 | 31 |
+| MiddlewareHotPathParallel | 9165 ns | 9878 ns | 7643 ns | 34944 | 31 |
+| **MiddlewareDecisionPath** | **418.5 ns** | 383.0 ns | 375.9 ns | 80 | 4 |
+| **MiddlewareDecisionPathParallel** | **419.1 ns** | 952.7 ns | **1047 ns** | 80 | 4 |
+| MiddlewareChallengeStage1 | 1181 ns | 1116 ns | 1187 ns | 528 | 10 |
+| MiddlewareChallengeStage1Parallel | 1140 ns | 1777 ns | 1769 ns | 528 | 10 |
+| MiddlewareHarnessBaseline | 31.3 ns | 32.8 ns | 32.4 ns | 0 | 0 |
+
+**Every B/op and allocs/op figure is identical to wave 3.** That is the number to
+read: wave 5 replaced both token-derivation primitives (`utils.Encrypt` ->
+keyed BLAKE3, `utils.EncryptSha` -> HMAC-SHA256) and neither added an
+allocation to the middleware path. The ns/op figures move within the noise this
+document already warns about for an interactive desktop; the contention shape
+(DecisionPathParallel 419 ns at -cpu 1 degrading to 1047 ns at -cpu 16) is
+unchanged, which is wave 7's problem and is untouched by this wave.
+
+## The regression this wave nearly shipped
+
+The obvious keyed-BLAKE3 implementation — `blake3.NewKeyed` per call — measured
+**3083 ns/op and 21984 B/op** against the old `blake3.Sum256(input+key)`'s
+~100 ns/op. A `blake3.Hasher` is 10840 bytes because it carries an 8 KiB input
+buffer, and `Encrypt` runs on every `firewall.CacheIps` miss — which, under a
+flood from rotating source addresses, is every single request. That is a
+self-inflicted memory-pressure amplifier that fires exactly when the proxy is
+under attack.
+
+`utils.Encrypt` therefore pools hashers per key (`Hasher.Reset` keeps the key
+and clears only the input state), and `utils.EncryptSha` pools HMAC states the
+same way. Measured in `core/utils/encryption_bench_test.go`:
+
+| Primitive | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| Encrypt (pooled, serial) | 215 | 128 | 2 |
+| Encrypt (pooled, -cpu 16 parallel) | 70 | 129 | 2 |
+| Encrypt (naive `NewKeyed` per call) | 3083 | 21984 | 6 |
+| EncryptSha | 325 | 224 | 4 |
+| RandomString(24) | 206 | 72 | 2 |
+
+If a later wave simplifies the pool away, `BenchmarkEncrypt` is where it shows.
