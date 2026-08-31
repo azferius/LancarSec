@@ -231,6 +231,15 @@ also unblocks `core/api` → `core/config`, needed to fix the `RELOAD` admin act
 
 ## Rebrand map
 
+**Decided 2026-08-31 by the owner, do not relitigate:** the product is **LancarSec**, one brand.
+Not LancarProxy, not two names. The user's word "lancarProxy" was resolved to LancarSec for
+consistency with the module path, the repo and every document. And the rebrand **stays in wave 10**
+rather than being pulled forward, because renaming the cookie invalidates every clearance cookie in
+flight and should happen once, after the security fixes, as a single atomic commit.
+
+126 `baloo` markers remain in Go source outside the vendored `core/gofilter`: 49 `_bProxy`,
+30 `__bProxy_v`, 16 `BalooProxy`, 9 `41Baloo`, 8 `balooProxy`, 7 `baloo-Proxy`, 7 `balooPow`.
+
 Wave 10, atomic. Everything below is protocol-visible; the module-path rename in wave 2 is not.
 
 | Upstream | LancarSec | Breaks |
