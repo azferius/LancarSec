@@ -4,19 +4,32 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/pnc"
 	"github.com/azferius/lancarsec/core/proxy"
-	"net/http"
-	"strings"
 
 	quickchartgo "github.com/henomis/quickchart-go"
 )
 
 func InitPlaceholders(msg string, domainData domains.DomainData, domain string) string {
+	// WAVE 8 (panic guard): the start/end placeholders indexed RequestLogger[0]
+	// and [len-1] unguarded -- a domain with an empty log (or the attack-stop
+	// webhook firing after the log was trimmed) panicked here. Empty log now
+	// renders "-" instead of crashing the webhook goroutine.
+	attackStart := "-"
+	attackEnd := "-"
+	if len(domainData.RequestLogger) > 0 {
+		attackStart = domainData.RequestLogger[0].Time.Format("15:04:05")
+		attackEnd = domainData.RequestLogger[len(domainData.RequestLogger)-1].Time.Format("15:04:05")
+	}
 	msg = strings.ReplaceAll(msg, "{{domain.name}}", domain)
-	msg = strings.ReplaceAll(msg, "{{attack.start}}", domainData.RequestLogger[0].Time.Format("15:04:05"))
-	msg = strings.ReplaceAll(msg, "{{attack.end}}", domainData.RequestLogger[len(domainData.RequestLogger)-1].Time.Format("15:04:05"))
+	msg = strings.ReplaceAll(msg, "{{attack.start}}", attackStart)
+	msg = strings.ReplaceAll(msg, "{{attack.end}}", attackEnd)
 	msg = strings.ReplaceAll(msg, "{{proxy.cpu}}", proxy.CpuUsage())
 	msg = strings.ReplaceAll(msg, "{{proxy.ram}}", proxy.RamUsage())
 
@@ -245,8 +258,16 @@ func SendWebhook(domainData domains.DomainData, domainSettings domains.DomainSet
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	client.Do(req)
+	// WAVE 8: the client used to have no timeout -- a hung webhook host leaked a
+	// goroutine per notification, forever. The response body is now closed and
+	// drained so the underlying connection can be reused by the next send.
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 type Webhook struct {

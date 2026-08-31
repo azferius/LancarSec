@@ -767,23 +767,20 @@ func TestInitPlaceholdersSingleEntryLoggerUsesTheSameTimeForStartAndEnd(t *testi
 	}
 }
 
-// BUG (a later wave flips this): InitPlaceholders indexes RequestLogger[0] and
-// RequestLogger[len-1] unconditionally, with no length check, even when the
-// message contains no {{attack.*}} placeholder at all. An empty RequestLogger
-// therefore panics. Its only caller is SendWebhook, which has a
-// `defer pnc.PanicHndl()`, so today the panic is caught and the webhook is
-// silently dropped rather than crashing the proxy — but the notification is
-// lost and a crash.log entry is written. Pinned as the current contract.
-func TestInitPlaceholdersPanicsOnAnEmptyRequestLogger(t *testing.T) {
+// WAVE 8 flipped: InitPlaceholders now guards the empty RequestLogger and
+// renders the "-" placeholder instead of panicking (render assertions live in
+// discord_test.go). Wave 3 pinned the old panic contract here; the fix landed,
+// so the contract is now "no panic, webhook not silently dropped".
+func TestInitPlaceholdersEmptyRequestLoggerNoLongerPanics(t *testing.T) {
 	saveProxyUsageGlobals(t)
 	proxy.SetCpuUsage("0%")
 	proxy.SetRamUsage("0MB")
 
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("InitPlaceholders with an empty RequestLogger did not panic; today it indexes RequestLogger[0] unguarded")
+		if r := recover(); r != nil {
+			t.Fatalf("InitPlaceholders with an empty RequestLogger panicked: %v", r)
 		}
 	}()
-	// No {{attack.*}} placeholder in the message, yet the index still happens.
+	// No {{attack.*}} placeholder in the message, yet the index used to happen.
 	_ = InitPlaceholders("{{domain.name}}", domains.DomainData{}, "example.com")
 }
