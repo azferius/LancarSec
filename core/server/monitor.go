@@ -165,7 +165,7 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 				Time:     time.Now(),
 				Allowed:  domainData.RequestsBypassedPerSecond,
 				Total:    domainData.RequestsPerSecond,
-				CpuUsage: proxy.CpuUsage,
+				CpuUsage: proxy.CpuUsage(),
 			})
 		}
 
@@ -196,7 +196,7 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 						Time:     time.Now(),
 						Allowed:  domainData.RequestsBypassedPerSecond,
 						Total:    domainData.RequestsPerSecond,
-						CpuUsage: proxy.CpuUsage,
+						CpuUsage: proxy.CpuUsage(),
 					})
 					go utils.SendWebhook(domainData, domainSettings, int(0))
 				}
@@ -232,7 +232,7 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 					Time:     time.Now(),
 					Allowed:  domainData.RequestsBypassedPerSecond,
 					Total:    domainData.RequestsPerSecond,
-					CpuUsage: proxy.CpuUsage,
+					CpuUsage: proxy.CpuUsage(),
 				})
 				go utils.SendWebhook(domainData, domainSettings, int(0))
 			}
@@ -254,16 +254,25 @@ func printStats() {
 	// the defect wave 7 removes: this loop is serialised on PrintMutex and on
 	// every stdout write, so a blocked console froze the clock, the sliding
 	// window and the sweeper with it. The clock is now owned by the clock job.
+	//
+	// WAVE 7: the CPU/RAM gauges left this loop for the same reason. They were
+	// plain globals written here and read by the cache sweeper (under
+	// firewall.Mutex), the admin API handlers and the webhook builder (under
+	// no lock at all) -- writer and readers synchronised by different mutexes,
+	// i.e. by nothing. printStats remains the only production writer, via
+	// proxy.SetCpuUsage/SetRamUsage; everything else reads the atomics
+	// lock-free.
 
 	result, err := cpu.Percent(0, false)
 	if err != nil {
-		proxy.CpuUsage = "ERR"
+		proxy.SetCpuUsage("ERR")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(err.Error()) + " ]")
 	} else if len(result) > 0 {
-		proxy.CpuUsage = fmt.Sprintf("%.2f", result[0])
-		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(proxy.CpuUsage) + " ]")
+		usage := fmt.Sprintf("%.2f", result[0])
+		proxy.SetCpuUsage(usage)
+		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor(usage) + " ]")
 	} else {
-		proxy.CpuUsage = "ERR_S0"
+		proxy.SetCpuUsage("ERR_S0")
 		fmt.Println("[" + utils.PrimaryColor("+") + "] [ " + utils.PrimaryColor("Cpu Usage") + " ] > [ " + utils.PrimaryColor("100.00 ( Speculated )") + " ]")
 	}
 
@@ -273,7 +282,7 @@ func printStats() {
 	runtime.ReadMemStats(&ramStats)
 
 	// Calculate the current memory usage in percentage
-	proxy.RamUsage = fmt.Sprintf("%.2f", float64(ramStats.Alloc)/float64(ramStats.Sys)*100)
+	proxy.SetRamUsage(fmt.Sprintf("%.2f", float64(ramStats.Alloc)/float64(ramStats.Sys)*100))
 
 	fmt.Println("")
 
@@ -476,12 +485,12 @@ func clearProxyCache() {
 		//Clear logs and maps every 2 minutes. (I know this is a lazy way to do it, tho for now it seems to be the most efficient and fast way to go about it)
 		firewall.Mutex.Lock()
 
-		proxyCpuUsage, pcuErr := strconv.ParseFloat(proxy.CpuUsage, 32)
+		proxyCpuUsage, pcuErr := strconv.ParseFloat(proxy.CpuUsage(), 32)
 		if pcuErr != nil {
 			proxyCpuUsage = 0
 		}
 
-		proxyMemUsage, pmuErr := strconv.ParseFloat(proxy.RamUsage, 32)
+		proxyMemUsage, pmuErr := strconv.ParseFloat(proxy.RamUsage(), 32)
 		if pmuErr != nil {
 			proxyMemUsage = 0
 		}

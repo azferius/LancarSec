@@ -40,12 +40,12 @@ func apiEnv(t *testing.T) {
 	t.Helper()
 
 	oldSecret := proxy.APISecret
-	oldCPU, oldRAM := proxy.CpuUsage, proxy.RamUsage
+	oldCPU, oldRAM := proxy.CpuUsage(), proxy.RamUsage()
 	oldDelay, oldLimit := authFailDelay, authFailDelayLimit
 
 	proxy.APISecret = apiSecret
-	proxy.CpuUsage = "12.5%"
-	proxy.RamUsage = "34.5%"
+	proxy.SetCpuUsage("12.5%")
+	proxy.SetRamUsage("34.5%")
 	// The delay is exercised by its own tests; everywhere else it would only
 	// add wall-clock time.
 	authFailDelay = 0
@@ -76,7 +76,8 @@ func apiEnv(t *testing.T) {
 
 	t.Cleanup(func() {
 		proxy.APISecret = oldSecret
-		proxy.CpuUsage, proxy.RamUsage = oldCPU, oldRAM
+		proxy.SetCpuUsage(oldCPU)
+		proxy.SetRamUsage(oldRAM)
 		authFailDelay, authFailDelayLimit = oldDelay, oldLimit
 
 		domains.DomainsMap.Delete(apiDomain)

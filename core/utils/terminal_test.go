@@ -697,17 +697,17 @@ func TestReadLogsTakesTheWriteLockBeforeStoringTheTrimmedLogs(t *testing.T) {
 
 func saveProxyUsageGlobals(t *testing.T) {
 	t.Helper()
-	prevCPU, prevRAM := proxy.CpuUsage, proxy.RamUsage
+	prevCPU, prevRAM := proxy.CpuUsage(), proxy.RamUsage()
 	t.Cleanup(func() {
-		proxy.CpuUsage = prevCPU
-		proxy.RamUsage = prevRAM
+		proxy.SetCpuUsage(prevCPU)
+		proxy.SetRamUsage(prevRAM)
 	})
 }
 
 func TestInitPlaceholders(t *testing.T) {
 	saveProxyUsageGlobals(t)
-	proxy.CpuUsage = "42%"
-	proxy.RamUsage = "1.5GB"
+	proxy.SetCpuUsage("42%")
+	proxy.SetRamUsage("1.5GB")
 
 	start := time.Date(2026, 8, 30, 13, 5, 9, 0, time.UTC)
 	end := time.Date(2026, 8, 30, 14, 30, 0, 0, time.UTC)
@@ -755,7 +755,8 @@ func TestInitPlaceholders(t *testing.T) {
 
 func TestInitPlaceholdersSingleEntryLoggerUsesTheSameTimeForStartAndEnd(t *testing.T) {
 	saveProxyUsageGlobals(t)
-	proxy.CpuUsage, proxy.RamUsage = "0%", "0MB"
+	proxy.SetCpuUsage("0%")
+	proxy.SetRamUsage("0MB")
 
 	data := domains.DomainData{
 		RequestLogger: []domains.RequestLog{{Time: time.Date(2026, 8, 30, 9, 0, 0, 0, time.UTC)}},
@@ -775,7 +776,8 @@ func TestInitPlaceholdersSingleEntryLoggerUsesTheSameTimeForStartAndEnd(t *testi
 // lost and a crash.log entry is written. Pinned as the current contract.
 func TestInitPlaceholdersPanicsOnAnEmptyRequestLogger(t *testing.T) {
 	saveProxyUsageGlobals(t)
-	proxy.CpuUsage, proxy.RamUsage = "0%", "0MB"
+	proxy.SetCpuUsage("0%")
+	proxy.SetRamUsage("0MB")
 
 	defer func() {
 		if r := recover(); r == nil {

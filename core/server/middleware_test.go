@@ -141,8 +141,8 @@ func mwSaveGlobals(tb testing.TB) {
 	oldMaxLogLength := proxy.MaxLogLength
 	oldFingerprint := proxy.Fingerprint
 	oldWatched := proxy.WatchedDomain
-	oldCPU := proxy.CpuUsage
-	oldRAM := proxy.RamUsage
+	oldCPU := proxy.CpuUsage()
+	oldRAM := proxy.RamUsage()
 
 	oldMaxBody := MaxRequestBodyBytes.Load()
 
@@ -178,8 +178,8 @@ func mwSaveGlobals(tb testing.TB) {
 		proxy.MaxLogLength = oldMaxLogLength
 		proxy.Fingerprint = oldFingerprint
 		proxy.WatchedDomain = oldWatched
-		proxy.CpuUsage = oldCPU
-		proxy.RamUsage = oldRAM
+		proxy.SetCpuUsage(oldCPU)
+		proxy.SetRamUsage(oldRAM)
 
 		// WAVE 6: the trusted-proxy set is process-global too. Default is
 		// "trust nobody", which is what every test that does not explicitly
@@ -259,8 +259,8 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 	proxy.MaxLogLength = 20
 	proxy.Fingerprint = "mw-proxy-fingerprint"
 	proxy.WatchedDomain = mwDomain
-	proxy.CpuUsage = ""
-	proxy.RamUsage = ""
+	proxy.SetCpuUsage("")
+	proxy.SetRamUsage("")
 
 	// --- config ---
 	domains.Config = &domains.Configuration{
@@ -1810,7 +1810,7 @@ func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
 	t.Run("admin api v1 with a query string", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		proxy.CpuUsage = "12.5%"
+		proxy.SetCpuUsage("12.5%")
 
 		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1?x=1",
 			mwWithMethod(http.MethodPost),
@@ -1866,8 +1866,8 @@ func TestMiddlewareAdminAPIv1(t *testing.T) {
 	t.Run("correct proxy-secret is served by the api", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		proxy.CpuUsage = "12.5%"
-		proxy.RamUsage = "34.5%"
+		proxy.SetCpuUsage("12.5%")
+		proxy.SetRamUsage("34.5%")
 
 		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1",
 			mwWithMethod(http.MethodPost),
@@ -1943,7 +1943,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 	t.Run("proxy action", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		proxy.CpuUsage = "99%"
+		proxy.SetCpuUsage("99%")
 
 		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS_CPU_USAGE",
 			mwWithHeader("Proxy-Secret", mwAPISecret)))
@@ -2008,7 +2008,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 			t.Run(target, func(t *testing.T) {
 				env := mwNewEnv(t)
 				env.mwSetStage(0)
-				proxy.CpuUsage = "99%"
+				proxy.SetCpuUsage("99%")
 
 				rec := mwDo(mwRequest(target, mwWithHeader("Proxy-Secret", mwAPISecret)))
 

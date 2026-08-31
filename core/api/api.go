@@ -182,16 +182,16 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 	switch action {
 	case "GET_PROXY_STATS":
 		APIResponse(writer, true, map[string]any{
-			"CPU_USAGE": proxy.CpuUsage,
-			"RAM_USAGE": proxy.RamUsage,
+			"CPU_USAGE": proxy.CpuUsage(),
+			"RAM_USAGE": proxy.RamUsage(),
 		})
 	case "GET_PROXY_STATS_CPU_USAGE":
 		APIResponse(writer, true, map[string]any{
-			"CPU_USAGE": proxy.CpuUsage,
+			"CPU_USAGE": proxy.CpuUsage(),
 		})
 	case "GET_PROXY_STATS_RAM_USAGE":
 		APIResponse(writer, true, map[string]any{
-			"RAM_USAGE": proxy.RamUsage,
+			"RAM_USAGE": proxy.RamUsage(),
 		})
 
 	// Aggregates only. This used to return the AccessIps / AccessIpsCookie maps

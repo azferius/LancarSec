@@ -85,8 +85,11 @@ var (
 	// for a request that never resolves to a configured domain.
 	MaxBodySize int64 = 10 << 20
 
-	CpuUsage string
-	RamUsage string
+	// CpuUsage/RamUsage moved to usage.go in wave 7. They were unsynchronised
+	// string globals written by the TUI renderer and read from the cache
+	// sweeper (under firewall.Mutex), the admin API handlers and the webhook
+	// builder (under no lock at all) -- a data race. They are atomic pointers
+	// now; readers call proxy.CpuUsage()/proxy.RamUsage().
 
 	AdminSecret string
 	APISecret   string
