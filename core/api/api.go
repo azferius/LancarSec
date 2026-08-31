@@ -23,6 +23,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 		APIResponse(writer, false, map[string]any{
 			"ERROR": ERR_BODY_READ_FAILED,
 		})
+		return false
 	}
 
 	defer request.Body.Close()
