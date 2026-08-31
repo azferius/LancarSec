@@ -584,6 +584,29 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	ip := ipString(clientAddr)
 	rateKey := ratelimitKeyFor(clientAddr, ip)
 
+	// Origin enforcement. In Cloudflare mode every legitimate request arrives
+	// from a Cloudflare edge address, so a request from anywhere else is by
+	// definition someone who found the origin IP and is talking to it directly
+	// - which bypasses Cloudflare's own filtering entirely and leaves only this
+	// proxy in the path.
+	//
+	// realClientIP already refuses to believe Cf-Connecting-Ip from an
+	// untrusted peer, so identity cannot be forged either way. This is the
+	// stronger statement: such a request is refused outright.
+	//
+	// Off by default, deliberately. Turning it on before DNS is fully cut over
+	// to Cloudflare locks the operator out of their own origin, so it is the
+	// operator's decision to make once they know their traffic only arrives
+	// through the edge. See core/config/pipeline.go, which does not default it.
+	if domains.Config.Proxy.Cloudflare && proxy.CloudflareEnforceOrigin {
+		if peer := peerAddr(request.RemoteAddr); !peer.IsValid() || !trusted.IsTrusted(peer) {
+			writer.Header().Set("Content-Type", "text/plain")
+			writer.WriteHeader(http.StatusForbidden)
+			SendResponse("403 Forbidden", buffer, writer)
+			return
+		}
+	}
+
 	var tlsFp string
 	var browser string
 	var botFp string

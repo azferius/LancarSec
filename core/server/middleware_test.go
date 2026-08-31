@@ -3222,3 +3222,60 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 		}
 	})
 }
+
+// TestMiddlewareEnforceOriginRejectsUntrustedPeers covers the wiring between
+// the config flag and the request path. The flag was published by the pipeline
+// but read by nobody when wave 6 first landed, so an operator could switch on
+// origin enforcement and get no enforcement at all -- worse than not shipping
+// the option, because it reads as protection that is not there.
+func TestMiddlewareEnforceOriginRejectsUntrustedPeers(t *testing.T) {
+	cases := []struct {
+		name        string
+		cloudflare  bool
+		enforce     bool
+		peer        string
+		wantStatus  int
+		wantBackend int64
+	}{
+		{
+			name: "enforcing, peer outside the trusted set", cloudflare: true, enforce: true,
+			peer: "203.0.113.9:1234", wantStatus: http.StatusForbidden, wantBackend: 0,
+		},
+		{
+			name: "enforcing, peer inside the trusted set", cloudflare: true, enforce: true,
+			peer: "192.0.2.7:1234", wantStatus: http.StatusOK, wantBackend: 1,
+		},
+		{
+			name: "not enforcing, untrusted peer still served", cloudflare: true, enforce: false,
+			peer: "203.0.113.9:1234", wantStatus: http.StatusOK, wantBackend: 1,
+		},
+		{
+			name: "origin mode ignores the flag entirely", cloudflare: false, enforce: true,
+			peer: "203.0.113.9:1234", wantStatus: http.StatusOK, wantBackend: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			mwTrustPeers(t, "192.0.2.0/24")
+			// Stage 0 so a request that is NOT refused reaches the backend;
+			// otherwise every case would stop at the stage-1 challenge and the
+			// test could not tell "refused" from "challenged".
+			env.mwSetStage(0)
+
+			domains.Config.Proxy.Cloudflare = tc.cloudflare
+			proxy.Cloudflare = tc.cloudflare
+			proxy.CloudflareEnforceOrigin = tc.enforce
+
+			req := mwRequest("/")
+			req.RemoteAddr = tc.peer
+			rec := mwDo(req)
+
+			mwAssertStatus(t, rec, tc.wantStatus)
+			if got := env.mwBackendHits(); got != tc.wantBackend {
+				t.Errorf("backend hits = %d, want %d", got, tc.wantBackend)
+			}
+		})
+	}
+}
