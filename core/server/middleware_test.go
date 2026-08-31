@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/azferius/lancarsec/core/gofilter"
 	"github.com/azferius/lancarsec/core/proxy"
 	"github.com/azferius/lancarsec/core/transport"
+	"github.com/azferius/lancarsec/core/trusted"
 	"github.com/azferius/lancarsec/core/utils"
 )
 
@@ -145,7 +147,11 @@ func mwSaveGlobals(tb testing.TB) {
 	oldCPU := proxy.CpuUsage
 	oldRAM := proxy.RamUsage
 
+	oldMaxBody := MaxRequestBodyBytes.Load()
+
 	tb.Cleanup(func() {
+		MaxRequestBodyBytes.Store(oldMaxBody)
+
 		domains.Config = oldConfig
 		domains.Domains = oldDomainList
 		domains.DomainsData = oldDomainsData
@@ -185,8 +191,29 @@ func mwSaveGlobals(tb testing.TB) {
 		proxy.CpuUsage = oldCPU
 		proxy.RamUsage = oldRAM
 
+		// WAVE 6: the trusted-proxy set is process-global too. Default is
+		// "trust nobody", which is what every test that does not explicitly
+		// call mwTrustPeers expects.
+		if _, err := trusted.Load(nil); err != nil {
+			tb.Errorf("resetting the trusted set: %v", err)
+		}
+
 		transport.Reset()
 	})
+}
+
+// mwTrustPeers publishes a trusted-proxy set for the duration of one test.
+// Tests that want a forwarding header believed must call it; without it the
+// default set is empty and realClientIP falls back to the socket peer.
+func mwTrustPeers(tb testing.TB, cidrs ...string) {
+	tb.Helper()
+	n, err := trusted.Load(cidrs)
+	if err != nil {
+		tb.Fatalf("trusted.Load(%v): %v", cidrs, err)
+	}
+	if n != len(cidrs) {
+		tb.Fatalf("trusted.Load(%v) loaded %d prefixes, want %d", cidrs, n, len(cidrs))
+	}
 }
 
 // mwNewEnv builds a fully initialised single-domain proxy state that mirrors
@@ -569,27 +596,42 @@ func TestMiddlewareCountersAndWindows(t *testing.T) {
 	}
 }
 
-// BUG (wave 5/7 flips this): a whitelisted (susLv 0) request never has a cookie
-// to present, so it always "fails" the cookie check and increments the
-// challenge-failure window that drives the R1 ratelimit. Whitelisted traffic
-// therefore ratelimits itself once it exceeds FailChallengeRatelimit.
-func TestMiddlewareWhitelistCountsAsChallengeFailure(t *testing.T) {
+// FLIPPED BY WAVE 6: a whitelisted (susLv 0) request never has a cookie to
+// present, because the proxy never issued it one. It used to "fail" the cookie
+// check anyway and increment the challenge-failure window that drives R1, so
+// whitelisted traffic ratelimited ITSELF after FailChallengeRatelimit (40)
+// requests per window - the exact opposite of what `action: 0` means. The
+// increment is now gated on susLv > 0.
+func TestMiddlewareWhitelistIsNotCountedAsAChallengeFailure(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(0)
 
-	rec := mwDo(mwRequest("/"))
-	mwAssertStatus(t, rec, http.StatusOK)
-	mwAssertBodyContains(t, rec, mwBackendBody)
+	// Enough requests to have blown past FailChallengeRatelimit under the old
+	// behaviour. The point is not just that the counter is 0 but that a
+	// whitelist cannot self-ratelimit however long it runs.
+	const requests = 5
+	for range requests {
+		rec := mwDo(mwRequest("/"))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+	}
 
 	firewall.Mutex.RLock()
 	cookieCount := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
+	accessCount := firewall.WindowAccessIps[mwTimestamp][mwIP]
 	firewall.Mutex.RUnlock()
 
-	if cookieCount != 1 {
-		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 1 (today a whitelisted request is counted as a challenge failure)", mwTimestamp, mwIP, cookieCount)
+	if cookieCount != 0 {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 0 (a whitelisted request was never challenged, so it cannot have failed a challenge)", mwTimestamp, mwIP, cookieCount)
 	}
-	if env.mwBackendHits() != 1 {
-		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	// The plain request counter is deliberately still incremented: it feeds
+	// ip.http_requests and the attack detector, both of which want the real
+	// volume. Only the CHECKS are skipped for whitelisted traffic.
+	if accessCount != requests {
+		t.Errorf("WindowAccessIps[%d][%s] = %d, want %d (whitelisted requests are still counted)", mwTimestamp, mwIP, accessCount, requests)
+	}
+	if env.mwBackendHits() != requests {
+		t.Errorf("backend hits = %d, want %d", env.mwBackendHits(), requests)
 	}
 }
 
@@ -801,6 +843,13 @@ func TestMiddlewareRatelimits(t *testing.T) {
 
 // The thresholds are strict ">" comparisons: hitting the limit exactly is
 // allowed, one over is blocked.
+//
+// FLIPPED BY WAVE 6 (setup, not expectations): this used to run at stage 0 and
+// still expect the ratelimits to fire, which is precisely the defect wave 6
+// removes - a whitelisted request is no longer subject to R1/R2/R3. The
+// boundary behaviour itself is unchanged, so the cases below now run at stage 1
+// with a valid clearance cookie: an allowed request still reaches the backend,
+// a blocked one still says so.
 func TestMiddlewareRatelimitBoundaries(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -818,10 +867,10 @@ func TestMiddlewareRatelimitBoundaries(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := mwNewEnv(t)
-			env.mwSetStage(0) // whitelist so an allowed request reaches the backend
+			env.mwSetStage(1)
 			tc.set()
 
-			rec := mwDo(mwRequest("/"))
+			rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 			blocked := strings.Contains(rec.Body.String(), "ratelimited")
 			if blocked != tc.blocked {
 				t.Errorf("blocked = %v, want %v (body: %s)", blocked, tc.blocked, mwTrunc(rec.Body.String(), 120))
@@ -830,6 +879,55 @@ func TestMiddlewareRatelimitBoundaries(t *testing.T) {
 				t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
 			}
 		})
+
+		// FLIPPED BY WAVE 6: the same over-limit state, whitelisted. Before
+		// wave 6 the three ratelimits ran before rule evaluation, so an
+		// operator's `action: 0` could not whitelist anything - the request had
+		// already been counted and could already have been refused. Every case
+		// above that blocks must now pass when susLv is 0.
+		t.Run(tc.name+" is not enforced against a whitelisted request", func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0)
+			tc.set()
+
+			rec := mwDo(mwRequest("/"))
+			if strings.Contains(rec.Body.String(), "ratelimited") {
+				t.Errorf("a whitelisted request was ratelimited: %s", mwTrunc(rec.Body.String(), 120))
+			}
+			if env.mwBackendHits() != 1 {
+				t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+			}
+		})
+	}
+}
+
+// The whitelist is reached through a RULE, not only through `stage 0`, and the
+// rule is what the reorder exists for: an `action: 0` rule now runs before the
+// ratelimits instead of after them. This is the operator-facing shape of the
+// change - "allow my health check through however loud the flood is".
+func TestMiddlewareWhitelistRuleBeatsTheRatelimits(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+	env.mwSetRules([2]string{`http.path eq "/health"`, "0"})
+
+	// Every one of the three limiters is over its threshold for this client.
+	firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1000
+	firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1000
+	firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1000
+
+	rec := mwDo(mwRequest("/health"))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	if env.mwBackendHits() != 1 {
+		t.Fatalf("backend hits = %d, want 1: the whitelist rule did not beat the ratelimits", env.mwBackendHits())
+	}
+
+	// ...and a request the rule does NOT match is still refused, so the
+	// whitelist is scoped to what it names rather than disabling the limiter.
+	rec = mwDo(mwRequest("/not-health"))
+	mwAssertBodyContains(t, rec, "You have been ratelimited. (R1)")
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1: a non-whitelisted request got through", env.mwBackendHits())
 	}
 }
 
@@ -874,8 +972,53 @@ func TestMiddlewareForbiddenFingerprint(t *testing.T) {
 		t.Error("backend was reached despite a forbidden fingerprint")
 	}
 
-	// The forbidden check runs AFTER R3, so the unknown-fingerprint window has
-	// already been incremented for a fingerprint we then reject.
+	// FLIPPED BY WAVE 6: this request is whitelisted (stage 0), so the R3 block
+	// - the threshold check AND the unknown-fingerprint window write that sits
+	// with it - is skipped entirely. It used to be incremented for a
+	// fingerprint the very next check rejects.
+	//
+	// The window write matters more than it looks: WindowUnkFps is keyed on the
+	// TLS fingerprint, which is shared by every client running the same browser
+	// build. Counting whitelisted traffic there let an operator's own
+	// high-volume, single-fingerprint monitoring drive R3 against strangers.
+	firewall.Mutex.RLock()
+	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
+	firewall.Mutex.RUnlock()
+	if unk != 0 {
+		t.Errorf("WindowUnkFps[%d][%s] = %d, want 0 for a whitelisted request", mwTimestamp, mwFP, unk)
+	}
+}
+
+// The forbidden-fingerprint block is deliberately NOT gated on susLv: it is an
+// explicit operator deny-list of attack tooling, and a whitelist rule that
+// happens to cover the request must not unblock it. Deny beats allow.
+func TestMiddlewareForbiddenFingerprintIgnoresTheWhitelist(t *testing.T) {
+	for _, stage := range []int{0, 1} {
+		t.Run("stage "+strconv.Itoa(stage), func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(stage)
+			env.mwSetRules([2]string{`http.path eq "/"`, "0"})
+			firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
+
+			rec := mwDo(mwRequest("/"))
+			mwAssertBodyContains(t, rec, "Your browser Http-Flood (1) is not allowed.")
+			if env.mwBackendHits() != 0 {
+				t.Error("a whitelisted request with a forbidden fingerprint reached the backend")
+			}
+		})
+	}
+}
+
+// At a stage that actually challenges, the unknown-fingerprint window is still
+// written before the forbidden check - the sibling half of the flip above, so
+// that "wave 6 skipped it" cannot be confused with "wave 6 deleted it".
+func TestMiddlewareUnknownFingerprintWindowIsCountedWhenChallenged(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+	firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
+
+	mwDo(mwRequest("/"))
+
 	firewall.Mutex.RLock()
 	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
 	firewall.Mutex.RUnlock()
@@ -1917,12 +2060,19 @@ func TestMiddlewareForwardsClientInfoHeaders(t *testing.T) {
 	}
 }
 
-// BUG (wave 7 flips this): the client-info headers are ADDED, not SET. A client
-// that sends its own x-real-ip keeps it, and the backend sees "spoofed, real".
-// Backends that read the first value are trivially spoofable through the proxy.
-func TestMiddlewareClientSuppliedRealIPIsNotOverwritten(t *testing.T) {
+// FLIPPED BY WAVE 6: the client-info headers were ADDED, not SET, so a client
+// that sent its own x-real-ip kept it and the backend saw "spoofed, real".
+// Header.Get - how almost every backend reads a header - returns the FIRST
+// value, so the attacker's won: every access-control decision, audit log and
+// geo lookup behind this proxy was spoofable with one request header.
+//
+// They are now Del'd and Set. Del covers more than the four names written back:
+// X-Forwarded-For and Forwarded say the same thing under other names, and a
+// client can invent proxy-* headers himself.
+func TestMiddlewareClientSuppliedIdentityHeadersAreReplaced(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(0)
+	firewall.KnownFingerprints[mwFP] = "Chromium"
 
 	rec := mwDo(mwRequest("/",
 		mwWithHeader("X-Real-Ip", "10.0.0.1"),
@@ -1930,14 +2080,79 @@ func TestMiddlewareClientSuppliedRealIPIsNotOverwritten(t *testing.T) {
 	))
 	mwAssertStatus(t, rec, http.StatusOK)
 
-	if got, want := rec.Result().Header.Get("X-Echo-X-Real-Ip"), "10.0.0.1|"+mwIP; got != want {
-		t.Errorf("backend saw x-real-ip = %q, want %q", got, want)
+	if got, want := rec.Result().Header.Get("X-Echo-X-Real-Ip"), mwIP; got != want {
+		t.Errorf("backend saw x-real-ip = %q, want %q (exactly one value, the proxy's)", got, want)
 	}
-	if got, want := rec.Result().Header.Get("X-Echo-Proxy-Tls-Name"), "TotallyChrome|"; got != want {
+	if got, want := rec.Result().Header.Get("X-Echo-Proxy-Tls-Name"), "Chromium"; got != want {
 		t.Errorf("backend saw proxy-tls-name = %q, want %q", got, want)
 	}
 	if env.mwBackendHits() != 1 {
 		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+	}
+}
+
+// The wider sweep: every inbound header in the client-identity family is
+// removed before the proxy's own values are set, so nothing a client sends
+// under one of these names survives to the backend.
+func TestMiddlewareInboundIdentityHeadersAreStripped(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+	env.storeSettings(nil, nil)
+
+	// The stub backend only echoes a fixed list, so capture the whole forwarded
+	// header set with a purpose-built one.
+	var forwarded http.Header
+	captured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = r.Header.Clone()
+		_, _ = w.Write([]byte(mwBackendBody))
+	}))
+	t.Cleanup(captured.Close)
+
+	target, err := url.Parse(captured.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.Transport = &transport.RoundTripper{}
+	domains.DomainsMap.Store(mwDomain, domains.DomainSettings{Name: mwDomain, DomainProxy: rp})
+
+	rec := mwDo(mwRequest("/",
+		mwWithHeader("X-Forwarded-For", "10.0.0.1, 10.0.0.2"),
+		mwWithHeader("Forwarded", "for=10.0.0.3"),
+		mwWithHeader("X-Real-Ip", "10.0.0.4"),
+		mwWithHeader("Proxy-Real-Ip", "10.0.0.5"),
+		mwWithHeader("Proxy-Tls-Fp", "forged-fingerprint"),
+		mwWithHeader("Proxy-Secret", "guessed-admin-secret"),
+	))
+	mwAssertStatus(t, rec, http.StatusOK)
+	if forwarded == nil {
+		t.Fatal("backend was not reached")
+	}
+
+	// Nothing the client wrote survives.
+	for _, forged := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "forged-fingerprint", "guessed-admin-secret"} {
+		for name, values := range forwarded {
+			for _, v := range values {
+				if strings.Contains(v, forged) {
+					t.Errorf("client-supplied %q survived to the backend as %s: %q", forged, name, v)
+				}
+			}
+		}
+	}
+	if got := forwarded.Get("Forwarded"); got != "" {
+		t.Errorf("Forwarded = %q, want it removed", got)
+	}
+	// The admin API header must never reach a customer backend.
+	if got := forwarded.Get("Proxy-Secret"); got != "" {
+		t.Errorf("Proxy-Secret = %q, want it removed", got)
+	}
+	// X-Forwarded-For is deleted and left to httputil.ReverseProxy, which
+	// appends the socket peer. That is the honest value for that header.
+	if got, want := forwarded.Get("X-Forwarded-For"), mwIP; got != want {
+		t.Errorf("X-Forwarded-For = %q, want %q (the socket peer, appended by ReverseProxy)", got, want)
+	}
+	if got, want := forwarded.Get("X-Real-Ip"), mwIP; got != want {
+		t.Errorf("X-Real-Ip = %q, want %q", got, want)
 	}
 }
 
@@ -2047,6 +2262,8 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		env := mwNewEnv(t)
 		domains.Config.Proxy.Cloudflare = true
 		proxy.Cloudflare = true
+		// FLIPPED BY WAVE 6: the header is believed only from a trusted peer.
+		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
 
 		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
@@ -2073,15 +2290,42 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		}
 	})
 
-	// BUG (wave 5 flips this): the header is trusted unconditionally and is not
-	// validated, so anyone hitting the origin directly picks their own subject IP
-	// (and, by sending a fresh one per request, their own ratelimit bucket).
-	t.Run("Cf-Connecting-Ip is trusted from any peer", func(t *testing.T) {
+	// FLIPPED BY WAVE 6. The header used to be trusted unconditionally, so
+	// anyone who found the origin address picked his own subject IP - and, by
+	// sending a fresh one per request, his own ratelimit bucket, his own token
+	// cache entry and his own log identity. One header defeated the whole
+	// mitigation stack.
+	//
+	// The escape is the thing to test, not the header value: the peer is over
+	// the R2 threshold and tries to walk out of its bucket by naming a
+	// different client.
+	t.Run("Cf-Connecting-Ip from an untrusted peer cannot escape the peer's ratelimit", func(t *testing.T) {
 		env := mwNewEnv(t)
 		domains.Config.Proxy.Cloudflare = true
 		proxy.Cloudflare = true
+		env.mwSetStage(1)
+		firewall.AccessIps["192.0.2.99"] = proxy.IPRatelimit + 1 // the real peer is ratelimited
+
+		rec := mwDo(mwRequest("/",
+			mwWithRemoteAddr("192.0.2.99:1234"),
+			mwWithHeader("Cf-Connecting-Ip", "1.1.1.1")))
+
+		if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R2)"; got != want {
+			t.Errorf("body = %q, want %q: the spoofed header bought a fresh bucket", mwTrunc(got, 200), want)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
+		}
+	})
+
+	// ...and the same request from a peer the operator DID configure as a
+	// trusted proxy is believed, which is the whole point of the mode.
+	t.Run("Cf-Connecting-Ip from a trusted peer is believed", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Config.Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		mwTrustPeers(t, "192.0.2.0/24")
 		env.mwSetStage(0)
-		firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1000 // the real peer is ratelimited
 
 		rec := mwDo(mwRequest("/",
 			mwWithRemoteAddr("192.0.2.99:1234"),
@@ -2104,7 +2348,11 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			env := mwNewEnv(t)
 			domains.Config.Proxy.Cloudflare = true
 			proxy.Cloudflare = true
-			env.mwSetStage(0) // whitelisted: only a ratelimit can block
+			mwTrustPeers(t, mwIP+"/32")
+			// FLIPPED BY WAVE 6: stage 1, not stage 0. A whitelisted request is
+			// no longer subject to the ratelimits at all, so a stage-0 setup
+			// would prove nothing about which counter R1 reads.
+			env.mwSetStage(1)
 			firewall.AccessIpsCookie[cfIP] = proxy.FailChallengeRatelimit + 1
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
@@ -2121,7 +2369,8 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			env := mwNewEnv(t)
 			domains.Config.Proxy.Cloudflare = true
 			proxy.Cloudflare = true
-			env.mwSetStage(0)
+			mwTrustPeers(t, mwIP+"/32")
+			env.mwSetStage(1) // FLIPPED BY WAVE 6, as above
 			firewall.AccessIps[cfIP] = proxy.IPRatelimit + 1
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
@@ -2138,6 +2387,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			env := mwNewEnv(t)
 			domains.Config.Proxy.Cloudflare = true
 			proxy.Cloudflare = true
+			mwTrustPeers(t, mwIP+"/32")
 			env.mwSetStage(0)
 			firewall.AccessIps[cfIP] = 7
 			firewall.AccessIpsCookie[cfIP] = 3
@@ -2152,23 +2402,30 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		})
 	})
 
-	// BUG (wave 5 flips this): with no Cf-Connecting-Ip header the subject IP is
-	// the empty string, so every such request shares one ratelimit bucket and one
-	// encryption cache key.
-	t.Run("missing Cf-Connecting-Ip yields an empty subject ip", func(t *testing.T) {
+	// FLIPPED BY WAVE 6: with no Cf-Connecting-Ip header the subject IP used to
+	// be the empty string, so ALL such traffic shared one ratelimit bucket, one
+	// encryption cache key and one log identity - and since the header was
+	// never required, simply omitting it was a way into that shared bucket. The
+	// answer is now the socket peer, which every request has.
+	t.Run("missing Cf-Connecting-Ip falls back to the socket peer", func(t *testing.T) {
 		env := mwNewEnv(t)
 		domains.Config.Proxy.Cloudflare = true
 		proxy.Cloudflare = true
+		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
 
 		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret()))
-		mwAssertBodyContains(t, rec, "IP: \n")
+		mwAssertBodyContains(t, rec, "IP: "+mwIP+"\n")
 
 		firewall.Mutex.RLock()
-		access := firewall.WindowAccessIps[mwTimestamp][""]
+		empty := firewall.WindowAccessIps[mwTimestamp][""]
+		peer := firewall.WindowAccessIps[mwTimestamp][mwIP]
 		firewall.Mutex.RUnlock()
-		if access != 1 {
-			t.Errorf(`WindowAccessIps[%d][""] = %d, want 1`, mwTimestamp, access)
+		if empty != 0 {
+			t.Errorf(`WindowAccessIps[%d][""] = %d, want 0: nothing may be counted under the empty key`, mwTimestamp, empty)
+		}
+		if peer != 1 {
+			t.Errorf("WindowAccessIps[%d][%s] = %d, want 1", mwTimestamp, mwIP, peer)
 		}
 		if env.mwBackendHits() != 0 {
 			t.Error("backend was reached for a reserved path")
@@ -2176,28 +2433,90 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 	})
 }
 
-// BUG (wave 6 flips this): in origin mode the subject IP is
-// strings.Split(RemoteAddr, ":")[0], which mangles every IPv6 peer down to
-// "[<first hextet>". 2001:db8::1 and 2001:db8::2 - and every other address in
-// the /16 - therefore share one ratelimit bucket, one encryption cache key and
-// one log identity.
-func TestMiddlewareIPv6RemoteAddrIsMangled(t *testing.T) {
+// FLIPPED BY WAVE 6. The subject IP used to be
+// strings.Split(RemoteAddr, ":")[0], which mangled every IPv6 peer down to the
+// literal string "[2001" - so 2001:db8::1, 2001:db8:ffff::2 and every other
+// address whose first hextet was 2001 shared one ratelimit bucket, one
+// encryption cache key and one log identity. It is now net.SplitHostPort plus
+// netip.ParseAddr, and the counter is keyed on the /64.
+func TestMiddlewareIPv6IsParsedAndKeyedOnTheSlash64(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(0)
 
-	for _, addr := range []string{"[2001:db8::1]:51000", "[2001:db8:ffff::2]:51001"} {
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithRemoteAddr(addr)))
-		mwAssertBodyContains(t, rec, "IP: [2001\n")
+	cases := []struct {
+		remote  string
+		wantIP  string
+		wantKey string
+	}{
+		// Two addresses one hop apart inside the SAME /64: one bucket, because
+		// rotating inside an allocation is free for the attacker.
+		{"[2001:db8:1:2::1]:51000", "2001:db8:1:2::1", "2001:db8:1:2::/64"},
+		{"[2001:db8:1:2::dead:beef]:51001", "2001:db8:1:2::dead:beef", "2001:db8:1:2::/64"},
+		// A different /64 is a different bucket.
+		{"[2001:db8:1:3::1]:51002", "2001:db8:1:3::1", "2001:db8:1:3::/64"},
+		// A v4 client is still keyed on the whole address.
+		{"198.51.100.9:51003", "198.51.100.9", "198.51.100.9"},
+		// A 4-in-6 mapped peer is unmapped, so a dual-stack listener does not
+		// hand the same client a second bucket.
+		{"[::ffff:198.51.100.9]:51004", "198.51.100.9", "198.51.100.9"},
+	}
+
+	for _, tc := range cases {
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithRemoteAddr(tc.remote)))
+		// The reported identity is the EXACT address, never the bucket: a log
+		// row or an abuse report naming a /64 is useless.
+		mwAssertBodyContains(t, rec, "IP: "+tc.wantIP+"\n")
+		mwAssertBodyContains(t, rec, "Ratelimit Key: "+tc.wantKey+"\n")
 	}
 
 	firewall.Mutex.RLock()
-	access := firewall.WindowAccessIps[mwTimestamp]["[2001"]
+	sameSlash64 := firewall.WindowAccessIps[mwTimestamp]["2001:db8:1:2::/64"]
+	otherSlash64 := firewall.WindowAccessIps[mwTimestamp]["2001:db8:1:3::/64"]
+	v4 := firewall.WindowAccessIps[mwTimestamp]["198.51.100.9"]
+	mangled := firewall.WindowAccessIps[mwTimestamp]["[2001"]
 	firewall.Mutex.RUnlock()
-	if access != 2 {
-		t.Errorf(`WindowAccessIps[%d]["[2001"] = %d, want 2 (two distinct IPv6 clients share one bucket)`, mwTimestamp, access)
+
+	if sameSlash64 != 2 {
+		t.Errorf(`WindowAccessIps[%d]["2001:db8:1:2::/64"] = %d, want 2 (both addresses in one allocation count together)`, mwTimestamp, sameSlash64)
+	}
+	if otherSlash64 != 1 {
+		t.Errorf(`WindowAccessIps[%d]["2001:db8:1:3::/64"] = %d, want 1 (a different allocation is a different bucket)`, mwTimestamp, otherSlash64)
+	}
+	if v4 != 2 {
+		t.Errorf(`WindowAccessIps[%d]["198.51.100.9"] = %d, want 2 (the mapped and unmapped forms are one client)`, mwTimestamp, v4)
+	}
+	if mangled != 0 {
+		t.Errorf(`WindowAccessIps[%d]["[2001"] = %d, want 0: the split-on-colon key is gone`, mwTimestamp, mangled)
 	}
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached for a reserved path")
+	}
+}
+
+// An IPv6 client's clearance token is bound to its exact address, not to the
+// /64 it is counted under. Binding a token to the bucket would let one host in
+// a residential allocation solve one challenge and hand the cookie to every
+// other address in it.
+func TestMiddlewareIPv6TokensAreBoundToTheAddressNotTheBucket(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	first := mwDo(mwRequest("/", mwWithRemoteAddr("[2001:db8:1:2::1]:51000")))
+	second := mwDo(mwRequest("/", mwWithRemoteAddr("[2001:db8:1:2::2]:51001")))
+
+	firstToken := mwTokenFromSetCookie(t, first)
+	secondToken := mwTokenFromSetCookie(t, second)
+	if firstToken == secondToken {
+		t.Error("two addresses in one /64 were issued the same clearance token; the token is keyed on the ratelimit bucket, not the address")
+	}
+
+	// The neighbour's token must not clear this address.
+	replayed := mwDo(mwRequest("/",
+		mwWithRemoteAddr("[2001:db8:1:2::2]:51002"),
+		mwWithCookie(mwStage1Cookie+"="+firstToken)))
+	mwAssertStatus(t, replayed, http.StatusFound)
+	if env.mwBackendHits() != 0 {
+		t.Errorf("backend hits = %d, want 0: a neighbour's token cleared the challenge", env.mwBackendHits())
 	}
 }
 
@@ -2306,10 +2625,12 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 	if access != total {
 		t.Errorf("WindowAccessIps[%d][%s] = %d, want %d", mwTimestamp, mwIP, access, total)
 	}
-	// Stage 0 has no cookie to present, so every request also counts as a
-	// challenge failure (see TestMiddlewareWhitelistCountsAsChallengeFailure).
-	if cookie != total {
-		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want %d", mwTimestamp, mwIP, cookie, total)
+	// FLIPPED BY WAVE 6: stage 0 has no cookie to present, and a request that
+	// was never challenged is no longer counted as having failed a challenge
+	// (see TestMiddlewareWhitelistIsNotCountedAsAChallengeFailure). The write
+	// is skipped entirely, so this is 0 rather than `total`.
+	if cookie != 0 {
+		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 0", mwTimestamp, mwIP, cookie)
 	}
 	if env.mwBackendHits() != 0 {
 		t.Errorf("backend hits = %d, want 0 (/_bProxy/verified is served by the proxy)", env.mwBackendHits())
@@ -2571,3 +2892,323 @@ func mwBody(s string) mwStringBody {
 type mwStringBody struct{ *strings.Reader }
 
 func (mwStringBody) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
+// client identity (wave 6)
+// ---------------------------------------------------------------------------
+
+// realClientIP is the single source of truth for the subject IP. These are unit
+// tests of the resolution rule itself; the tests above pin what the rest of
+// Middleware does with the answer.
+func TestRealClientIP(t *testing.T) {
+	cases := []struct {
+		name    string
+		trust   []string
+		remote  string
+		headers map[string]string
+		// xff, when set, is sent as SEPARATE X-Forwarded-For header lines.
+		xff  []string
+		want string
+	}{
+		{
+			name:   "no trusted proxies: the peer wins",
+			remote: "203.0.113.7:51000",
+			headers: map[string]string{
+				"Cf-Connecting-Ip": "1.1.1.1",
+				"X-Real-Ip":        "2.2.2.2",
+				"X-Forwarded-For":  "3.3.3.3",
+			},
+			want: "203.0.113.7",
+		},
+		{
+			name:    "an untrusted peer's Cf-Connecting-Ip is ignored",
+			trust:   []string{"192.0.2.0/24"},
+			remote:  "203.0.113.7:51000",
+			headers: map[string]string{"Cf-Connecting-Ip": "1.1.1.1"},
+			want:    "203.0.113.7",
+		},
+		{
+			name:    "a trusted peer's Cf-Connecting-Ip is honoured",
+			trust:   []string{"192.0.2.0/24"},
+			remote:  "192.0.2.9:51000",
+			headers: map[string]string{"Cf-Connecting-Ip": "1.1.1.1"},
+			want:    "1.1.1.1",
+		},
+		{
+			name:   "Cf-Connecting-Ip outranks X-Real-Ip and X-Forwarded-For",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			headers: map[string]string{
+				"Cf-Connecting-Ip": "1.1.1.1",
+				"X-Real-Ip":        "2.2.2.2",
+			},
+			xff:  []string{"3.3.3.3"},
+			want: "1.1.1.1",
+		},
+		{
+			name:    "X-Real-Ip is used when Cf-Connecting-Ip is absent",
+			trust:   []string{"192.0.2.0/24"},
+			remote:  "192.0.2.9:51000",
+			headers: map[string]string{"X-Real-Ip": "2.2.2.2"},
+			xff:     []string{"3.3.3.3"},
+			want:    "2.2.2.2",
+		},
+		{
+			name:   "a garbage Cf-Connecting-Ip falls through to the next source",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			headers: map[string]string{
+				"Cf-Connecting-Ip": "not-an-address",
+				"X-Real-Ip":        "2.2.2.2",
+			},
+			want: "2.2.2.2",
+		},
+		{
+			name:   "a trusted peer that forwarded nothing falls back to itself",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			want:   "192.0.2.9",
+		},
+
+		// --- X-Forwarded-For element selection -------------------------------
+		//
+		// THE ELEMENT CHOICE IS THE WHOLE POINT. XFF reads left to right as
+		// "client, first proxy, second proxy", and the leftmost element is
+		// whatever the original client wrote - it is appended to by every hop
+		// and verified by none. Taking the leftmost hands the attacker his own
+		// ratelimit bucket, which is the bug this wave exists to remove. The
+		// rightmost element that is not itself a trusted proxy is the last
+		// value written by something we put there.
+		{
+			name:   "a single-element chain from a trusted peer is the client",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"1.1.1.1"},
+			want:   "1.1.1.1",
+		},
+		{
+			name:   "the client-forged leftmost element is NOT taken",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			// 9.9.9.9 is what the attacker wrote himself; 1.1.1.1 is what our
+			// own edge observed and appended.
+			xff:  []string{"9.9.9.9, 1.1.1.1"},
+			want: "1.1.1.1",
+		},
+		{
+			name:   "trailing trusted hops are skipped",
+			trust:  []string{"192.0.2.0/24", "198.51.100.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"9.9.9.9, 1.1.1.1, 198.51.100.5, 198.51.100.6"},
+			want:   "1.1.1.1",
+		},
+		{
+			name:   "the chain may arrive as several header lines",
+			trust:  []string{"192.0.2.0/24", "198.51.100.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"9.9.9.9, 1.1.1.1", "198.51.100.5"},
+			want:   "1.1.1.1",
+		},
+		{
+			name:   "an all-trusted chain falls back to the leftmost",
+			trust:  []string{"192.0.2.0/24", "198.51.100.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"198.51.100.5, 198.51.100.6"},
+			want:   "198.51.100.5",
+		},
+		{
+			name:   "junk elements are skipped, not fatal",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"unknown, 1.1.1.1, _obfuscated"},
+			want:   "1.1.1.1",
+		},
+		{
+			name:   "bracketed and port-suffixed elements parse",
+			trust:  []string{"192.0.2.0/24"},
+			remote: "192.0.2.9:51000",
+			xff:    []string{"9.9.9.9, [2001:db8::1]:4444"},
+			want:   "2001:db8::1",
+		},
+
+		// --- canonicalisation ------------------------------------------------
+		{
+			name:   "an IPv6 peer is parsed, not split on the first colon",
+			remote: "[2001:db8::1]:51000",
+			want:   "2001:db8::1",
+		},
+		{
+			name:   "a 4-in-6 mapped peer is unmapped",
+			remote: "[::ffff:203.0.113.7]:51000",
+			want:   "203.0.113.7",
+		},
+		{
+			name:   "a zone is not part of the identity",
+			remote: "[fe80::1%eth0]:51000",
+			want:   "fe80::1",
+		},
+		{
+			name:   "a RemoteAddr with no port still parses",
+			remote: "203.0.113.7",
+			want:   "203.0.113.7",
+		},
+		{
+			name:   "an unparseable RemoteAddr yields the zero address",
+			remote: "not-an-address",
+			want:   "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mwSaveGlobals(t)
+			mwTrustPeers(t, tc.trust...)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remote
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			for _, v := range tc.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+
+			if got := ipString(realClientIP(req)); got != tc.want {
+				t.Errorf("realClientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A trusted peer that is itself IPv4-mapped must still match a v4 trusted
+// prefix, or a dual-stack listener would stop believing its own edge.
+func TestRealClientIPTrustsAMappedPeer(t *testing.T) {
+	mwSaveGlobals(t)
+	mwTrustPeers(t, "192.0.2.0/24")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::ffff:192.0.2.9]:51000"
+	req.Header.Set("Cf-Connecting-Ip", "1.1.1.1")
+
+	if got := ipString(realClientIP(req)); got != "1.1.1.1" {
+		t.Errorf("realClientIP = %q, want 1.1.1.1: a 4-in-6 mapped trusted peer was not recognised", got)
+	}
+}
+
+func TestRatelimitKey(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"203.0.113.7", "203.0.113.7"},
+		{"2001:db8:1:2::1", "2001:db8:1:2::/64"},
+		{"2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"},
+		{"2001:db8:1:3::1", "2001:db8:1:3::/64"},
+		{"::1", "::/64"},
+	}
+	for _, tc := range cases {
+		addr, err := netip.ParseAddr(tc.in)
+		if err != nil {
+			t.Fatalf("ParseAddr(%q): %v", tc.in, err)
+		}
+		if got := ratelimitKey(addr); got != tc.want {
+			t.Errorf("ratelimitKey(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := ratelimitKey(netip.Addr{}); got != "" {
+		t.Errorf("ratelimitKey(zero) = %q, want %q", got, "")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// hard limits at the top of Middleware (wave 6)
+// ---------------------------------------------------------------------------
+
+// CONNECT asks a proxy to splice a socket to an arbitrary host:port.
+// httputil.ReverseProxy forwards the method verbatim, so without this the
+// mitigation front end can be driven as an open tunnel - traffic leaving from
+// the proxy's address, with the proxy's reputation.
+func TestMiddlewareRejectsConnect(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0) // whitelisted: nothing but the CONNECT guard can refuse it
+
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.Host = mwDomain
+	req.RemoteAddr = mwRemoteAddr
+	rec := mwDo(req)
+
+	mwAssertStatus(t, rec, http.StatusMethodNotAllowed)
+	mwAssertBodyContains(t, rec, "405 Method Not Allowed")
+	if env.mwBackendHits() != 0 {
+		t.Error("a CONNECT request was proxied to the backend")
+	}
+
+	// The guard sits above ALL bookkeeping: a refused CONNECT must not move a
+	// counter, take the window lock or issue a token.
+	if got := env.mwDomainData().TotalRequests; got != 0 {
+		t.Errorf("TotalRequests = %d, want 0: CONNECT was counted before it was refused", got)
+	}
+	firewall.Mutex.RLock()
+	access := len(firewall.WindowAccessIps[mwTimestamp])
+	firewall.Mutex.RUnlock()
+	if access != 0 {
+		t.Errorf("WindowAccessIps has %d entries, want 0", access)
+	}
+	if sc := rec.Result().Header.Get("Set-Cookie"); sc != "" {
+		t.Errorf("Set-Cookie = %q, want empty", sc)
+	}
+}
+
+// The body cap. A client that sends more than it is allowed gets its read
+// truncated, which the reverse proxy surfaces as a failed upstream request
+// rather than streaming an unbounded body at the customer origin.
+func TestMiddlewareCapsTheRequestBody(t *testing.T) {
+	mwPost := func(size int) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("a", size)))
+		req.Host = mwDomain
+		req.RemoteAddr = mwRemoteAddr
+		req.Header.Set("User-Agent", mwUA)
+		return req
+	}
+
+	t.Run("a body under the limit is proxied", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		MaxRequestBodyBytes.Store(64)
+
+		rec := mwDo(mwPost(32))
+
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+
+	t.Run("a body over the limit does not reach the backend intact", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		MaxRequestBodyBytes.Store(16)
+
+		rec := mwDo(mwPost(4096))
+
+		// The upstream request is aborted mid-body, which core/transport turns
+		// into its error page. Asserted on the body rather than the status
+		// because that error page is served with 200 - a separate defect, owned
+		// by the wave that makes error responses honest.
+		mwAssertBodyContains(t, rec, "request body too large")
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0: the oversized body was delivered", env.mwBackendHits())
+		}
+	})
+
+	t.Run("a zero limit disables the cap", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+		MaxRequestBodyBytes.Store(0)
+
+		rec := mwDo(mwPost(4096))
+
+		mwAssertStatus(t, rec, http.StatusOK)
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
+	})
+}

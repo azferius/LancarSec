@@ -28,6 +28,7 @@ package server
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -84,9 +85,15 @@ func mwNewBenchEnv(b *testing.B) *mwEnv {
 	return env
 }
 
-// mwResetIdentityHeaders undoes the four Header.Add calls at the end of
-// Middleware so one request value can be reused across iterations. Without this
-// the header map grows by four values per iteration.
+// mwResetIdentityHeaders undoes the four identity-header writes at the end of
+// Middleware so one request value can be reused across iterations.
+//
+// Since wave 6 those writes are Set, not Add, so the header map no longer grows
+// by four values per iteration and this is strictly no longer required for
+// correctness. It is kept so the per-iteration harness cost stays comparable
+// with the numbers in BENCHMARK_BASELINE.md - removing it would silently make
+// every benchmark below look faster than the recorded "before" for a reason
+// that has nothing to do with Middleware.
 func mwResetIdentityHeaders(r *http.Request) {
 	h := r.Header
 	delete(h, "X-Real-Ip")
@@ -260,6 +267,72 @@ func BenchmarkMiddlewareChallengeStage1Parallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkMiddlewareClientIP isolates the wave-6 identity resolution, which is
+// new work on every single request. It is the piece to watch if wave 7 shards
+// these keys: realClientIP must stay allocation-free, and ipString's single
+// string is the only allocation the pair is allowed.
+func BenchmarkMiddlewareClientIP(b *testing.B) {
+	cases := []struct {
+		name    string
+		trust   []string
+		remote  string
+		headers [][2]string
+	}{
+		{
+			name:   "origin ipv4 peer",
+			remote: "203.0.113.7:51000",
+		},
+		{
+			name:   "origin ipv6 peer",
+			remote: "[2001:db8:1:2::1]:51000",
+		},
+		{
+			// The untrusted-peer path is the one an attacker hitting the origin
+			// directly takes, and it must not be more expensive than the
+			// trusted one or the spoof attempt is itself an amplifier.
+			name:    "untrusted peer sending a forged header",
+			trust:   []string{"192.0.2.0/24"},
+			remote:  "203.0.113.7:51000",
+			headers: [][2]string{{"Cf-Connecting-Ip", "1.1.1.1"}},
+		},
+		{
+			name:    "trusted peer, Cf-Connecting-Ip",
+			trust:   []string{"192.0.2.0/24"},
+			remote:  "192.0.2.9:51000",
+			headers: [][2]string{{"Cf-Connecting-Ip", "1.1.1.1"}},
+		},
+		{
+			name:    "trusted peer, four-element X-Forwarded-For",
+			trust:   []string{"192.0.2.0/24", "198.51.100.0/24"},
+			remote:  "192.0.2.9:51000",
+			headers: [][2]string{{"X-Forwarded-For", "9.9.9.9, 1.1.1.1, 198.51.100.5, 198.51.100.6"}},
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			mwSaveGlobals(b)
+			mwTrustPeers(b, tc.trust...)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remote
+			for _, h := range tc.headers {
+				req.Header.Set(h[0], h[1])
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				addr := realClientIP(req)
+				mwSinkString = ratelimitKeyFor(addr, ipString(addr))
+			}
+		})
+	}
+}
+
+// mwSinkString keeps the compiler from eliminating the benchmarked work.
+var mwSinkString string
 
 // BenchmarkMiddlewareHarnessBaseline measures the per-iteration cost the
 // harness itself adds to the benchmarks above (the identity-header reset), so
