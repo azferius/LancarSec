@@ -1,0 +1,39 @@
+# global/trusted/extra.txt — site-local trusted-proxy ranges, compiled into the binary.
+#
+# EMPTY BY DEFAULT, AND THAT IS THE SAFE STATE. Every prefix listed here is a
+# peer whose Cf-Connecting-Ip / X-Real-Ip / X-Forwarded-For header the proxy
+# will believe. A peer that can set those headers can claim to be any client on
+# the internet, so it can dodge every per-IP ratelimit and every per-IP ban, and
+# it can mint a challenge token bound to someone else's address. Add a range
+# here only if you control the machine that occupies it.
+#
+# FORMAT
+#   One entry per line. Blank lines are ignored.
+#   `#` starts a comment, either on its own line or after an entry.
+#   An entry is either a CIDR prefix   203.0.113.0/24     2001:db8::/32
+#   or a bare address, taken as a host  203.0.113.7        2001:db8::7
+#   A prefix that is not already masked is masked on load, so 203.0.113.7/24
+#   is read as 203.0.113.0/24. Write what you mean.
+#
+# REJECTED, LOUDLY, AT STARTUP
+#   0.0.0.0/0 and ::/0 — a default route is not an allowlist, it is the absence
+#   of one, and it reinstates exactly the header-spoofing hole this file closes.
+#   IPv6 zones (fe80::1%eth0) — a zone names a local interface, not a peer.
+#   ::ffff:0:0/96-or-shorter — ambiguous between IPv4 space and real IPv6 space.
+#   Anything unparseable. A typo here fails the build's startup, it does not
+#   silently shrink the allowlist.
+#
+# NOT AUTOMATICALLY TRUSTED
+#   Loopback is not trusted unless you list it. If you front LancarSec with a
+#   local nginx/Caddy/HAProxy that terminates TLS and forwards over 127.0.0.1,
+#   uncomment the two lines below — without them the proxy sees every visitor as
+#   127.0.0.1 and the per-IP ratelimits collapse into one bucket.
+#
+# 127.0.0.1/32
+# ::1/128
+#
+# THIS FILE IS EMBEDDED, NOT READ FROM DISK. Editing it means rebuilding the
+# binary. That is deliberate: the proxy performs no I/O to decide who it trusts.
+# For ranges that change without a rebuild, use the trusted-proxy list in
+# config.json, which reaches trusted.Load as its `extra` argument and is merged
+# with everything here.
