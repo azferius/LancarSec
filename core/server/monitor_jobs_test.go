@@ -4,7 +4,10 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/azferius/lancarsec/core/firewall"
 )
 
 // ---------------------------------------------------------------------------
@@ -96,5 +99,28 @@ func TestMonitorJobsSuperviseTheRatelimitClock(t *testing.T) {
 func TestAddDomainHookDefaultsToNil(t *testing.T) {
 	if AddDomain != nil {
 		t.Errorf("server.AddDomain points at %s in a fresh process, want nil until main wires config.AddDomain", funcName(t, AddDomain))
+	}
+}
+
+// WAVE 8: pins the count-based eviction gate that replaced the unreachable
+// Alloc/Sys heuristic (AUDIT.md:4822): a cache over its cap is dumped, one
+// under its cap is left alone.
+func TestEvictCachesCountGate(t *testing.T) {
+	oldIps, oldImgs := maxIpsCacheEntries, maxImgsCacheEntries
+	maxIpsCacheEntries, maxImgsCacheEntries = 0, 10_000
+	t.Cleanup(func() { maxIpsCacheEntries, maxImgsCacheEntries = oldIps, oldImgs })
+
+	firewall.CacheIps = sync.Map{}
+	firewall.CacheImgs = sync.Map{}
+	firewall.CacheIps.Store("over-cap", "v")
+	firewall.CacheImgs.Store("under-cap", [2]string{"a", "b"})
+
+	evictCaches()
+
+	if _, ok := firewall.CacheIps.Load("over-cap"); ok {
+		t.Fatal("CacheIps over its cap was not evicted")
+	}
+	if _, ok := firewall.CacheImgs.Load("under-cap"); !ok {
+		t.Fatal("CacheImgs under its cap was evicted")
 	}
 }
