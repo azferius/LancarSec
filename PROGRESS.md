@@ -25,7 +25,7 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 8 | Upstream transport and response path | not started |
 | 9 | Challenge rendering, XSS, middleware decomposition | not started |
 | 10 | Wire-visible rebrand + legal notices (atomic, one commit) | not started |
-| 11 | JA4 fingerprinting, stage-3 captcha redesign | **BLOCKED** — see below |
+| 11 | Cf-Ja3-Hash passthrough, stage-3 captcha redesign | **UNBLOCKED** — owner decided 2026-08-31: deploy behind Cloudflare, see below |
 
 ---
 
@@ -166,20 +166,16 @@ A security option that silently does nothing is worse than an absent one, becaus
 
 ---
 
-## Wave 11 is blocked on a decision, not on code
+## Wave 11 was blocked on a decision — DECIDED 2026-08-31: behind Cloudflare
 
-In Cloudflare mode `core/server/middleware.go` sets `tlsFp = "Cloudflare"` and
-`browser = "Cloudflare"` for every client, so **TLS fingerprinting is entirely disabled** and the
-unknown-fingerprint ratelimit (`if browser == ""`) never fires. Cloudflare terminates TLS; the
-origin only ever sees Cloudflare's handshake.
+The owner confirmed LancarSec deploys **behind Cloudflare**. Cloudflare terminates TLS; the
+origin only ever sees Cloudflare's handshake, so spec-accurate JA4 from the local ClientHello
+is wasted effort and is **dropped from the plan**. Wave 11 is now:
 
-So wave 11's value depends on deployment:
-
-- **Behind Cloudflare** → spec-accurate JA4 is wasted effort. Do the `Cf-Ja3-Hash` passthrough
-  (Enterprise add-on) and fix the GREASE asymmetry, nothing more.
-- **Direct origin** → JA4 from the raw ClientHello is worth building, and may deserve to move up.
-
-Ask the owner before starting wave 11.
+- **Cf-Ja3-Hash passthrough** (Cloudflare Enterprise add-on): believe `Cf-Ja3-Hash` only from a
+  trusted peer (same rules as wave 6's header trust), feed it the same fingerprint slot.
+- **Stage-3 captcha redesign** — unaffected by the deployment mode, still in scope.
+- The GREASE fingerprint bug below is fixed separately and earlier (it is real in either mode).
 
 There is a real bug there regardless of the decision, in `core/firewall/fingerprint.go`:
 `CipherSuites[1:]` and `SupportedCurves[1:]` drop the first element to skip GREASE, but only
