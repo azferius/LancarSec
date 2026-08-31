@@ -235,3 +235,44 @@ func HashToInt(hash string) int {
 	subset := (uint16(hash[0]) << 8) | uint16(hash[1])
 	return int(subset)%15 + 1
 }
+
+// RandomIntN returns a uniformly random int in [0, n), drawn from crypto/rand.
+//
+// It exists because the stage-3 captcha in core/server/middleware.go drew every
+// one of its obfuscation parameters — the horizontal shift, both label
+// positions, the warp amplitude, and the count, size and placement of the
+// scribble triangles — from the top-level math/rand generator. That generator
+// is linear: a bot that collects a few dozen captchas recovers its state and
+// can then predict exactly where the secret half of the answer will be drawn in
+// every subsequent one, which is the whole of what stage 3 defends.
+//
+// Like math/rand.Intn it panics for n <= 0, preserving the call sites' existing
+// contract.
+//
+// The rejection loop removes modulo bias: for n that does not divide 2^32,
+// values at the top of the range that would over-represent the low indices are
+// discarded and redrawn. The expected number of draws is under 2 for any n.
+func RandomIntN(n int) int {
+	if n <= 0 {
+		panic("utils.RandomIntN: n must be positive")
+	}
+
+	limit := uint32(n)
+	// Largest multiple of limit that fits in a uint32; anything at or above it
+	// is rejected.
+	max := (1<<32 - 1) - (1<<32-1)%uint64(limit)
+
+	var b [4]byte
+	for {
+		if _, err := crand.Read(b[:]); err != nil {
+			// crypto/rand.Read does not fail on any supported platform. Failing
+			// closed beats silently returning a predictable constant, which
+			// would defeat the obfuscation this function exists to provide.
+			panic("utils.RandomIntN: crypto/rand unavailable: " + err.Error())
+		}
+		v := uint64(b[0])<<24 | uint64(b[1])<<16 | uint64(b[2])<<8 | uint64(b[3])
+		if v < max {
+			return int(v % uint64(limit))
+		}
+	}
+}

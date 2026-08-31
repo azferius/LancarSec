@@ -14,7 +14,6 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
-	"math/rand"
 	"net"
 	"net/http"
 	"strconv"
@@ -452,14 +451,14 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			captchaCache, captchaExists := firewall.CacheImgs.Load(secretPart)
 
 			if !captchaExists {
-				randomShift := rand.Intn(50) - 25
+				randomShift := utils.RandomIntN(50) - 25
 				captchaImg := image.NewRGBA(image.Rect(0, 0, 100, 37))
-				randomColor := uint8(rand.Intn(255))
+				randomColor := uint8(utils.RandomIntN(255))
 				utils.AddLabel(captchaImg, 0, 18, publicPart[6:], color.RGBA{61, 140, 64, 20})
-				utils.AddLabel(captchaImg, rand.Intn(90), rand.Intn(30), publicPart[:6], color.RGBA{255, randomColor, randomColor, 100})
-				utils.AddLabel(captchaImg, rand.Intn(25), rand.Intn(20)+10, secretPart, color.RGBA{61, 140, 64, 255})
+				utils.AddLabel(captchaImg, utils.RandomIntN(90), utils.RandomIntN(30), publicPart[:6], color.RGBA{255, randomColor, randomColor, 100})
+				utils.AddLabel(captchaImg, utils.RandomIntN(25), utils.RandomIntN(20)+10, secretPart, color.RGBA{61, 140, 64, 255})
 
-				amplitude := float64(rand.Intn(10)+10) / 10.0
+				amplitude := float64(utils.RandomIntN(10)+10) / 10.0
 				period := float64(37) / 5.0
 				displacement := func(x, y int) (int, int) {
 					dx := amplitude * math.Sin(float64(y)/period)
@@ -471,15 +470,15 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 				maskImg := image.NewRGBA(captchaImg.Bounds())
 				draw.Draw(maskImg, maskImg.Bounds(), image.Transparent, image.Point{}, draw.Src)
 
-				numTriangles := rand.Intn(20) + 10
+				numTriangles := utils.RandomIntN(20) + 10
 
 				blacklist := make(map[[2]int]bool) // We use this to keep track of already overwritten pixels.
 				// it's slightly more performant to not do this but can lead to unsolvable captchas
 
 				for range numTriangles {
-					size := rand.Intn(5) + 10
-					x := rand.Intn(captchaImg.Bounds().Dx() - size)
-					y := rand.Intn(captchaImg.Bounds().Dy() - size)
+					size := utils.RandomIntN(5) + 10
+					x := utils.RandomIntN(captchaImg.Bounds().Dx() - size)
+					y := utils.RandomIntN(captchaImg.Bounds().Dy() - size)
 					blacklist = utils.DrawTriangle(blacklist, captchaImg, maskImg, x, y, size, randomShift)
 				}
 
