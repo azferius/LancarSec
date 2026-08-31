@@ -5,11 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/azferius/lancarsec/core/domains"
-	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/proxy"
-	"github.com/azferius/lancarsec/core/server"
-	"github.com/azferius/lancarsec/core/utils"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -18,6 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/transport"
+	"github.com/azferius/lancarsec/core/utils"
 
 	"github.com/azferius/lancarsec/core/gofilter"
 )
@@ -127,7 +128,7 @@ func Load() {
 			Scheme: domain.Scheme,
 			Host:   domain.Backend,
 		})
-		dProxy.Transport = &server.RoundTripper{}
+		dProxy.Transport = &transport.RoundTripper{}
 
 		var cert tls.Certificate = tls.Certificate{}
 		if !proxy.Cloudflare {

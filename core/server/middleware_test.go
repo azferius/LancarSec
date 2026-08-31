@@ -29,6 +29,7 @@ import (
 	"github.com/azferius/lancarsec/core/firewall"
 	"github.com/azferius/lancarsec/core/gofilter"
 	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/transport"
 	"github.com/azferius/lancarsec/core/utils"
 )
 
@@ -153,7 +154,7 @@ func mwSaveGlobals(tb testing.TB) {
 		proxy.CpuUsage = oldCPU
 		proxy.RamUsage = oldRAM
 
-		transportMap = sync.Map{}
+		transport.Reset()
 	})
 }
 
@@ -255,7 +256,7 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 // storeSettings (re)publishes DomainSettings for the test domain, mirroring
 // config.buildDomain: reverse proxy to the stub backend through the production
 // server.RoundTripper.
-func (e *mwEnv) storeSettings(rules []domains.Rule, transport http.RoundTripper) {
+func (e *mwEnv) storeSettings(rules []domains.Rule, rt http.RoundTripper) {
 	e.tb.Helper()
 
 	target, err := url.Parse(e.backend.URL)
@@ -263,10 +264,10 @@ func (e *mwEnv) storeSettings(rules []domains.Rule, transport http.RoundTripper)
 		e.tb.Fatalf("parse backend url: %v", err)
 	}
 	dProxy := httputil.NewSingleHostReverseProxy(target)
-	if transport == nil {
-		dProxy.Transport = &RoundTripper{}
+	if rt == nil {
+		dProxy.Transport = &transport.RoundTripper{}
 	} else {
-		dProxy.Transport = transport
+		dProxy.Transport = rt
 	}
 
 	domains.DomainsMap.Store(mwDomain, domains.DomainSettings{

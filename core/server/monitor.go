@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/azferius/lancarsec/core/screen"
+	"github.com/azferius/lancarsec/core/transport"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"golang.org/x/term"
@@ -465,7 +466,7 @@ func ReloadConfig() {
 			Scheme: domain.Scheme,
 			Host:   domain.Backend,
 		})
-		dProxy.Transport = &RoundTripper{}
+		dProxy.Transport = &transport.RoundTripper{}
 
 		var cert tls.Certificate = tls.Certificate{}
 		if !proxy.Cloudflare {
