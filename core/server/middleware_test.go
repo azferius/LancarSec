@@ -52,15 +52,46 @@ const (
 	mwStage2Difficulty = 5
 )
 
-// mwAccessKey mirrors the accessKey built inside Middleware:
-// ip + tlsFp + userAgent + proxy.CurrHourStr
-func mwAccessKey() string {
-	return mwIP + mwFP + mwUA + mwHourStr
+// mwAccessKey mirrors the accessKey built inside Middleware.
+//
+// FLIPPED BY WAVE 5: this used to be the bare concatenation
+// ip + tlsFp + userAgent + proxy.CurrHourStr, with no delimiter, no domain and
+// no suspicion level. It is now a length-prefixed encoding over
+// (version, domain, ip, fingerprint, user agent, hour, suspicion level).
+// mwLenPrefix keeps the helper an independent re-implementation of the
+// encoding rather than a call into the production one, so a change to
+// accessKeyFor has to be restated here to pass.
+func mwLenPrefix(part string) string {
+	return strconv.Itoa(len(part)) + ":" + part
 }
 
-func mwCookieToken() string  { return utils.Encrypt(mwAccessKey(), mwCookieOTP) }
-func mwJSToken() string      { return utils.Encrypt(mwAccessKey(), mwJSOTP) }
-func mwCaptchaToken() string { return utils.Encrypt(mwAccessKey(), mwCaptchaOTP) }
+func mwAccessKeyFor(domain, ip, fp, ua, hour string, susLv int) string {
+	return mwLenPrefix("v1") +
+		mwLenPrefix(domain) +
+		mwLenPrefix(ip) +
+		mwLenPrefix(fp) +
+		mwLenPrefix(ua) +
+		mwLenPrefix(hour) +
+		mwLenPrefix(strconv.Itoa(susLv))
+}
+
+func mwAccessKey(susLv int) string {
+	return mwAccessKeyFor(mwDomain, mwIP, mwFP, mwUA, mwHourStr, susLv)
+}
+
+func mwCookieToken() string  { return utils.Encrypt(mwAccessKey(1), mwCookieOTP) }
+func mwJSToken() string      { return utils.Encrypt(mwAccessKey(2), mwJSOTP) }
+func mwCaptchaToken() string { return utils.Encrypt(mwAccessKey(3), mwCaptchaOTP) }
+
+// mwStage1Cookie / mwStage2Cookie / mwStage3Cookie are the cookie NAMES the
+// proxy issues and now requires per stage. Wave 10 owns renaming the shared
+// "__bProxy_v" token; until then these are the wire names.
+const (
+	mwStage1Cookie = "_1__bProxy_v"
+	mwStage2Cookie = "_2__bProxy_v"
+)
+
+func mwStage3Cookie(ip string) string { return ip + "_3__bProxy_v" }
 
 // ---------------------------------------------------------------------------
 // harness
@@ -333,6 +364,41 @@ func mwWithMethod(m string) mwReqOpt {
 	return func(r *http.Request) { r.Method = m }
 }
 
+// mwWithAPISecret authenticates a request to a gated /_bProxy/* endpoint.
+// FLIPPED BY WAVE 5: /_bProxy/stats and /_bProxy/fingerprint used to be served
+// to any client that cleared the challenge.
+func mwWithAPISecret() mwReqOpt {
+	return mwWithHeader("Proxy-Secret", mwAPISecret)
+}
+
+// mwAddDomain publishes a second fully configured domain pointing at the same
+// stub backend, so cross-domain token reuse can be tested.
+func (e *mwEnv) mwAddDomain(name string, stage int) {
+	e.tb.Helper()
+
+	firewall.Mutex.Lock()
+	domains.DomainsData[name] = domains.DomainData{
+		Name:             name,
+		Stage:            stage,
+		Stage2Difficulty: mwStage2Difficulty,
+		LastLogs:         []domains.DomainLog{},
+		RequestLogger:    []domains.RequestLog{},
+	}
+	firewall.Mutex.Unlock()
+	domains.Domains = append(domains.Domains, name)
+
+	target, err := url.Parse(e.backend.URL)
+	if err != nil {
+		e.tb.Fatalf("parse backend url: %v", err)
+	}
+	dProxy := httputil.NewSingleHostReverseProxy(target)
+	dProxy.Transport = &transport.RoundTripper{}
+	domains.DomainsMap.Store(name, domains.DomainSettings{
+		Name:        name,
+		DomainProxy: dProxy,
+	})
+}
+
 // mwRequest builds a request that, by default, looks like a well-behaved
 // client of the test domain.
 func mwRequest(target string, opts ...mwReqOpt) *http.Request {
@@ -474,7 +540,10 @@ func TestMiddlewareCountersAndWindows(t *testing.T) {
 	}
 
 	// Now the same client with the correct cookie: bypassed, no challenge counter.
-	rec = mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+	// FLIPPED BY WAVE 5: the cookie must now be presented under the stage-1
+	// NAME the proxy issued it as; the bare "__bProxy_v" name was only ever
+	// accepted because the check was a substring test.
+	rec = mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
@@ -863,7 +932,7 @@ func TestMiddlewareForbiddenFingerprintBeatsValidCookie(t *testing.T) {
 	env.mwSetStage(1)
 	firewall.ForbiddenFingerprints[mwFP] = "Http-Flood (1)"
 
-	rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 	mwAssertBodyContains(t, rec, "is not allowed.")
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached despite a forbidden fingerprint")
@@ -884,14 +953,17 @@ func TestMiddlewareStage1Challenge(t *testing.T) {
 	if got, want := rec.Result().Header.Get("Location"), "/some/path?a=b"; got != want {
 		t.Errorf("Location = %q, want %q", got, want)
 	}
-	wantCookie := "_1__bProxy_v=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure"
+	wantCookie := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
 	if got := rec.Result().Header.Get("Set-Cookie"); got != wantCookie {
 		t.Errorf("Set-Cookie = %q, want %q", got, wantCookie)
 	}
-	// BUG (wave 5 flips this): the stage-1 cookie is not HttpOnly, so backend
-	// XSS can read the proxy's challenge token.
-	if strings.Contains(strings.ToLower(rec.Result().Header.Get("Set-Cookie")), "httponly") {
-		t.Error("Set-Cookie is HttpOnly; upstream behaviour was not HttpOnly")
+	// FLIPPED BY WAVE 5: the stage-1 cookie is now HttpOnly, so script on (or
+	// injected into) the backend cannot read the proxy's clearance token.
+	// Stages 2 and 3 are written by the challenge page's own JavaScript and
+	// cannot carry the flag - see the comment on the stage-1 Set-Cookie in
+	// middleware.go before "fixing" them to match.
+	if !strings.Contains(strings.ToLower(rec.Result().Header.Get("Set-Cookie")), "httponly") {
+		t.Error("Set-Cookie is not HttpOnly")
 	}
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-1 challenge")
@@ -906,16 +978,25 @@ func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
 		cookie string
 		pass   bool
 	}{
-		{name: "exact cookie", cookie: "__bProxy_v=" + token, pass: true},
-		{name: "stage1 cookie name as set by the proxy", cookie: "_1__bProxy_v=" + token, pass: true},
-		{name: "cookie among others", cookie: "a=1; __bProxy_v=" + token + "; b=2", pass: true},
-		{name: "wrong token", cookie: "__bProxy_v=deadbeef", pass: false},
+		{name: "stage1 cookie name as set by the proxy", cookie: mwStage1Cookie + "=" + token, pass: true},
+		{name: "cookie among others", cookie: "a=1; " + mwStage1Cookie + "=" + token + "; b=2", pass: true},
+		{name: "cookie among others, spaceless separator", cookie: "a=1;" + mwStage1Cookie + "=" + token + ";b=2", pass: true},
+		{name: "wrong token", cookie: mwStage1Cookie + "=deadbeef", pass: false},
 		{name: "no cookie", cookie: "", pass: false},
-		// BUG (wave 7 flips this): the check is a raw substring match on the
-		// whole Cookie header, not a parsed cookie lookup. Any cookie whose
-		// VALUE embeds the token passes the challenge.
-		{name: "token smuggled inside an unrelated cookie value", cookie: "junk=xx__bProxy_v=" + token, pass: true},
-		{name: "token in a cookie name suffix", cookie: "evil__bProxy_v=" + token + "=1", pass: true},
+
+		// FLIPPED BY WAVE 5: the check is a lookup of the cookie NAMED for the
+		// stage being enforced, compared in constant time over its whole value.
+		// It used to be strings.Contains over the raw Cookie header, so the
+		// three cases below all passed: the token embedded in an unrelated
+		// cookie's value, the token under an attacker-chosen name, and the
+		// token under the bare "__bProxy_v" name that the proxy never issues.
+		{name: "bare __bProxy_v name the proxy never sets", cookie: "__bProxy_v=" + token, pass: false},
+		{name: "token smuggled inside an unrelated cookie value", cookie: "junk=xx" + mwStage1Cookie + "=" + token, pass: false},
+		{name: "token in a cookie name suffix", cookie: "evil" + mwStage1Cookie + "=" + token + "=1", pass: false},
+		// A stage-2 or stage-3 cookie is not a stage-1 cookie, even carrying
+		// the right bytes: the name identifies which challenge was solved.
+		{name: "correct token under the stage-2 name", cookie: mwStage2Cookie + "=" + token, pass: false},
+		{name: "correct token under the stage-3 name", cookie: mwStage3Cookie(mwIP) + "=" + token, pass: false},
 
 		// --- the WHOLE token is compared, not a prefix of it ---------------
 		//
@@ -924,19 +1005,21 @@ func TestMiddlewareStage1CookieAcceptance(t *testing.T) {
 		// full value - an easy slip when the check moves into a helper - would
 		// cut the guessable material down to whatever is left. These cases
 		// fail the moment any proper prefix of the token is accepted.
-		{name: "first 8 chars of the token only", cookie: "__bProxy_v=" + token[:8], pass: false},
-		{name: "first 8 chars of the token then filler", cookie: "__bProxy_v=" + token[:8] + strings.Repeat("z", len(token)-8), pass: false},
-		{name: "first half of the token only", cookie: "__bProxy_v=" + token[:len(token)/2], pass: false},
-		{name: "token missing its last character", cookie: "__bProxy_v=" + token[:len(token)-1], pass: false},
+		{name: "first 8 chars of the token only", cookie: mwStage1Cookie + "=" + token[:8], pass: false},
+		{name: "first 8 chars of the token then filler", cookie: mwStage1Cookie + "=" + token[:8] + strings.Repeat("z", len(token)-8), pass: false},
+		{name: "first half of the token only", cookie: mwStage1Cookie + "=" + token[:len(token)/2], pass: false},
+		{name: "token missing its last character", cookie: mwStage1Cookie + "=" + token[:len(token)-1], pass: false},
+		{name: "token with one extra character", cookie: mwStage1Cookie + "=" + token + "z", pass: false},
 
 		// --- the cookie NAME is part of the compared string ----------------
 		//
 		// A half-applied rename that loosens only the acceptance side (say
-		// "__bProxy_v=" -> "bProxy_v=") is invisible unless a cookie carrying
+		// "_1__bProxy_v=" -> "bProxy_v=") is invisible unless a cookie carrying
 		// the correct token under a shorter name is rejected.
-		{name: "cookie name without the leading double underscore", cookie: "bProxy_v=" + token, pass: false},
-		{name: "cookie name with a single leading underscore", cookie: "_bProxy_v=" + token, pass: false},
-		{name: "cookie name without the trailing _v", cookie: "__bProxy=" + token, pass: false},
+		{name: "cookie name without the leading double underscore", cookie: "_1bProxy_v=" + token, pass: false},
+		{name: "cookie name with a single leading underscore", cookie: "_1_bProxy_v=" + token, pass: false},
+		{name: "cookie name without the trailing _v", cookie: "_1__bProxy=" + token, pass: false},
+		{name: "cookie name without the stage prefix", cookie: "1__bProxy_v=" + token, pass: false},
 	}
 
 	for _, tc := range cases {
@@ -1086,7 +1169,9 @@ func TestMiddlewareStage3CaptchaGenerationCaches(t *testing.T) {
 // of by blake3. Middleware takes the cache-hit branch and uses this value
 // verbatim as `encryptedIP`.
 func mwStage3InjectToken(token string) {
-	firewall.CacheIps.Store(mwAccessKey()+utils.StageToString(3), token)
+	// FLIPPED BY WAVE 5: the cache key is the access key itself, which now
+	// carries the suspicion level, instead of accessKey+StageToString(susLv).
+	firewall.CacheIps.Store(mwAccessKey(3), token)
 }
 
 // mwCountOpaqueGreen counts the pixels of a base64 PNG that are exactly the
@@ -1193,11 +1278,23 @@ func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(3)
 
-	// The client sends "<ip>_3__bProxy_v=<answer><publicPart>"; the substring
-	// check only requires "__bProxy_v=<full token>" to appear anywhere.
-	rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCaptchaToken())))
+	// The client sends "<ip>_3__bProxy_v=<answer><publicPart>", which for a
+	// correct answer is the whole token.
+	// FLIPPED BY WAVE 5: the name is now required to be the stage-3 name for
+	// THIS client's ip; the old substring check took the token under any name.
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie(mwIP)+"="+mwCaptchaToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	// The same token under another client's stage-3 cookie name does not clear
+	// this client: the name is bound to the ip the captcha was issued to.
+	before := env.mwBackendHits()
+	rec = mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie("198.51.100.9")+"="+mwCaptchaToken())))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, "Drag the <b>slider</b>")
+	if env.mwBackendHits() != before {
+		t.Errorf("backend hits = %d, want %d", env.mwBackendHits(), before)
+	}
 }
 
 func TestMiddlewareSuspicionLevelBlocked(t *testing.T) {
@@ -1219,7 +1316,7 @@ func TestMiddlewareSuspicionLevelBlocked(t *testing.T) {
 
 			// Even a client holding every valid token is blocked: the block is
 			// evaluated before the cookie check.
-			rec := mwDo(mwRequest("/", mwWithCookie("__bProxy_v="+mwCookieToken())))
+			rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 
 			// BUG (wave 9 flips this): a suspicion block answers 200 OK.
 			mwAssertStatus(t, rec, http.StatusOK)
@@ -1229,55 +1326,77 @@ func TestMiddlewareSuspicionLevelBlocked(t *testing.T) {
 			}
 			// The blocked branch returns before CacheIps.Store, so nothing is
 			// memoised for a blocked suspicion level.
-			if _, ok := firewall.CacheIps.Load(mwAccessKey() + utils.StageToString(tc.stage)); ok {
+			if _, ok := firewall.CacheIps.Load(mwAccessKey(tc.stage)); ok {
 				t.Error("CacheIps was populated for a blocked suspicion level")
 			}
 		})
 	}
 }
 
-// BUG (wave 5 flips this): utils.StageToString collapses susLv 0 and susLv >= 5
-// into the same "5+" token, so a whitelisted request and a blocked request share
-// a CacheIps key. Once a whitelisted request has cached an empty token under
-// "<accessKey>5+", a later level-5 request from the same client reuses that empty
-// token: the suspicion block is skipped (cache hit) and the cookie check becomes
-// `strings.Contains(cookieHeader, "__bProxy_v=")`, which ANY leftover proxy
-// cookie satisfies. The blocked client reaches the backend.
-func TestMiddlewareStageToStringCacheKeyCollision(t *testing.T) {
+// FLIPPED BY WAVE 5. The token cache used to be keyed on
+// "<accessKey>" + utils.StageToString(susLv), and StageToString collapses susLv
+// 0 and susLv >= 5 into the same "5+" token, so a whitelisted request and a
+// blocked request shared one cache entry. Once a whitelisted request had cached
+// an empty token there, a later level-5 request from the same client reused it:
+// the suspicion block was skipped (cache hit) and the cookie check degenerated
+// to strings.Contains(cookieHeader, "__bProxy_v="), which ANY leftover proxy
+// cookie satisfied, so the blocked client reached the backend.
+//
+// Two independent changes close it and this test checks both: the suspicion
+// level is now a length-prefixed component of the access key (so levels 0 and 5
+// cannot share an entry at all), and the cookie check is an exact per-stage
+// name lookup with a constant-time full-value compare (so an empty expected
+// token can never be "matched"). utils.StageToString is still lossy - fixing
+// that is core/utils' job - and this test must keep passing when it is fixed.
+func TestMiddlewareSuspicionLevelCacheKeysAreDistinct(t *testing.T) {
 	env := mwNewEnv(t)
 
-	// 1. whitelisted request populates CacheIps["<accessKey>5+"] = ""
+	// 1. a whitelisted request caches an empty token under ITS OWN key
 	env.mwSetStage(0)
 	rec := mwDo(mwRequest("/"))
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
-	cached, ok := firewall.CacheIps.Load(mwAccessKey() + "5+")
+	cached, ok := firewall.CacheIps.Load(mwAccessKey(0))
 	if !ok {
 		t.Fatal("whitelisted request did not populate CacheIps")
 	}
 	if cached.(string) != "" {
 		t.Fatalf("cached token = %q, want the empty string", cached)
 	}
+	if _, ok := firewall.CacheIps.Load(mwAccessKey(5)); ok {
+		t.Error("the whitelisted request also populated the level-5 cache entry: the two levels still share a key")
+	}
 
 	// 2. the same client is now at suspicion level 5 (blocked)
 	env.mwSetStage(5)
 
-	t.Run("no cookie still lands in the second switch default", func(t *testing.T) {
+	t.Run("no cookie is blocked by the first switch", func(t *testing.T) {
 		rec := mwDo(mwRequest("/"))
 		mwAssertStatus(t, rec, http.StatusOK)
-		// Note: no "(base 5)" suffix. The cache hit skipped the first switch, so
-		// the block comes from the SECOND switch's default branch instead.
-		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
-		mwAssertBodyNotContains(t, rec, "(base 5)")
+		// The "(base 5)" suffix says the block came from the FIRST switch: the
+		// level-5 request missed the cache instead of hitting the whitelisted
+		// request's entry.
+		mwAssertBodyContains(t, rec, "Suspicious request of level 5+ (base 5)")
 	})
 
-	t.Run("any stale proxy cookie bypasses the block entirely", func(t *testing.T) {
+	t.Run("a stale proxy cookie no longer bypasses the block", func(t *testing.T) {
 		before := env.mwBackendHits()
-		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v=whatever-stale-value")))
+		rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"=whatever-stale-value")))
 		mwAssertStatus(t, rec, http.StatusOK)
-		mwAssertBodyContains(t, rec, mwBackendBody)
-		if env.mwBackendHits() != before+1 {
-			t.Errorf("backend hits = %d, want %d: a level-5 request reached the backend today", env.mwBackendHits(), before+1)
+		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != before {
+			t.Errorf("backend hits = %d, want %d: a level-5 request reached the backend", env.mwBackendHits(), before)
+		}
+	})
+
+	t.Run("even a genuine stage-1 token does not clear level 5", func(t *testing.T) {
+		before := env.mwBackendHits()
+		rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
+		mwAssertBodyContains(t, rec, "Suspicious request of level 5+")
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != before {
+			t.Errorf("backend hits = %d, want %d", env.mwBackendHits(), before)
 		}
 	})
 }
@@ -1404,13 +1523,15 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/stats"))
+		// FLIPPED BY WAVE 5: /_bProxy/stats now requires the API secret.
+		rec := mwDo(mwRequest("/_bProxy/stats", mwWithAPISecret()))
 		mwAssertStatus(t, rec, http.StatusOK)
 		if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 			t.Errorf("Content-Type = %q, want text/plain", ct)
 		}
-		// BUG (wave 5 flips this): StageToString(0) renders as "5+", so a
-		// whitelisted domain reports itself as the most hostile stage.
+		// BUG (a later wave flips this): StageToString(0) renders as "5+", so a
+		// whitelisted domain reports itself as the most hostile stage. The fix
+		// lives in core/utils, not here.
 		mwAssertBodyContains(t, rec, "Stage: 5+")
 		mwAssertBodyContains(t, rec, "Total Requests: 1")
 		mwAssertBodyContains(t, rec, "Bypassed Requests: 1")
@@ -1428,7 +1549,8 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		firewall.KnownFingerprints[mwFP] = "Chromium"
 		firewall.BotFingerprints[mwFP] = "-bot"
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint"))
+		// FLIPPED BY WAVE 5: /_bProxy/fingerprint now requires the API secret.
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret()))
 		mwAssertStatus(t, rec, http.StatusOK)
 		mwAssertBodyContains(t, rec, "IP: "+mwIP)
 		mwAssertBodyContains(t, rec, "IP Requests: 7")
@@ -1508,9 +1630,10 @@ func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
 		name     string
 		target   string
 		wantBody string
+		secret   bool
 	}{
-		{name: "stats", target: "/_bProxy/stats?x=1", wantBody: "Total Requests: 1"},
-		{name: "fingerprint", target: "/_bProxy/fingerprint?x=1", wantBody: "IP: " + mwIP},
+		{name: "stats", target: "/_bProxy/stats?x=1", wantBody: "Total Requests: 1", secret: true},
+		{name: "fingerprint", target: "/_bProxy/fingerprint?x=1", wantBody: "IP: " + mwIP, secret: true},
 		{name: "verified", target: "/_bProxy/verified?x=1", wantBody: "verified"},
 		{name: "credits", target: "/_bProxy/credits?x=1", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
 		{name: "credits with a bare query marker", target: "/_bProxy/credits?", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
@@ -1522,7 +1645,11 @@ func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
 			env := mwNewEnv(t)
 			env.mwSetStage(0)
 
-			rec := mwDo(mwRequest(tc.target))
+			opts := []mwReqOpt{}
+			if tc.secret {
+				opts = append(opts, mwWithAPISecret())
+			}
+			rec := mwDo(mwRequest(tc.target, opts...))
 
 			mwAssertStatus(t, rec, http.StatusOK)
 			mwAssertBodyContains(t, rec, tc.wantBody)
@@ -1575,7 +1702,7 @@ func TestMiddlewareStatsReportsTotalAndBypassedSeparately(t *testing.T) {
 	env.mwSetStage(0)
 	mwDo(mwRequest("/"))
 
-	rec := mwDo(mwRequest("/_bProxy/stats"))
+	rec := mwDo(mwRequest("/_bProxy/stats", mwWithAPISecret()))
 
 	mwAssertStatus(t, rec, http.StatusOK)
 	// 3 blocked + 1 allowed + this one = 5 total; 1 allowed + this one = 2
@@ -1812,18 +1939,100 @@ func TestMiddlewareClientSuppliedRealIPIsNotOverwritten(t *testing.T) {
 	}
 }
 
-// BUG (wave 5 flips this): the challenge cookies are forwarded verbatim to the
-// backend. A compromised or nosy backend learns the proxy's challenge token.
-func TestMiddlewareProxyCookiesReachBackend(t *testing.T) {
+// FLIPPED BY WAVE 5: the challenge cookies used to be forwarded verbatim to the
+// backend, so an XSS bug or a verbose access log on any customer backend handed
+// out a working bypass for every domain the proxy fronts. They are now stripped
+// from the request before it is proxied - every cookie whose NAME carries the
+// "__bProxy_v" token, whatever prefix it wears - while unrelated cookies survive
+// untouched.
+func TestMiddlewareProxyCookiesAreStrippedBeforeForwarding(t *testing.T) {
+	token := mwCookieToken()
+
+	cases := []struct {
+		name string
+		sent string
+		want string
+	}{
+		{
+			name: "stage-1 cookie is removed, others survive",
+			sent: mwStage1Cookie + "=" + token + "; other=1",
+			want: "other=1",
+		},
+		{
+			name: "order and spacing of the survivors is normalised, not lost",
+			sent: "a=1;" + mwStage1Cookie + "=" + token + "; b=2",
+			want: "a=1; b=2",
+		},
+		{
+			name: "every stage prefix goes",
+			sent: "keep=yes; " + mwStage1Cookie + "=" + token + "; " + mwStage2Cookie + "=x; " + mwStage3Cookie(mwIP) + "=y",
+			want: "keep=yes",
+		},
+		{
+			name: "an attacker-chosen prefix carrying the token goes too",
+			sent: "evil" + mwStage1Cookie + "=" + token + "; keep=yes",
+			want: "keep=yes",
+		},
+		{
+			name: "the bare wire name goes",
+			sent: "__bProxy_v=" + token + "; keep=yes",
+			want: "keep=yes",
+		},
+		{
+			name: "a header that is nothing but proxy cookies is dropped entirely",
+			sent: mwStage1Cookie + "=" + token,
+			want: "",
+		},
+		{
+			name: "a header with no proxy cookie is passed through byte for byte",
+			sent: "a=1; b=2",
+			want: "a=1; b=2",
+		},
+		{
+			name: "a cookie whose VALUE mentions the token is not a proxy cookie",
+			sent: "note=see" + mwStage1Cookie + "=" + token,
+			want: "note=see" + mwStage1Cookie + "=" + token,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0) // whitelisted: reach the backend regardless of cookies
+
+			rec := mwDo(mwRequest("/", mwWithCookie(tc.sent)))
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, mwBackendBody)
+
+			if got := rec.Result().Header.Get("X-Echo-Cookie"); got != tc.want {
+				t.Errorf("backend saw Cookie = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(rec.Result().Header.Get("X-Echo-Cookie"), token) && !strings.Contains(tc.want, token) {
+				t.Error("the clearance token reached the backend")
+			}
+			if env.mwBackendHits() != 1 {
+				t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+			}
+		})
+	}
+}
+
+// Stripping runs AFTER the cookie check, so a client that presents a valid
+// token is still cleared - the backend just never sees it.
+func TestMiddlewareStrippingDoesNotBreakVerification(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(1)
 
-	cookie := "__bProxy_v=" + mwCookieToken() + "; other=1"
-	rec := mwDo(mwRequest("/", mwWithCookie(cookie)))
-	mwAssertStatus(t, rec, http.StatusOK)
+	token := mwCookieToken()
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+token+"; other=1")))
 
-	if got := rec.Result().Header.Get("X-Echo-Cookie"); got != cookie {
-		t.Errorf("backend saw Cookie = %q, want %q", got, cookie)
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	if got := rec.Result().Header.Get("X-Echo-Cookie"); got != "other=1" {
+		t.Errorf("backend saw Cookie = %q, want %q", got, "other=1")
+	}
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
 	}
 }
 
@@ -1838,7 +2047,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		proxy.Cloudflare = true
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint",
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
 			mwWithHeader("Cf-Connecting-Ip", "198.51.100.44")))
 
 		mwAssertBodyContains(t, rec, "IP: 198.51.100.44")
@@ -1931,7 +2140,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			firewall.AccessIps[cfIP] = 7
 			firewall.AccessIpsCookie[cfIP] = 3
 
-			rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithHeader("Cf-Connecting-Ip", cfIP)))
+			rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
 			mwAssertBodyContains(t, rec, "IP Requests: 7")
 			mwAssertBodyContains(t, rec, "IP Challenge Requests: 3")
@@ -1950,7 +2159,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		proxy.Cloudflare = true
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint"))
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret()))
 		mwAssertBodyContains(t, rec, "IP: \n")
 
 		firewall.Mutex.RLock()
@@ -1975,7 +2184,7 @@ func TestMiddlewareIPv6RemoteAddrIsMangled(t *testing.T) {
 	env.mwSetStage(0)
 
 	for _, addr := range []string{"[2001:db8::1]:51000", "[2001:db8:ffff::2]:51001"} {
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithRemoteAddr(addr)))
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithRemoteAddr(addr)))
 		mwAssertBodyContains(t, rec, "IP: [2001\n")
 	}
 
@@ -2102,6 +2311,253 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 	}
 	if env.mwBackendHits() != 0 {
 		t.Errorf("backend hits = %d, want 0 (/_bProxy/verified is served by the proxy)", env.mwBackendHits())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// access-key construction (wave 5)
+// ---------------------------------------------------------------------------
+
+// mwTokenFromSetCookie pulls the clearance token out of a stage-1 challenge
+// response.
+func mwTokenFromSetCookie(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	raw := rec.Result().Header.Get("Set-Cookie")
+	_, rest, found := strings.Cut(raw, "=")
+	if !found {
+		t.Fatalf("no Set-Cookie on the challenge response (got %q)", raw)
+	}
+	token, _, _ := strings.Cut(rest, ";")
+	if token == "" {
+		t.Fatalf("empty token in Set-Cookie %q", raw)
+	}
+	return token
+}
+
+// The access key used to be the bare concatenation
+// ip + tlsFp + reqUa + proxy.CurrHourStr. With no delimiter, bytes move freely
+// across the component boundaries, and proxy.CurrHourStr is a bare decimal
+// hour: a client sending the user agent "<ua>1" during hour 3 is issued exactly
+// the token that a client sending "<ua>" is issued during hour 13. The user
+// agent is free for the attacker to choose, so he can mint clearance ten hours
+// ahead and walk through the hourly OTP rotation that is meant to expire it.
+//
+// FIXED BY WAVE 5: every component is length-prefixed, so the boundaries are
+// unambiguous.
+func TestMiddlewareAccessKeyDoesNotMergeUserAgentIntoTheHour(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+
+	// Sanity: this pair really does collide under the old concatenation, so
+	// the assertions below are not vacuous.
+	if mwIP+mwFP+mwUA+"1"+"3" != mwIP+mwFP+mwUA+"13" {
+		t.Fatal("fixture drifted: the two identities no longer collide under the old concatenation")
+	}
+
+	proxy.CurrHourStr = "3"
+	premint := mwTokenFromSetCookie(t, mwDo(mwRequest("/", mwWithHeader("User-Agent", mwUA+"1"))))
+
+	// Ten hours pass and the OTP bucket rotates.
+	proxy.CurrHourStr = "13"
+	current := mwTokenFromSetCookie(t, mwDo(mwRequest("/")))
+
+	if premint == current {
+		t.Fatal("a user agent ending in a digit pre-minted the next hour's token: the hour is still concatenated onto the user agent without a delimiter")
+	}
+
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+premint)))
+	mwAssertStatus(t, rec, http.StatusFound)
+	if env.mwBackendHits() != 0 {
+		t.Errorf("backend hits = %d, want 0: a pre-minted token cleared the challenge", env.mwBackendHits())
+	}
+}
+
+// The proxy fronts many domains from one set of OTP secrets. Without the domain
+// in the access key, a token minted against an idle endpoint - a domain nobody
+// is attacking, which hands out stage-1 clearance to anyone who asks - is
+// equally valid on a domain that has escalated under a flood.
+//
+// FIXED BY WAVE 5: the domain is a component of the access key.
+func TestMiddlewareAccessKeyIsBoundToTheDomain(t *testing.T) {
+	const idleDomain = "idle.test.local"
+
+	env := mwNewEnv(t)
+	env.mwSetStage(1)
+	env.mwAddDomain(idleDomain, 1)
+
+	minted := mwTokenFromSetCookie(t, mwDo(mwRequest("/", mwWithHost(idleDomain))))
+
+	// Control: the token does clear the domain it was minted for.
+	rec := mwDo(mwRequest("/", mwWithHost(idleDomain), mwWithCookie(mwStage1Cookie+"="+minted)))
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	if env.mwBackendHits() != 1 {
+		t.Fatalf("backend hits = %d, want 1: the token does not even clear its own domain", env.mwBackendHits())
+	}
+
+	// The attack: the same token against the domain under a flood.
+	rec = mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+minted)))
+	mwAssertStatus(t, rec, http.StatusFound)
+	mwAssertBodyNotContains(t, rec, mwBackendBody)
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1: a token minted on %q cleared %q", env.mwBackendHits(), idleDomain, mwDomain)
+	}
+}
+
+// accessKeyFor is an injective encoding of its arguments. mwAccessKeyFor is an
+// independent re-implementation, so this pins the layout as well as the
+// property: any pair of distinct component tuples must render to distinct keys,
+// including the pairs the old concatenation collapsed.
+func TestMiddlewareAccessKeyEncodingIsInjective(t *testing.T) {
+	type identity struct {
+		domain, ip, fp, ua, hour string
+		susLv                    int
+	}
+	base := identity{mwDomain, mwIP, mwFP, mwUA, mwHourStr, 1}
+
+	// Every pair below collided under the old key, either because bytes moved
+	// across an undelimited component boundary or because the component was
+	// not in the key at all.
+	cases := []struct {
+		name  string
+		other identity
+	}{
+		{
+			name:  "a digit moves from the user agent into the hour",
+			other: identity{mwDomain, mwIP, mwFP, mwUA + "1", "3", 1},
+		},
+		{
+			name:  "a byte moves from the fingerprint into the ip",
+			other: identity{mwDomain, mwIP + mwFP[:1], mwFP[1:], mwUA, mwHourStr, 1},
+		},
+		{
+			name:  "a byte moves from the user agent into the fingerprint",
+			other: identity{mwDomain, mwIP, mwFP + mwUA[:1], mwUA[1:], mwHourStr, 1},
+		},
+		{
+			name:  "a different domain, which the old key ignored entirely",
+			other: identity{"other.test.local", mwIP, mwFP, mwUA, mwHourStr, 1},
+		},
+		{
+			name:  "a different suspicion level, which the old key ignored entirely",
+			other: identity{mwDomain, mwIP, mwFP, mwUA, mwHourStr, 3},
+		},
+		{
+			name:  "whitelisted versus hard-blocked, which StageToString still renders identically",
+			other: identity{mwDomain, mwIP, mwFP, mwUA, mwHourStr, 5},
+		},
+	}
+
+	build := func(id identity) string {
+		return accessKeyFor(id.domain, id.ip, id.fp, id.ua, id.hour, id.susLv)
+	}
+	oldBuild := func(id identity) string { return id.ip + id.fp + id.ua + id.hour }
+
+	if got, want := build(base), mwAccessKey(1); got != want {
+		t.Fatalf("accessKeyFor = %q, want %q", got, want)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if oldBuild(base) != oldBuild(tc.other) {
+				t.Error("the old concatenation did not collide on this pair: the fixture no longer demonstrates what it claims")
+			}
+			if build(base) == build(tc.other) {
+				t.Errorf("accessKeyFor collapsed two distinct identities onto %q", build(base))
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gated mitigation-state endpoints (wave 5)
+// ---------------------------------------------------------------------------
+
+// FIXED BY WAVE 5: /_bProxy/stats and /_bProxy/fingerprint were served to any
+// client that cleared the challenge. stats reports live bypassed-r/s, which
+// tells an attacker in real time whether his flood is getting through, plus the
+// build fingerprint; fingerprint reports his own ratelimit counters and the
+// proxy's view of his TLS fingerprint, which is a free oracle for tuning an
+// evasion. Both now require the API secret, compared in constant time, and
+// answer a plain 404 - not 401 or 403 - so the endpoints cannot be discovered
+// by probing.
+func TestMiddlewareMitigationStateEndpointsAreGated(t *testing.T) {
+	leaks := map[string][]string{
+		"/_bProxy/stats":       {"Bypassed R/s", "Total Requests", "Proxy Fingerprint", "mw-proxy-fingerprint"},
+		"/_bProxy/fingerprint": {"IP Requests", "SusLV", "Fingerprint: "},
+	}
+
+	cases := []struct {
+		name    string
+		secret  string // configured proxy.APISecret, "" means leave the fixture's
+		header  string
+		allowed bool
+	}{
+		{name: "no header at all", allowed: false},
+		{name: "wrong secret", header: "not-the-secret", allowed: false},
+		{name: "a prefix of the secret", header: mwAPISecret[:len(mwAPISecret)-1], allowed: false},
+		{name: "the secret with one byte appended", header: mwAPISecret + "x", allowed: false},
+		{name: "the admin secret is not the api secret", header: mwAdminSecret, allowed: false},
+		{name: "empty secret configured, empty header sent", secret: "-empty-", header: "", allowed: false},
+		{name: "correct secret", header: mwAPISecret, allowed: true},
+	}
+
+	for path, leaked := range leaks {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					env := mwNewEnv(t)
+					env.mwSetStage(0)
+					if tc.secret == "-empty-" {
+						proxy.APISecret = ""
+					}
+
+					opts := []mwReqOpt{}
+					if tc.header != "" {
+						opts = append(opts, mwWithHeader("Proxy-Secret", tc.header))
+					}
+					rec := mwDo(mwRequest(path, opts...))
+
+					if tc.allowed {
+						mwAssertStatus(t, rec, http.StatusOK)
+						mwAssertBodyContains(t, rec, leaked[0])
+						return
+					}
+
+					mwAssertStatus(t, rec, http.StatusNotFound)
+					if body := rec.Body.String(); body != "404 Not Found" {
+						t.Errorf("body = %q, want exactly %q: an unauthorised probe must be indistinguishable from a missing endpoint", mwTrunc(body, 200), "404 Not Found")
+					}
+					if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+						t.Errorf("Content-Type = %q, want text/plain", ct)
+					}
+					for _, secretish := range leaked {
+						mwAssertBodyNotContains(t, rec, secretish)
+					}
+					if env.mwBackendHits() != 0 {
+						t.Errorf("backend hits = %d, want 0: an unauthorised probe must not be proxied either", env.mwBackendHits())
+					}
+				})
+			}
+		})
+	}
+}
+
+// The gate is the API secret, not the challenge: clearing the challenge is not
+// enough, and the two other reserved endpoints stay open because the captcha
+// page fetches /_bProxy/verified and the GPL requires /_bProxy/credits.
+func TestMiddlewareUngatedReservedPathsStayOpen(t *testing.T) {
+	for _, path := range []string{"/_bProxy/verified", "/_bProxy/credits"} {
+		t.Run(path, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0)
+
+			rec := mwDo(mwRequest(path))
+			mwAssertStatus(t, rec, http.StatusOK)
+			if env.mwBackendHits() != 0 {
+				t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
+			}
+		})
 	}
 }
 

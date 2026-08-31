@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"github.com/azferius/lancarsec/core/api"
 	"github.com/azferius/lancarsec/core/domains"
@@ -22,9 +23,175 @@ import (
 	"github.com/azferius/lancarsec/core/gofilter"
 )
 
+// proxyCookieSuffix is the shared suffix of every challenge cookie the proxy
+// issues: "_1"+suffix for stage 1, "_2"+suffix for stage 2 and
+// "<ip>_3"+suffix for stage 3. Renaming this token is wave 10's job - it
+// invalidates every clearance cookie in flight - so it stays spelled exactly
+// as it is on the wire today.
+const proxyCookieSuffix = "__bProxy_v"
+
 func SendResponse(str string, buffer *bytes.Buffer, writer http.ResponseWriter) {
 	buffer.WriteString(str)
 	writer.Write(buffer.Bytes())
+}
+
+// accessKeyFor renders the identity that a challenge token is minted against.
+//
+// It replaces `ip + tlsFp + reqUa + proxy.CurrHourStr`, an unseparated
+// concatenation of attacker-controlled strings with two distinct holes in it:
+//
+//  1. No delimiter, so components bleed into each other. proxy.CurrHourStr is
+//     a bare decimal hour ("0".."23"), which means a client sending the user
+//     agent "Mozilla1" during hour 3 mints exactly the token that a client
+//     sending "Mozilla" is issued during hour 13. Choosing a user agent is
+//     free, so an attacker can pre-mint clearance for a future hour and walk
+//     straight through the hourly OTP rotation that is supposed to expire it.
+//
+//  2. No domain and no stage. One proxy serves many domains from one set of
+//     OTP secrets, so a token minted against an idle endpoint - a domain
+//     sitting at stage 1 that nobody is attacking - was equally valid on a
+//     different domain that had escalated to stage 1 under a flood.
+//
+// Each component is length-prefixed as "<len>:<value>". That encoding is
+// injective: a reader takes the decimal length up to the first ':' and then
+// exactly that many bytes, so no two distinct component tuples can render to
+// the same key no matter what bytes a client puts in its user agent. The
+// leading "v1" is an encoding version tag - change it in the same commit as
+// any change to this layout, so cached keys from the old layout can never be
+// reinterpreted under the new one.
+func accessKeyFor(domainName, ip, tlsFp, userAgent, hour string, susLv int) string {
+	parts := [...]string{"v1", domainName, ip, tlsFp, userAgent, hour, strconv.Itoa(susLv)}
+
+	size := 0
+	for _, part := range parts {
+		size += len(part) + 4
+	}
+
+	var key strings.Builder
+	key.Grow(size)
+	for _, part := range parts {
+		key.WriteString(strconv.Itoa(len(part)))
+		key.WriteByte(':')
+		key.WriteString(part)
+	}
+	return key.String()
+}
+
+// challengeCookieName is the name of the cookie a client is expected to
+// present for a given suspicion level. Levels with no challenge (0, and
+// anything from 4 up, which is a hard block) have no cookie and return "".
+func challengeCookieName(susLv int, ip string) string {
+	switch susLv {
+	case 1:
+		return "_1" + proxyCookieSuffix
+	case 2:
+		return "_2" + proxyCookieSuffix
+	case 3:
+		// The stage-3 page writes this name from JavaScript; see the
+		// document.cookie call in the captcha template below.
+		return ip + "_3" + proxyCookieSuffix
+	default:
+		return ""
+	}
+}
+
+// requestCookie returns the value of the request cookie whose name is exactly
+// `name`. It is deliberately NOT a substring test over the raw Cookie header.
+func requestCookie(request *http.Request, name string) (string, bool) {
+	if cookie, err := request.Cookie(name); err == nil {
+		return cookie.Value, true
+	}
+
+	// net/http silently drops any cookie pair whose NAME is not a valid HTTP
+	// token, and the stage-3 cookie name embeds the client IP - an IPv6
+	// address contains ':' and '[', neither of which is a token character. So
+	// fall back to walking the header ourselves rather than making stage 3
+	// permanently unsolvable for those clients. This is still an exact name
+	// match on a properly split header, never a substring test.
+	for _, header := range request.Header.Values("Cookie") {
+		for _, pair := range strings.Split(header, ";") {
+			cookieName, cookieValue, found := strings.Cut(strings.TrimSpace(pair), "=")
+			if found && cookieName == name {
+				return cookieValue, true
+			}
+		}
+	}
+	return "", false
+}
+
+// stripProxyCookies removes every challenge cookie from the request before it
+// is forwarded upstream. The backend has no use for the proxy's clearance
+// token, and handing it over means an XSS bug or a verbose access log on the
+// backend leaks a working bypass for the entire proxy.
+func stripProxyCookies(request *http.Request) {
+	headers := request.Header.Values("Cookie")
+	if len(headers) == 0 {
+		return
+	}
+
+	rewritten := make([]string, 0, len(headers))
+	changed := false
+	for _, header := range headers {
+		if !strings.Contains(header, proxyCookieSuffix) {
+			rewritten = append(rewritten, header)
+			continue
+		}
+
+		changed = true
+		pairs := strings.Split(header, ";")
+		kept := make([]string, 0, len(pairs))
+		for _, pair := range pairs {
+			pair = strings.TrimSpace(pair)
+			cookieName, _, _ := strings.Cut(pair, "=")
+			// Matched on the suffix, not on equality: "_1__bProxy_v",
+			// "<ip>_3__bProxy_v" and any other prefix an attacker invents all
+			// carry the same token and all have to go.
+			if strings.Contains(cookieName, proxyCookieSuffix) {
+				continue
+			}
+			kept = append(kept, pair)
+		}
+		if len(kept) != 0 {
+			rewritten = append(rewritten, strings.Join(kept, "; "))
+		}
+	}
+
+	if !changed {
+		return
+	}
+	if len(rewritten) == 0 {
+		request.Header.Del("Cookie")
+		return
+	}
+	request.Header["Cookie"] = rewritten
+}
+
+// authorisedProxyEndpoint reports whether a request carries the API secret in
+// the same header core/api reads.
+//
+// /_bProxy/stats reports live bypassed-requests-per-second, which is direct
+// feedback to an attacker on whether his flood is getting through, plus the
+// build fingerprint; /_bProxy/fingerprint reports the caller's ratelimit
+// counters and the proxy's view of his TLS fingerprint, which is a free oracle
+// for tuning an evasion. Both used to be served to anyone who cleared the
+// challenge.
+func authorisedProxyEndpoint(request *http.Request) bool {
+	secret := proxy.APISecret
+	if secret == "" {
+		// An unset secret must not turn into "everyone matches the empty
+		// string".
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(request.Header.Get("Proxy-Secret")), []byte(secret)) == 1
+}
+
+// proxyEndpointNotFound answers an unauthorised proxy endpoint with a plain
+// 404 instead of 401/403, so probing cannot tell "this endpoint exists and you
+// do not have the secret" apart from "there is no such endpoint".
+func proxyEndpointNotFound(writer http.ResponseWriter, buffer *bytes.Buffer) {
+	writer.Header().Set("Content-Type", "text/plain")
+	writer.WriteHeader(http.StatusNotFound)
+	SendResponse("404 Not Found", buffer, writer)
 }
 
 func Middleware(writer http.ResponseWriter, request *http.Request) {
@@ -193,8 +360,14 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	encryptedIP := ""
 	hashedEncryptedIP := ""
 	susLvStr := utils.StageToString(susLv)
-	accessKey := ip + tlsFp + reqUa + proxy.CurrHourStr
-	encryptedCache, encryptedExists := firewall.CacheIps.Load(accessKey + susLvStr)
+	// The suspicion level is part of accessKey, so accessKey IS the cache key.
+	// The old key was `accessKey + utils.StageToString(susLv)`, and
+	// StageToString collapses 0 and everything from 5 up into "5+": a
+	// whitelisted request and a blocked request shared one cache entry, and
+	// the whitelisted one cached an empty token that then satisfied the
+	// blocked one's cookie check.
+	accessKey := accessKeyFor(domainName, ip, tlsFp, reqUa, proxy.CurrHourStr, susLv)
+	encryptedCache, encryptedExists := firewall.CacheIps.Load(accessKey)
 
 	if !encryptedExists {
 		switch susLv {
@@ -213,7 +386,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			SendResponse("Blocked by BalooProxy.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
 			return
 		}
-		firewall.CacheIps.Store(accessKey+susLvStr, encryptedIP)
+		firewall.CacheIps.Store(accessKey, encryptedIP)
 	} else {
 		encryptedIP = encryptedCache.(string)
 		cachedHIP, foundCachedHIP := firewall.CacheIps.Load(encryptedIP)
@@ -223,7 +396,24 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	//Check if client provided correct verification result
-	if !strings.Contains(request.Header.Get("Cookie"), "__bProxy_v="+encryptedIP) {
+	//
+	// The cookie is looked up BY NAME for the stage actually being enforced and
+	// its whole value is compared in constant time. This used to be
+	// strings.Contains(request.Header.Get("Cookie"), "__bProxy_v="+encryptedIP)
+	// over the raw header, which accepted the token wherever it appeared: inside
+	// an unrelated cookie's value ("junk=xx__bProxy_v=<token>"), under a cookie
+	// name an attacker picked ("evil__bProxy_v=<token>"), or - when encryptedIP
+	// was empty, as it is for a whitelisted or cache-collided request - on the
+	// strength of any leftover proxy cookie at all.
+	cookieName := challengeCookieName(susLv, ip)
+	verified := false
+	if cookieName != "" && encryptedIP != "" {
+		if presented, found := requestCookie(request, cookieName); found {
+			verified = subtle.ConstantTimeCompare([]byte(presented), []byte(encryptedIP)) == 1
+		}
+	}
+
+	if !verified {
 
 		firewall.Mutex.Lock()
 		firewall.WindowAccessIpsCookie[proxy.Last10SecondTimestamp][ip]++
@@ -234,7 +424,17 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		case 0:
 			//This request is not to be challenged (whitelist)
 		case 1:
-			writer.Header().Set("Set-Cookie", "_1__bProxy_v="+encryptedIP+"; SameSite=Lax; path=/; Secure")
+			// HttpOnly. Stage 1 is issued by the proxy and read back by the
+			// proxy; no page ever needs it from script, so script - including
+			// script injected into the backend - must not be able to read the
+			// clearance token.
+			//
+			// Stages 2 and 3 CANNOT be HttpOnly and that is not an oversight:
+			// both are written by the challenge page's own JavaScript with
+			// document.cookie (see the templates below), and a browser refuses
+			// to let script set an HttpOnly cookie. Adding the flag to those
+			// two would make both challenges permanently unsolvable.
+			writer.Header().Set("Set-Cookie", "_1"+proxyCookieSuffix+"="+encryptedIP+"; SameSite=Lax; path=/; Secure; HttpOnly")
 			http.Redirect(writer, request, request.URL.RequestURI(), http.StatusFound)
 			return
 		case 2:
@@ -335,10 +535,18 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	switch request.URL.Path {
 	case "/_bProxy/stats":
+		if !authorisedProxyEndpoint(request) {
+			proxyEndpointNotFound(writer, buffer)
+			return
+		}
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("Stage: "+utils.StageToString(domainData.Stage)+"\nTotal Requests: "+strconv.Itoa(domainData.TotalRequests)+"\nBypassed Requests: "+strconv.Itoa(domainData.BypassedRequests)+"\nTotal R/s: "+strconv.Itoa(domainData.RequestsPerSecond)+"\nBypassed R/s: "+strconv.Itoa(domainData.RequestsBypassedPerSecond)+"\nProxy Fingerprint: "+proxy.Fingerprint, buffer, writer)
 		return
 	case "/_bProxy/fingerprint":
+		if !authorisedProxyEndpoint(request) {
+			proxyEndpointNotFound(writer, buffer)
+			return
+		}
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("IP: "+ip+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
 		return
@@ -365,6 +573,10 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
+
+	//The backend never needs the proxy's own challenge cookies, and leaking
+	//them to it hands out a bypass for every domain this proxy fronts.
+	stripProxyCookies(request)
 
 	//Allow backend to read client information
 	request.Header.Add("x-real-ip", ip)

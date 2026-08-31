@@ -95,6 +95,15 @@ func mwResetIdentityHeaders(r *http.Request) {
 	delete(h, "Proxy-Tls-Name")
 }
 
+// mwResetCookie puts the challenge cookie back. Since wave 5 Middleware strips
+// every challenge cookie from the request before forwarding it upstream, so a
+// reused *http.Request loses its clearance after the first iteration and every
+// later iteration would silently measure the stage-1 challenge path instead of
+// the hot path. Its cost is included in BenchmarkMiddlewareHarnessBaseline.
+func mwResetCookie(r *http.Request, cookie string) {
+	r.Header.Set("Cookie", cookie)
+}
+
 // mwTrimBenchLogs keeps domains.DomainsData[mwDomain].LastLogs from growing
 // without bound over millions of iterations. utils.AddLogs appends on every
 // bypassed request and nothing trims it inside a benchmark run (the monitor
@@ -120,19 +129,21 @@ func BenchmarkMiddlewareHotPath(b *testing.B) {
 	env := mwNewBenchEnv(b)
 	env.mwSetStage(1)
 
-	cookie := "__bProxy_v=" + mwCookieToken()
+	cookie := mwStage1Cookie + "=" + mwCookieToken()
 	req := mwRequest("/", mwWithCookie(cookie))
 	w := mwNewNullWriter()
 
 	// Warm the encryption cache exactly as a live proxy would be warm.
 	Middleware(w, req)
 	mwResetIdentityHeaders(req)
+	mwResetCookie(req, cookie)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		Middleware(w, req)
 		mwResetIdentityHeaders(req)
+		mwResetCookie(req, cookie)
 		if i%mwBenchTrimEvery == mwBenchTrimEvery-1 {
 			mwTrimBenchLogs()
 		}
@@ -150,7 +161,7 @@ func BenchmarkMiddlewareHotPathParallel(b *testing.B) {
 	env := mwNewBenchEnv(b)
 	env.mwSetStage(1)
 
-	cookie := "__bProxy_v=" + mwCookieToken()
+	cookie := mwStage1Cookie + "=" + mwCookieToken()
 	Middleware(mwNewNullWriter(), mwRequest("/", mwWithCookie(cookie)))
 
 	b.ReportAllocs()
@@ -162,6 +173,7 @@ func BenchmarkMiddlewareHotPathParallel(b *testing.B) {
 		for pb.Next() {
 			Middleware(w, req)
 			mwResetIdentityHeaders(req)
+			mwResetCookie(req, cookie)
 			n++
 			if n%mwBenchTrimEvery == 0 {
 				mwTrimBenchLogs()
@@ -253,6 +265,7 @@ func BenchmarkMiddlewareChallengeStage1Parallel(b *testing.B) {
 // harness itself adds to the benchmarks above (the identity-header reset), so
 // it can be subtracted.
 func BenchmarkMiddlewareHarnessBaseline(b *testing.B) {
+	cookie := mwStage1Cookie + "=" + mwCookieToken()
 	req := mwRequest("/")
 	req.Header.Add("x-real-ip", mwIP)
 	req.Header.Add("proxy-real-ip", mwIP)
@@ -263,5 +276,6 @@ func BenchmarkMiddlewareHarnessBaseline(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		mwResetIdentityHeaders(req)
+		mwResetCookie(req, cookie)
 	}
 }
