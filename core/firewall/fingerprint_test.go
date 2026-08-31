@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -756,13 +757,15 @@ func TestForbiddenFingerprintIsIntact(t *testing.T) {
 		}
 		label, ok := ForbiddenFingerprints[httpFloodFingerprint]
 		if !ok {
-			var shipped string
-			for k := range ForbiddenFingerprints {
-				shipped = k
+			shipped := make([]string, 0, len(ForbiddenFingerprints))
+			for k, v := range ForbiddenFingerprints {
+				shipped = append(shipped, v+" -> "+k)
 			}
-			t.Fatalf("the Http-Flood block-list key changed.\nshipped: %q\n   want: %q\n"+
-				"ForbiddenFingerprints is the only table that hard-blocks, and this is its only "+
-				"entry: a single altered digit disarms it silently.", shipped, httpFloodFingerprint)
+			sort.Strings(shipped)
+			t.Fatalf("the Http-Flood (1) block-list key changed.\nwant: %q\nshipped:\n  %s\n"+
+				"ForbiddenFingerprints is the only table that hard-blocks: a single altered "+
+				"digit disarms this entry silently.",
+				httpFloodFingerprint, strings.Join(shipped, "\n  "))
 		}
 		if label != "Http-Flood (1)" {
 			t.Errorf("ForbiddenFingerprints[httpFloodFingerprint] = %q, want %q", label, "Http-Flood (1)")
