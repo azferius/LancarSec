@@ -84,7 +84,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 1 | ~~Repo hygiene, secret purge, history rewrite~~ **DONE 2026-08-30** | See "Wave 1 outcome" below. |
 | 2 | ~~Toolchain, dependency graph, module path~~ **DONE 2026-08-30** | See "Wave 2 outcome" below. |
 | 3 | ~~Test harness, benchmark baseline, CI gates~~ **DONE 2026-08-31** | See "Wave 3 outcome" below. |
-| 4 | Config load unification | `ReloadConfig` is a 131-line divergent copy-paste of `config.Load`. Until they are one function, every fix must be written twice or it silently regresses on `reload`. |
+| 4 | ~~Config load unification~~ **DONE 2026-08-31** | See "Wave 4 outcome" below. |
 | 5 | Secrets, token derivation, admin auth | Lands after wave 4 so each fix lands in exactly one place. |
 | 6 | Client identity: trusted-proxy + IPv6 | Changes what the ratelimit map *keys* are. Wave 7's sharding is only meaningful once the key space is bounded. |
 | 7 | Hot-path concurrency rewrite | Largest and riskiest. Needs the toolchain (2), the tests and benchmark baseline (3), and the corrected keys (6). |
@@ -198,18 +198,59 @@ churn peaks.
   `utils.AddDomain` and the debug profilers are untestable without changing non-test code
   (hardcoded URLs, hardcoded CWD-relative writes) and were left uncovered rather than tested around.
 
-### Wave 4 notes (in progress)
+### Wave 4 outcome (2026-08-31)
 
-**There is no import cycle today** — a claim in an earlier version of this file was wrong. The only
-edge is `core/config` → `core/server`, one line: `core/config/init.go:130` assigns
-`&server.RoundTripper{}`. `core/server` does not import `core/config` at all. The cycle is
-*prospective*: it appears the moment `monitor.go`'s `commands()` calls `config.ReloadConfig()`.
+**This is the first wave that changes runtime behaviour.** Everything before it was hygiene,
+tooling and tests.
 
-`RoundTripper` extracts cleanly — it reads no domain settings (`req.Host` is only a map key), its
-error page is static HTML, and its closure imports nothing from this module. Plan: extract
-`core/transport` as a leaf, then flip the direction so `core/server` imports `core/config`. That
-also unblocks `core/api` → `core/config`, needed to fix the `RELOAD` admin action, which today is a
-`Lock()` immediately followed by an `Unlock()` and does nothing.
+There is now exactly one code path from `config.json` to the running proxy, in
+`core/config/pipeline.go`:
+
+    parse -> normalise -> validate -> build -> publish
+
+with the invariant that **everything which can fail happens before anything is published**. A
+config with a bad cert path, an uncompilable rule or a `CHANGE_ME` secret now leaves the running
+proxy completely untouched. `Load` (startup) and `Reload` (the TUI) are thin wrappers over the same
+stages, so they cannot drift again — `core/server/monitor.go` went from 592 lines carrying a
+131-line hand-copied duplicate to a wrapper that reports failure and keeps serving.
+
+Fixed, each a live defect:
+- **`reload` no longer disables the JS proof-of-work.** The old reload rebuilt `DomainData` without
+  `Stage2Difficulty`, leaving it 0, and `middleware.go` slices `token[:len(token)-difficulty]` — so
+  the stage-2 page printed the exact token it was demanding. The agent found **eight** diverged
+  fields, not just that one.
+- **`reload` converges on the file.** A domain deleted from `config.json` used to keep serving to
+  its old backend until restart. It is now removed, and `transport.Reset()` closes the idle
+  connections it had pooled.
+- **Live counters and attack state survive a reload.** The old path zeroed every counter and reset
+  every domain to Stage 1 — worst possible behaviour for an operator reloading *during* an attack.
+- **The discarded `json.Decode` error** and the unguarded `domains.Domains[0]` index.
+
+**No outbound call to Baloo infrastructure remains.** The three fingerprint tables were fetched from
+`raw.githubusercontent.com/41Baloo` at every startup **with the error discarded**; they are now
+`//go:embed`ed from `global/fingerprints/`. `VersionCheck` — which panicked on any network error, so
+the proxy refused to boot without internet, and which leaked every deployment's origin IP — is
+gone, along with `core/config/structs.go` and `global/proxy/version.json`.
+
+**The gofilter `matches` panic is fixed**, verified end to end:
+
+    ip.src matches 1.2.3.4   ->  Field "ip.src" can not be used with "matches": the pattern must
+                                 be a string, but "1.2.3.4" was parsed as net.IP.
+
+Previously all four operand types panicked through an unchecked `val.(string)`, and `NewFilter` had
+no recover — so one config typo killed the proxy at startup **or on live reload**. Patched in both
+`parser.go` and `parser.y` (the yacc source) so a regeneration cannot silently undo it, and recorded
+in `core/gofilter/README.md` as a deliberate deviation from upstream.
+
+Also: background goroutines are supervised (`evaluateRatelimit`, whose death freezes the ratelimit
+clock for the whole proxy, previously had **no** panic handler at all); `core/utils/domain.go`, a
+second copy of `config.AddDomain` that omitted the Stage2Difficulty prompt, is deleted.
+
+**Integration note for future waves.** All three agents branched from the commit *before*
+`core/transport` was extracted, so one of them independently invented the dependency-injection
+approach the design phase had rejected. Reconciling took three rebases and a hand-merge. **Check
+`git merge-base` against HEAD before trusting a worktree agent's assumptions about the tree.**
+
 
 ### Quick wins — safe to land immediately
 
