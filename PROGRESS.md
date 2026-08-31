@@ -166,6 +166,80 @@ A security option that silently does nothing is worse than an absent one, becaus
 
 ---
 
+## Independent audit 2026-08-31 — wave 8 and wave 9 scope (verified against `e3bb605`)
+
+Every item below was confirmed in code by an independent audit pass. File:line is current HEAD.
+
+### Wave 8 — upstream transport and response path
+
+1. **Pooled-buffer aliasing (top priority, correctness + disclosure).** `core/transport/transport.go:48-52` —
+   `defer bufferPool.Put(buffer)` returns the buffer while the error-page bodies (`:76-79`, `:117-122`)
+   are still `bytes.NewReader(buffer.Bytes())` streaming to a client. Another request that grabs the
+   buffer and `Reset()`s it corrupts the first client's response mid-stream — exactly during backend
+   outages when error pages are served. Also a duplicated `resp.Body.Close()` at `:89` and `:117`.
+2. **`InsecureSkipVerify: true`** at `transport.go:136` — any MITM between proxy and origin
+   reads/injects all traffic. Add `backend_tls_verify` opt-out, default verify.
+3. **Shared transport singleton** `transport.go:142-149` — `LoadOrStore` stores the same
+   `defaultTransport` for every domain key; `MaxConnsPerHost: 10`, no `MaxIdleConnsPerHost`
+   (default 2), no `ResponseHeaderTimeout`. Concurrency to the origin caps at 10 and 8/10
+   connections re-dial under load.
+4. **5xx masked as 200 + unescaped HTML** `transport.go:76-79, 119-122` — error pages respond
+   StatusCode 200 and write raw `errMsg` into `srcdoc="` (`:104-106`); a `"` in a backend error
+   breaks the attribute and attacker-flattened backend HTML/JS executes in the origin's error page.
+   Escape it, return the real status, make error-body passthrough config-gated.
+5. **No `BufferPool` on the ReverseProxy** — construction is now at `core/config/pipeline.go:385-389`
+   (not `init.go:126-130` as the old audit says).
+6. **Server TLS** `core/server/serve.go:64-68` — no `MinVersion` (TLS 1.0/1.1 negotiable); inert
+   `Renegotiation` client-option on a server config (`:67`); `http2.ConfigureServer` on the plain
+   :80 listeners (`:39, :72`) with discarded errors.
+7. **Port-80 redirect** `serve.go:92` — `r.URL.Path+r.URL.RawQuery` with no `?`, and 301 is cached
+   by browsers. Also the port-80 counter takes `firewall.Mutex.Lock()` on an unauthenticated path
+   (`:86-90`) — DoS lever.
+8. **Webhooks** `core/utils/discord.go:248-249` — `&http.Client{}` with no timeout, response
+   discarded; `InitPlaceholders` indexes `RequestLogger[0]`/`[len-1]` unguarded (`:18-19`, panic on
+   empty log); `quickchart-go` still in `go.mod` (`:201`).
+9. **Fingerprint builder perf** `core/firewall/fingerprint.go:56-68` — per-element `fmt.Sprintf`
+   into a Builder. (The GREASE `[1:]`/`[:1]` bug in the same file is being fixed separately.)
+10. Minor: `GetCertificate` returns the address of a stack copy per handshake (`core/domains/util.go:16-24`).
+
+### Wave 9 — challenge rendering, XSS, middleware decomposition
+
+1. **Reflected XSS via interpolated IP is already dead** — wave 6 canonicalizes identity through
+   `parseClientAddr`/`netip.ParseAddr` (`middleware.go:100-110, 583-584, 316-321`); payloads fail to
+   parse. Do NOT claim to fix it. Still do the `html/template` move as defence-in-depth.
+2. **Stage 3 is unsolvable for IPv6 clients (live bug).** The raw IPv6 address in the cookie name
+   (`challengeCookieName`, `middleware.go:409-422`) contains `:`, which browsers reject in
+   `document.cookie` names. Drop `ip` from the cookie name.
+3. **CDN PoW supply chain (highest wave-9 priority).** `middleware.go:878` loads
+   `cdn.jsdelivr.net/gh/41Baloo/balooPow@main` with no SRI, plus crypto-js 4.0.0 (predates
+   CVE-2023-46233 fixed in 4.2.0). Repo owner or a jsDelivr outage neuter stage 2 for every
+   challenged visitor mid-attack. Self-host the script; this is also the last outbound Baloo
+   dependency (the CLAUDE.md rebrand map still cites it).
+4. **Block/ratelimit/unknown-domain pages are cacheable 200s.** `SendResponse` never calls
+   `WriteHeader` (`middleware.go:35-38`), so R1/R2/R3 (`:741/:748/:756`), forbidden-fp (`:775`),
+   susLv block (`:811/:946`), and the unknown-domain 404 body (`:571-574`) are all cacheable
+   200s — shared-CDN cache poisoning of block pages. Fix with real status codes + `Cache-Control:
+   no-store` + `Retry-After`.
+5. **Open redirect on stage 1 — LIVE** `middleware.go:872` — `http.Redirect(w, r,
+   request.URL.RequestURI(), 302)`; a request line `//evil.com/` parses with `Host="evil.com"`,
+   `Location: //evil.com/` is emitted verbatim, 302 from the protected site on first visit.
+6. **No security headers on any proxy-generated page** — only `Content-Type`/`Cache-Control` on
+   stage 2/3; nothing on stage 1 or block pages; captcha frameable.
+7. **`err.Error()` to clients** `middleware.go:922/:926` (captcha encode failures).
+8. **Middleware monolith** — `middleware.go:523-1031` (523 lines, not the old audit's 335);
+   per-request field map `:691-726`; per-request admin-path concat `:996`. Decomposition targets
+   should cite these lines.
+
+### Already fixed — do not re-scope (waves 5/6)
+
+Cookie substring check → exact-match + constant-time compare, stage-1 `HttpOnly`, cookie
+stripping upstream, header Del-then-Set, CONNECT 405, body cap, rules-before-ratelimits.
+
+One audit inaccuracy: the unknown-Host `%`-verb claim does not match current code — `serve.go:82`
+is `fmt.Fprint` (verbatim). The page still 200s, echoes `r.Host`, and brands "balooProxy" (wave 10).
+
+---
+
 ## Wave 11 was blocked on a decision — DECIDED 2026-08-31: behind Cloudflare
 
 The owner confirmed LancarSec deploys **behind Cloudflare**. Cloudflare terminates TLS; the
