@@ -21,8 +21,8 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 4 | Config load/reload unification, embed fingerprints, panics→errors | **DONE** |
 | 5 | Secrets, token derivation, admin auth | **DONE** |
 | 6 | Client identity: trusted-proxy resolution, IPv6 | **DONE** |
-| 7 | Hot-path concurrency rewrite | **IN PROGRESS** — request-path clock landed (`d8dffe6`) |
-| 8 | Upstream transport and response path | not started |
+| 7 | Hot-path concurrency rewrite | **DONE** — clock `d8dffe6`, gauges `a7a3254` |
+| 8 | Upstream transport and response path | **DONE** — HEAD `ee1daf2`, verified PASS |
 | 9 | Challenge rendering, XSS, middleware decomposition | not started |
 | 10 | Wire-visible rebrand + legal notices (atomic, one commit) | not started |
 | 11 | Cf-Ja3-Hash passthrough, stage-3 captcha redesign | **UNBLOCKED** — owner decided 2026-08-31: deploy behind Cloudflare, see below |
@@ -164,11 +164,53 @@ fell 80 → 64 B/op. Wave 7 should more than reclaim this; do not let it be attr
 operator could switch on origin enforcement and get none. Wired separately with a four-case test.
 A security option that silently does nothing is worse than an absent one, because it is believed.
 
+**Wave 7.** Hot-path concurrency rewrite, landed as two commits: the request-path clock moved to
+atomics (`d8dffe6`) — ratelimit decisions no longer take the global lock — and the TUI display
+gauges followed (`a7a3254`). Build on the atomic clock, not the old `printStats` globals. The one
+deferred item, the eviction heuristic whose `(cpu<15 && mem>25) || mem>95` test never fires under
+load, landed in wave 8 as a count-based gate.
+
+**Wave 8.** Upstream transport and response path. Three worker branches (`9d2fd5e` transport,
+`1c573ef` server, `98d2e1a` misc) merged to main at `ee1daf2`; independent verification PASS
+(11 packages ok under `-race`, all CI gates green, adversarial probes passed).
+
+- **Breaking:** backends are now TLS-verified by default. Self-signed origins must set the new
+  `backend_tls_skip_verify: true` per-domain (default false = verify). Previously every upstream
+  TLS connection ran `InsecureSkipVerify: true`.
+- **Breaking:** backend 5xx responses now carry their real status code. They were masked as
+  200s; anything monitoring for 200s will see 5xx it never saw before.
+- **Breaking:** backend error-body passthrough is off by default; opt in per domain with
+  `passBackendErrors: true`. The generic error page is html-escaped and the srcdoc injection
+  (attacker-flattened backend HTML/JS) is closed.
+- Per-domain transport registry replaces the shared singleton: `MaxIdleConnsPerHost` 100,
+  `ResponseHeaderTimeout` 30s, `Configure`/`Reset` swept on config publish. Concurrency to the
+  origin no longer caps at 10 connections with 8/10 re-dialing.
+- Pooled-buffer aliasing fixed (the buffer went back to the pool while the response body was
+  still being streamed from it) and a `BufferPool` is wired onto every `ReverseProxy` — the
+  32 KiB-per-response alloc is gone.
+- Server: TLS 1.2 floor on :443, `http2.ConfigureServer` once on the TLS listener only, port-80
+  redirect is 307 with a proper query join (`/search?q=x` no longer redirects to `/searchq=x`,
+  which browsers cached), and the redirect path takes no `firewall.Mutex.Lock`.
+- Cache eviction is count-based (AUDIT.md:4822): caps `maxIpsCacheEntries`/`maxImgsCacheEntries`
+  checked every 2 min, replacing the dead heap heuristic. Per-entry TTL still needs Store-site
+  timestamps → wave 9.
+- Misc: webhook 10s timeout + guarded body, `InitPlaceholders` empty-log placeholder (was a
+  panic), fingerprint builder per-element `fmt.Sprintf` removed — output byte-identical, golden
+  tests untouched.
+
+**Deferred, recorded so it is not silently lost:** `GetCertificate` stack-copy (needs a
+cert-cache design); per-entry cache TTL (wave 9 middleware decomposition); `quickchart-go`
+removal (owner decision — replaceable with a direct `http.Post`).
+
 ---
 
 ## Independent audit 2026-08-31 — wave 8 and wave 9 scope (verified against `e3bb605`)
 
-Every item below was confirmed in code by an independent audit pass. File:line is current HEAD.
+**Wave 8 status: LANDED 2026-08-31 at `ee1daf2`.** Items 1–9 below are fixed and verified; item
+10 (`GetCertificate`) is deferred pending a cert-cache design. The item list is kept as the
+written record of what wave 8 fixed; file:line refers to the pre-wave-8 tree.
+
+Every item below was confirmed in code by an independent audit pass.
 
 ### Wave 8 — upstream transport and response path
 
