@@ -188,7 +188,9 @@ func mwSaveGlobals(tb testing.TB) {
 			tb.Errorf("resetting the trusted set: %v", err)
 		}
 
-		transport.Reset()
+		// WAVE 8: Reset now takes the keep-set of domains the current config
+		// still uses; a test reset wants nothing kept, so nil sweeps all.
+		transport.Reset(nil)
 	})
 }
 

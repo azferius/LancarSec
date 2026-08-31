@@ -91,6 +91,13 @@ var errNoDomains = errors.New("no domains configured")
 // depends on core/transport directly, which is what keeps the graph honest.
 var resetTransports = transport.Reset
 
+// configureTransports installs the fresh per-domain upstream transport. It is
+// a variable for the same reason resetTransports is: the publish tests count
+// calls, and a refused pipeline must be shown to have made none. Production
+// never reassigns it; core/config depending on core/transport directly is
+// what keeps the graph honest.
+var configureTransports = transport.Configure
+
 // mode distinguishes the two entry points. It only ever affects which domain
 // the terminal UI watches - every other stage is identical by construction.
 type mode int
@@ -386,7 +393,12 @@ func build(cfg *domains.Configuration) (*staged, error) {
 			Scheme: domain.Scheme,
 			Host:   domain.Backend,
 		})
-		dProxy.Transport = &transport.RoundTripper{}
+		dProxy.BufferPool = transport.BufferPool()
+		dProxy.Transport = &transport.RoundTripper{PassBackendErrors: domain.PassBackendErrors}
+		// The transport registry itself is global state, so it is NOT touched
+		// here: build is the last stage that can fail (a certificate below),
+		// and a refused configuration must not have already (re)configured the
+		// running domains' upstream transports. publish does that swap.
 
 		// Cloudflare terminates TLS, so no keypair is needed (or configured).
 		cert := tls.Certificate{}
@@ -588,10 +600,24 @@ func publish(s *staged, m mode) {
 
 	firewall.Mutex.Unlock()
 
-	// Drop pooled backend connections whenever a domain went away or moved, so
-	// the removed domain's idle keep-alives go with it.
+	// (Re)configure the fresh per-domain upstream transports, then drop the
+	// pooled connections of domains that went away or moved.
+	//
+	// WAVE 8: the Configure half used to sit in build, which a bad
+	// certificate on a later domain aborts -- leaving a REFUSED config's
+	// backend_tls_skip_verify applied to the still-running domains. publish
+	// is contractually unable to fail, so the swap belongs here. It runs on
+	// every publish, not only when backends moved: backendsChanged cannot see
+	// a bare backend_tls_skip_verify flip, and reloads are rare operator
+	// actions, so re-dialing them is a price worth always matching the last
+	// published config.
+	for _, domain := range s.domains {
+		configureTransports(domain.name, transport.Options{SkipVerify: s.cfg.Proxy.BackendTLSSkipVerify})
+	}
 	if converged || backendsChanged(previous, s.cfg) {
-		resetTransports()
+		// keep already holds every name of the new config plus the debug
+		// domain; Reset sweeps only the entries it does not name.
+		resetTransports(keep)
 	}
 
 	// --- terminal UI ------------------------------------------------------

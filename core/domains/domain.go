@@ -43,6 +43,12 @@ type Domain struct {
 	// normalise resolves it, so by the time build reads it, it is the final
 	// number and never zero.
 	MaxBodySize int64 `json:"maxBodySize"`
+
+	// PassBackendErrors forwards the backend's 5xx response body to the
+	// client inside the proxy's error page. Default false: the body is
+	// dropped, because it is backend-controlled content the proxy would
+	// otherwise be echoing to browsers.
+	PassBackendErrors bool `json:"passBackendErrors"`
 }
 
 type DomainSettings struct {
@@ -129,6 +135,12 @@ type Proxy struct {
 	// Zero means "unset" and normalise replaces it with the built-in default;
 	// -1 means unlimited. A per-domain MaxBodySize overrides it.
 	MaxBodySize int64 `json:"max_body_size"`
+
+	// BackendTLSSkipVerify disables verification of backend TLS certificates
+	// when true. ABSENT DEFAULTS TO FALSE -- certificates ARE verified -- so
+	// a config that predates this key keeps the secure behaviour. It applies
+	// to every domain's upstream connections; see transport.Configure.
+	BackendTLSSkipVerify bool `json:"backend_tls_skip_verify"`
 
 	AdminSecret     string            `json:"adminsecret"`
 	APISecret       string            `json:"apisecret"`
