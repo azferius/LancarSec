@@ -342,16 +342,20 @@ func ipString(addr netip.Addr) string {
 // socket peer to it on the way out, which is the honest value for that header
 // (the peer really is the machine it is talking to). Backends read the real
 // client from X-Real-Ip.
+// One pass over the header map rather than three Header.Del calls plus a
+// range: the keys net/http parses are already canonical, so comparing them
+// directly skips three CanonicalMIMEHeaderKey calls and three map lookups on
+// the hot path. Deleting from a map being ranged is defined behaviour in Go -
+// an entry removed before it is reached is not produced.
 func stripClientIdentityHeaders(header http.Header) {
-	header.Del("X-Forwarded-For")
-	header.Del("X-Real-Ip")
-	header.Del("Forwarded")
-
-	// Deleting from a map being ranged is defined behaviour in Go: an entry
-	// removed before it is reached is not produced.
 	for name := range header {
-		if strings.HasPrefix(name, "Proxy-") {
+		switch name {
+		case "X-Forwarded-For", "X-Real-Ip", "Forwarded":
 			delete(header, name)
+		default:
+			if strings.HasPrefix(name, "Proxy-") {
+				delete(header, name)
+			}
 		}
 	}
 }
