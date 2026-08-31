@@ -569,27 +569,50 @@ func mwPanicString(v any) string {
 	return ""
 }
 
-// A domain present in DomainsData but absent from DomainsMap makes the
-// unchecked type assertion at middleware.go:146 panic on a nil interface.
-// Reachable whenever a reload populates one map before the other.
-func TestMiddlewareDomainsMapMissingPanics(t *testing.T) {
+// A domain present in DomainsData but absent from DomainsMap used to make the
+// unchecked type assertion in middleware.go panic on a nil interface, and it
+// was reachable whenever a reload populated one map before the other.
+//
+// FLIPPED BY WAVE 4: the assertion is comma-ok and the skew is answered with a
+// real 404 instead of taking the handler down. Wave 4 also removed the way to
+// reach the skew in the first place (the config pipeline publishes both tables
+// inside one firewall.Mutex section, and converges them to config.json), but
+// the guard stays: DomainsMap is a sync.Map written outside that lock, and a
+// nil-interface panic is not an acceptable answer to a lookup miss that already
+// has an "unknown domain" response.
+//
+// Note the status code: this path sends a real 404, while the sibling
+// unknown-domain path a few lines above it still answers 200 with a body that
+// merely says "404 Not Found". Wave 9 owns making that one honest too.
+func TestMiddlewareDomainsMapMissingReturns404(t *testing.T) {
 	env := mwNewEnv(t)
-	_ = env
 
 	domains.DomainsMap.Delete(mwDomain)
 
 	rec := httptest.NewRecorder()
-	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
-	if got == nil {
-		t.Fatal("expected a panic when DomainsMap has no entry for a live domain, got none")
+	if got := mwRecover(func() { Middleware(rec, mwRequest("/")) }); got != nil {
+		t.Fatalf("Middleware panicked on a DomainsData/DomainsMap skew: %v", got)
 	}
-	if !strings.Contains(mwPanicString(got), "interface conversion") {
-		t.Errorf("panic = %v, want an interface conversion panic", got)
+
+	mwAssertStatus(t, rec, http.StatusNotFound)
+	mwAssertBodyContains(t, rec, "404 Not Found")
+	if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
 	}
-	// This panic happens outside the firewall.Mutex critical section, so unlike
-	// the window-bucket panic it does not wedge the proxy.
+	if env.mwBackendHits() != 0 {
+		t.Errorf("backend was reached on the skewed-domain path")
+	}
+	// The guard sits AFTER the counter bump and the version header, unlike the
+	// unknown-domain check at the top of Middleware. Pinning that here so a
+	// later wave that hoists the settings lookup has to say so.
+	if v := rec.Result().Header.Get("baloo-Proxy"); v != "1.5" {
+		t.Errorf("baloo-Proxy = %q, want 1.5", v)
+	}
+	if got := env.mwDomainData().TotalRequests; got != 1 {
+		t.Errorf("TotalRequests = %d, want 1", got)
+	}
 	if !firewall.Mutex.TryLock() {
-		t.Error("firewall.Mutex was left locked by the DomainsMap panic")
+		t.Error("firewall.Mutex was left locked by the skewed-domain path")
 	} else {
 		firewall.Mutex.Unlock()
 	}

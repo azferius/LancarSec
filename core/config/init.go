@@ -1,226 +1,98 @@
 package config
 
-import (
-	"crypto/tls"
-	"encoding/json"
-	"fmt"
-	"net/http/httputil"
-	"net/url"
-	"os"
-	"strconv"
-	"strings"
-	"time"
+// Entry points into the configuration pipeline. The stages themselves live in
+// pipeline.go; both functions below run the same ones in the same order, so
+// they cannot drift apart the way Load and server.ReloadConfig did.
 
-	"github.com/azferius/lancarsec/core/domains"
-	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/gofilter"
-	"github.com/azferius/lancarsec/core/proxy"
-	"github.com/azferius/lancarsec/core/transport"
-	"github.com/azferius/lancarsec/core/utils"
+import (
+	"errors"
+	"os"
 )
 
-func Load() {
+// Load reads config.json and publishes it, once, at startup.
+//
+// It returns an error instead of panicking: main reports it and exits 1. The
+// old code panicked on a bad secret and then, for the one case it did not
+// check - a config with zero domains - dereferenced domains.Domains[0] and
+// died with a nil-index stack trace instead.
+//
+// Load is the only entry point allowed to prompt the operator, because it is
+// the only one that runs before the terminal UI owns stdin.
+func Load() error {
 
-	file, err := os.Open("config.json")
+	cfg, err := parse(ConfigPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			Generate()
-		} else {
-			panic(err)
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := Generate(); err != nil {
+			return err
+		}
+		if cfg, err = parse(ConfigPath); err != nil {
+			return err
 		}
 	}
-	defer file.Close()
-	json.NewDecoder(file).Decode(&domains.Config)
 
-	proxy.Cloudflare = domains.Config.Proxy.Cloudflare
+	normalise(cfg)
 
-	proxy.CookieSecret = domains.Config.Proxy.Secrets["cookie"]
-	if strings.Contains(proxy.CookieSecret, "CHANGE_ME") {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ Cookie Secret Contains 'CHANGE_ME', Refusing To Load ]")
-	}
-
-	proxy.JSSecret = domains.Config.Proxy.Secrets["javascript"]
-	if strings.Contains(proxy.JSSecret, "CHANGE_ME") {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ JS Secret Contains 'CHANGE_ME', Refusing To Load ]")
-	}
-
-	proxy.CaptchaSecret = domains.Config.Proxy.Secrets["captcha"]
-	if strings.Contains(proxy.CaptchaSecret, "CHANGE_ME") {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ Captcha Secret Contains 'CHANGE_ME', Refusing To Load ]")
-	}
-
-	proxy.AdminSecret = domains.Config.Proxy.AdminSecret
-	if strings.Contains(proxy.AdminSecret, "CHANGE_ME") {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ Admin Secret Contains 'CHANGE_ME', Refusing To Load ]")
-	}
-
-	proxy.APISecret = domains.Config.Proxy.APISecret
-	if strings.Contains(proxy.APISecret, "CHANGE_ME") {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ API Secret Contains 'CHANGE_ME'. Refusing To Load ]")
-	}
-
-	// Check if the Proxy Timeout Config has been set otherwise use default values
-
-	if domains.Config.Proxy.Timeout.Idle != 0 {
-		proxy.IdleTimeout = domains.Config.Proxy.Timeout.Idle
-		proxy.IdleTimeoutDuration = time.Duration(proxy.IdleTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.Read != 0 {
-		proxy.ReadTimeout = domains.Config.Proxy.Timeout.Read
-		proxy.ReadTimeoutDuration = time.Duration(proxy.ReadTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.ReadHeader != 0 {
-		proxy.ReadHeaderTimeout = domains.Config.Proxy.Timeout.ReadHeader
-		proxy.ReadHeaderTimeoutDuration = time.Duration(proxy.ReadHeaderTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.Write != 0 {
-		proxy.WriteTimeout = domains.Config.Proxy.Timeout.Write
-		proxy.WriteTimeoutDuration = time.Duration(proxy.WriteTimeout).Abs() * time.Second
-	}
-
-	// Didn't think anyone would actually read through this mess
-	if len(domains.Config.Proxy.Colors) != 0 {
-		utils.SetColor(domains.Config.Proxy.Colors)
-	}
-
-	if domains.Config.Proxy.RatelimitWindow < 10 {
-		domains.Config.Proxy.RatelimitWindow = 10
-	}
-	proxy.RatelimitWindow = domains.Config.Proxy.RatelimitWindow
-
-	proxy.IPRatelimit = domains.Config.Proxy.Ratelimits["requests"]
-	proxy.FPRatelimit = domains.Config.Proxy.Ratelimits["unknownFingerprint"]
-	proxy.FailChallengeRatelimit = domains.Config.Proxy.Ratelimits["challengeFailures"]
-	proxy.FailRequestRatelimit = domains.Config.Proxy.Ratelimits["noRequestsSent"]
-
-	fmt.Println("Loading Fingerprints ...")
-
-	// The fingerprint tables are compiled in (see global/fingerprints); there is
-	// nothing to fetch and nothing that can fail at this point.
-
-	for i, domain := range domains.Config.Domains {
-		domains.Domains = append(domains.Domains, domain.Name)
-
-		firewallRules := []domains.Rule{}
-		rawFirewallRules := domains.Config.Domains[i].FirewallRules
-		for index, fwRule := range domains.Config.Domains[i].FirewallRules {
-
-			rule, err := gofilter.NewFilter(fwRule.Expression)
-			if err != nil {
-				panic("[ " + utils.PrimaryColor("!") + " ] [ Error Loading Custom Firewall Rules For " + domain.Name + " ( Rule " + strconv.Itoa(index) + " ) : " + utils.PrimaryColor(err.Error()) + " ]")
-			}
-
-			firewallRules = append(firewallRules, domains.Rule{
-				Filter: rule,
-				Action: fwRule.Action,
-			})
+	// A brand new config.json has no domains yet. Ask for one, then continue
+	// with the file the operator just wrote - the old code recursed into Load,
+	// which re-ran the fingerprint fetch and the version check (including its
+	// ten second sleep) a second time and appended every domain twice.
+	if len(cfg.Domains) == 0 {
+		if err := appendDomain(cfg); err != nil {
+			return err
 		}
-
-		dProxy := httputil.NewSingleHostReverseProxy(&url.URL{
-			Scheme: domain.Scheme,
-			Host:   domain.Backend,
-		})
-		dProxy.Transport = &transport.RoundTripper{}
-
-		var cert tls.Certificate = tls.Certificate{}
-		if !proxy.Cloudflare {
-			var certErr error
-			cert, certErr = tls.LoadX509KeyPair(domain.Certificate, domain.Key)
-			if certErr != nil {
-				panic("[ " + utils.PrimaryColor("!") + " ] [ " + utils.PrimaryColor("Error Loading Certificates: "+certErr.Error()) + " ]")
-			}
-		}
-
-		domains.DomainsMap.Store(domain.Name, domains.DomainSettings{
-			Name: domain.Name,
-
-			CustomRules:    firewallRules,
-			RawCustomRules: rawFirewallRules,
-
-			DomainProxy:        dProxy,
-			DomainCertificates: cert,
-			DomainWebhooks: domains.WebhookSettings{
-				URL:            domain.Webhook.URL,
-				Name:           domain.Webhook.Name,
-				Avatar:         domain.Webhook.Avatar,
-				AttackStartMsg: domain.Webhook.AttackStartMsg,
-				AttackStopMsg:  domain.Webhook.AttackStopMsg,
-			},
-
-			BypassStage1:        domain.BypassStage1,
-			BypassStage2:        domain.BypassStage2,
-			DisableBypassStage3: domain.DisableBypassStage3,
-			DisableRawStage3:    domain.DisableRawStage3,
-			DisableBypassStage2: domain.DisableBypassStage2,
-			DisableRawStage2:    domain.DisableRawStage2,
-		})
-
-		firewall.Mutex.Lock()
-
-		if domain.Stage2Difficulty == 0 {
-			domain.Stage2Difficulty = 5
-		}
-
-		domains.DomainsData[domain.Name] = domains.DomainData{
-			Name:             domain.Name,
-			Stage:            1,
-			StageManuallySet: false,
-			Stage2Difficulty: domain.Stage2Difficulty,
-			RawAttack:        false,
-			BypassAttack:     false,
-			LastLogs:         []domains.DomainLog{},
-
-			TotalRequests:    0,
-			BypassedRequests: 0,
-
-			PrevRequests: 0,
-			PrevBypassed: 0,
-
-			RequestsPerSecond:             0,
-			RequestsBypassedPerSecond:     0,
-			PeakRequestsPerSecond:         0,
-			PeakRequestsBypassedPerSecond: 0,
-			RequestLogger:                 []domains.RequestLog{},
-		}
-		firewall.Mutex.Unlock()
+		normalise(cfg)
 	}
 
-	domains.DomainsMap.Store("debug", domains.DomainSettings{
-		Name: "debug",
-	})
-
-	firewall.Mutex.Lock()
-	domains.DomainsData["debug"] = domains.DomainData{
-		Name:             "debug",
-		Stage:            0,
-		StageManuallySet: false,
-		RawAttack:        false,
-		BypassAttack:     false,
-		BufferCooldown:   0,
-		LastLogs:         []domains.DomainLog{},
-
-		TotalRequests:    0,
-		BypassedRequests: 0,
-
-		PrevRequests: 0,
-		PrevBypassed: 0,
-
-		RequestsPerSecond:             0,
-		RequestsBypassedPerSecond:     0,
-		PeakRequestsPerSecond:         0,
-		PeakRequestsBypassedPerSecond: 0,
-		RequestLogger:                 []domains.RequestLog{},
+	if err := validate(cfg); err != nil {
+		return err
 	}
 
-	firewall.Mutex.Unlock()
-
-	if len(domains.Domains) == 0 {
-		AddDomain()
-		Load()
-	} else {
-		proxy.WatchedDomain = domains.Domains[0]
+	built, err := build(cfg)
+	if err != nil {
+		return err
 	}
+
+	publish(built, modeStartup)
+	return nil
+}
+
+// Reload re-runs the pipeline against config.json while the proxy is serving.
+//
+// It converges the running proxy to the file: domains added, changed AND
+// removed. Live mitigation state (stage, stage lock, attack flags, counters)
+// survives for every domain that still exists.
+//
+// Any error means nothing was published and the proxy is still running the
+// previous configuration, untouched. Unlike Load it never prompts and never
+// makes a network call - the terminal UI owns stdin, and a `reload` must not
+// block on GitHub being reachable.
+func Reload() error {
+
+	cfg, err := parse(ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	normalise(cfg)
+
+	if err := validate(cfg); err != nil {
+		if errors.Is(err, errNoDomains) {
+			// Refuse rather than tear every domain down: a config edited to
+			// zero domains is almost always a mistake, and the old code
+			// panicked on domains.Domains[0] here anyway.
+			return errors.New("config.json defines no domains; keeping the running configuration")
+		}
+		return err
+	}
+
+	built, err := build(cfg)
+	if err != nil {
+		return err
+	}
+
+	publish(built, modeReload)
+	return nil
 }

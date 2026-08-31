@@ -42,6 +42,7 @@ func Reset() {
 		transportMap.Delete(k)
 		return true
 	})
+	defaultTransport.CloseIdleConnections()
 }
 
 func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

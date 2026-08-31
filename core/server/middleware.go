@@ -143,7 +143,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	//SyncMap because semi-readonly
 	settingsQuery, _ := domains.DomainsMap.Load(domainName)
-	domainSettings := settingsQuery.(domains.DomainSettings)
+	domainSettings, domainSettingsFound := settingsQuery.(domains.DomainSettings)
+	if !domainSettingsFound {
+		// DomainsData said this domain exists but DomainsMap has no settings for
+		// it. The config pipeline now publishes both tables under one lock, so
+		// this should be unreachable - but an unchecked assertion here took the
+		// request handler down on a nil interface, which is not a failure mode
+		// worth keeping for a lookup that has a perfectly good "unknown domain"
+		// answer already.
+		writer.Header().Set("Content-Type", "text/plain")
+		writer.WriteHeader(http.StatusNotFound)
+		SendResponse("404 Not Found", buffer, writer)
+		return
+	}
 
 	reqUa := request.UserAgent()
 

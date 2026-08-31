@@ -23,7 +23,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // funcName returns the unqualified name of the function value f points at.
-func funcName(t *testing.T, f func()) string {
+func funcName(t *testing.T, f any) string {
 	t.Helper()
 
 	full := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()

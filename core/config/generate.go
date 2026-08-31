@@ -4,15 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/azferius/lancarsec/core/domains"
-	"github.com/azferius/lancarsec/core/utils"
-	"io"
-	"net/http"
 	"os"
 	"strings"
+
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/utils"
 )
 
-func Generate() {
+// Generate writes a fresh config.json from an interactive dialogue and seeds it
+// with one domain. It no longer installs the generated configuration into
+// domains.Config: Load re-runs the whole pipeline over what was written, so
+// nothing reaches the running proxy without being validated first.
+func Generate() error {
 
 	fmt.Println("[ " + utils.PrimaryColor("No Configuration File Found") + " ]")
 	fmt.Println("[ " + utils.PrimaryColor("Configuring Proxy Now") + " ]")
@@ -44,23 +47,27 @@ func Generate() {
 		Domains: []domains.Domain{},
 	}
 
-	domains.Config = &gConfig
-
-	jsonConfig, err := json.Marshal(gConfig)
-	if err != nil {
-		panic(err)
-	}
-
-	err = os.WriteFile("config.json", jsonConfig, 0600)
-	if err != nil {
-		panic(err)
+	if err := writeConfig(&gConfig); err != nil {
+		return err
 	}
 
 	fmt.Println("")
-	AddDomain()
+	return appendDomain(&gConfig)
 }
 
-func AddDomain() {
+// AddDomain appends one interactively configured domain to the live
+// configuration and writes it back to config.json.
+func AddDomain() error {
+	if domains.Config == nil {
+		return errors.New("no configuration loaded")
+	}
+	return appendDomain(domains.Config)
+}
+
+// appendDomain is the shared body: it asks for a domain, appends it to the
+// given configuration and persists it. Nothing else is published - the caller
+// still has to run the domain through validate and build.
+func appendDomain(cfg *domains.Configuration) error {
 	fmt.Println("[ " + utils.PrimaryColor("No Domain Configurations Found") + " ]")
 	fmt.Println("[ " + utils.PrimaryColor("Configure New Domains In The Config.json") + " ]")
 	fmt.Println("")
@@ -87,34 +94,16 @@ func AddDomain() {
 		DisableRawStage2:    utils.AskInt("How Many Requests Per Second Are Low Enough To Disable Stage 2? (Bypassing Requests Still Have To Be Low Enough)", 75),
 	}
 
-	domains.Config.Domains = append(domains.Config.Domains, gDomain)
+	cfg.Domains = append(cfg.Domains, gDomain)
 
-	jsonConfig, err := json.Marshal(domains.Config)
-	if err != nil {
-		panic(err)
-	}
-
-	err = os.WriteFile("config.json", jsonConfig, 0600)
-	if err != nil {
-		panic(err)
-	}
+	return writeConfig(cfg)
 }
 
-func GetFingerprints(url string, target *map[string]string) error {
-	resp, err := http.Get(url)
+// writeConfig persists a configuration to ConfigPath.
+func writeConfig(cfg *domains.Configuration) error {
+	jsonConfig, err := json.Marshal(cfg)
 	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
+		return err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
-	}
-
-	err = json.Unmarshal(body, &target)
-	if err != nil {
-		return errors.New("failed to fetch fingerprints: " + err.Error())
-	}
-	return nil
+	return os.WriteFile(ConfigPath, jsonConfig, 0600)
 }

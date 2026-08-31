@@ -2,11 +2,7 @@ package server
 
 import (
 	"bufio"
-	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -15,14 +11,13 @@ import (
 	"time"
 
 	"github.com/azferius/lancarsec/core/screen"
-	"github.com/azferius/lancarsec/core/transport"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"golang.org/x/term"
 
+	"github.com/azferius/lancarsec/core/config"
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/gofilter"
 	"github.com/azferius/lancarsec/core/pnc"
 	"github.com/azferius/lancarsec/core/proxy"
 	"github.com/azferius/lancarsec/core/utils"
@@ -48,7 +43,7 @@ var (
 //
 // Once core/transport lands and core/config stops importing core/server, this
 // can collapse back into a plain `config.AddDomain()` call at the use site.
-var AddDomain func()
+var AddDomain func() error
 
 // monitorJobs are the long-lived background workers Monitor starts. They are a
 // table rather than four `go f()` statements so that adding a worker means
@@ -391,7 +386,11 @@ func commands() {
 					fmt.Print("[ " + utils.PrimaryColor("Command") + " ]: \033[s")
 					break
 				}
-				AddDomain()
+				if err := AddDomain(); err != nil {
+					fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ " + utils.PrimaryColor("Add Domain Failed: "+err.Error()) + " ]")
+					time.Sleep(3 * time.Second)
+					break
+				}
 				screen.Clear()
 				screen.MoveTopLeft()
 				fmt.Println("[ " + utils.PrimaryColor("Loading") + " ] ...")
@@ -441,137 +440,27 @@ func commands() {
 	}
 }
 
-// This would ideally be in package config, however import cycles seem to not allow this.
+// ReloadConfig re-reads config.json and converges the running proxy onto it.
+//
+// The body of this function used to be a hand-maintained second copy of
+// config.Load and had drifted from it in eight places - most seriously it
+// rebuilt every DomainData without Stage2Difficulty, so after any `reload` the
+// stage-2 page printed the exact token it was asking the client to find. It is
+// now a one-line call into the single pipeline in core/config.
+//
+// A failed reload leaves the proxy running its previous configuration. It used
+// to panic instead, which killed the command goroutine while it still held
+// PrintMutex: the terminal UI froze permanently and the operator lost the only
+// control channel the proxy has.
 func ReloadConfig() {
-
-	domains.Domains = []string{}
-
-	file, err := os.Open("config.json")
-	if err != nil {
-		panic(err)
+	if err := config.Reload(); err != nil {
+		fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ " + utils.PrimaryColor("Reload Failed: "+err.Error()) + " ]")
+		fmt.Println("[ " + utils.PrimaryColor("+") + " ] [ " + utils.PrimaryColor("The Previous Configuration Is Still Running") + " ]")
+		// The monitor repaints the whole screen once a second, so without this
+		// the operator never gets to read why the reload was refused. The caller
+		// already owns PrintMutex, so this only delays the next repaint.
+		time.Sleep(3 * time.Second)
 	}
-	defer file.Close()
-	json.NewDecoder(file).Decode(&domains.Config)
-
-	proxy.Cloudflare = domains.Config.Proxy.Cloudflare
-
-	proxy.CookieSecret = domains.Config.Proxy.Secrets["cookie"]
-	proxy.JSSecret = domains.Config.Proxy.Secrets["javascript"]
-	proxy.CaptchaSecret = domains.Config.Proxy.Secrets["captcha"]
-
-	// Check if the Proxy Timeout Config has been set otherwise use default values
-
-	if domains.Config.Proxy.Timeout.Idle != 0 {
-		proxy.IdleTimeout = domains.Config.Proxy.Timeout.Idle
-		proxy.IdleTimeoutDuration = time.Duration(proxy.IdleTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.Read != 0 {
-		proxy.ReadTimeout = domains.Config.Proxy.Timeout.Read
-		proxy.ReadTimeoutDuration = time.Duration(proxy.ReadTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.ReadHeader != 0 {
-		proxy.ReadHeaderTimeout = domains.Config.Proxy.Timeout.ReadHeader
-		proxy.ReadHeaderTimeoutDuration = time.Duration(proxy.ReadHeaderTimeout).Abs() * time.Second
-	}
-
-	if domains.Config.Proxy.Timeout.Write != 0 {
-		proxy.WriteTimeout = domains.Config.Proxy.Timeout.Write
-		proxy.WriteTimeoutDuration = time.Duration(proxy.WriteTimeout).Abs() * time.Second
-	}
-
-	if len(domains.Config.Proxy.Colors) != 0 {
-		utils.SetColor(domains.Config.Proxy.Colors)
-	}
-
-	proxy.IPRatelimit = domains.Config.Proxy.Ratelimits["requests"]
-	proxy.FPRatelimit = domains.Config.Proxy.Ratelimits["unknownFingerprint"]
-	proxy.FailChallengeRatelimit = domains.Config.Proxy.Ratelimits["challengeFailures"]
-	proxy.FailRequestRatelimit = domains.Config.Proxy.Ratelimits["noRequestsSent"]
-
-	for i, domain := range domains.Config.Domains {
-		domains.Domains = append(domains.Domains, domain.Name)
-
-		firewallRules := []domains.Rule{}
-		rawFirewallRules := domains.Config.Domains[i].FirewallRules
-		for _, fwRule := range domains.Config.Domains[i].FirewallRules {
-
-			rule, err := gofilter.NewFilter(fwRule.Expression)
-			if err != nil {
-				panic("[ " + utils.PrimaryColor("!") + " ] [ Error Loading Custom Firewall Rules: " + utils.PrimaryColor(err.Error()) + " ]")
-			}
-
-			firewallRules = append(firewallRules, domains.Rule{
-				Filter: rule,
-				Action: fwRule.Action,
-			})
-		}
-
-		dProxy := httputil.NewSingleHostReverseProxy(&url.URL{
-			Scheme: domain.Scheme,
-			Host:   domain.Backend,
-		})
-		dProxy.Transport = &transport.RoundTripper{}
-
-		var cert tls.Certificate = tls.Certificate{}
-		if !proxy.Cloudflare {
-			var certErr error
-			cert, certErr = tls.LoadX509KeyPair(domain.Certificate, domain.Key)
-			if certErr != nil {
-				panic("[ " + utils.PrimaryColor("!") + " ] [ " + utils.PrimaryColor("Error Loading Certificates: "+certErr.Error()) + " ]")
-			}
-		}
-
-		domains.DomainsMap.Store(domain.Name, domains.DomainSettings{
-			Name: domain.Name,
-
-			CustomRules:    firewallRules,
-			RawCustomRules: rawFirewallRules,
-
-			DomainProxy:        dProxy,
-			DomainCertificates: cert,
-			DomainWebhooks: domains.WebhookSettings{
-				URL:            domain.Webhook.URL,
-				Name:           domain.Webhook.Name,
-				Avatar:         domain.Webhook.Avatar,
-				AttackStartMsg: domain.Webhook.AttackStartMsg,
-				AttackStopMsg:  domain.Webhook.AttackStopMsg,
-			},
-
-			BypassStage1:        domain.BypassStage1,
-			BypassStage2:        domain.BypassStage2,
-			DisableBypassStage3: domain.DisableBypassStage3,
-			DisableRawStage3:    domain.DisableRawStage3,
-			DisableBypassStage2: domain.DisableBypassStage2,
-			DisableRawStage2:    domain.DisableRawStage2,
-		})
-
-		firewall.Mutex.Lock()
-		domains.DomainsData[domain.Name] = domains.DomainData{
-			Name:             domain.Name,
-			Stage:            1,
-			StageManuallySet: false,
-			RawAttack:        false,
-			BypassAttack:     false,
-			LastLogs:         []domains.DomainLog{},
-
-			TotalRequests:    0,
-			BypassedRequests: 0,
-
-			PrevRequests: 0,
-			PrevBypassed: 0,
-
-			RequestsPerSecond:             0,
-			RequestsBypassedPerSecond:     0,
-			PeakRequestsPerSecond:         0,
-			PeakRequestsBypassedPerSecond: 0,
-			RequestLogger:                 []domains.RequestLog{},
-		}
-		firewall.Mutex.Unlock()
-	}
-
-	proxy.WatchedDomain = domains.Domains[0]
 }
 
 func clearProxyCache() {
