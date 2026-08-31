@@ -37,6 +37,12 @@ type Domain struct {
 	DisableRawStage3    int             `json:"disableRawStage3"`
 	DisableBypassStage2 int             `json:"disableBypassStage2"`
 	DisableRawStage2    int             `json:"disableRawStage2"`
+
+	// MaxBodySize overrides Proxy.MaxBodySize for this domain. Zero means
+	// "inherit"; -1 means unlimited, which is what an upload endpoint needs.
+	// normalise resolves it, so by the time build reads it, it is the final
+	// number and never zero.
+	MaxBodySize int64 `json:"maxBodySize"`
 }
 
 type DomainSettings struct {
@@ -55,6 +61,11 @@ type DomainSettings struct {
 	DisableRawStage3    int
 	DisableBypassStage2 int
 	DisableRawStage2    int
+
+	// MaxBodySize is the fully resolved request body ceiling in bytes for this
+	// domain: never zero, and -1 for unlimited. The request path wraps
+	// request.Body in http.MaxBytesReader with it.
+	MaxBodySize int64
 }
 
 type DomainLog struct {
@@ -92,7 +103,33 @@ type DomainData struct {
 }
 
 type Proxy struct {
-	Cloudflare      bool              `json:"cloudflare"`
+	Cloudflare bool `json:"cloudflare"`
+
+	// CloudflareEnforceOrigin makes the proxy reject any request whose socket
+	// peer is not a trusted proxy while Cloudflare mode is on, so an attacker
+	// who has found the origin address cannot talk to it directly at all.
+	//
+	// It DEFAULTS TO FALSE, deliberately. Turning it on before DNS is fully
+	// cut over to Cloudflare - or before the operator's own management address
+	// is in TrustedProxies - locks the operator out of their own origin, and
+	// the lockout is total: there is no console fallback, because the check
+	// runs before any authentication. Off is the only safe default for a flag
+	// whose failure mode is "the operator cannot reach the box to turn it off".
+	// See core/config.normalise for where the default is applied.
+	CloudflareEnforceOrigin bool `json:"cloudflare_enforce_origin"`
+
+	// TrustedProxies is the operator-supplied list of CIDRs (a bare address is
+	// accepted and canonicalised to its single-host prefix) that are merged
+	// with the bundled Cloudflare ranges by trusted.Load. Only a peer inside
+	// one of these ranges has its Cf-Connecting-Ip / X-Real-Ip /
+	// X-Forwarded-For headers honoured as the subject IP.
+	TrustedProxies []string `json:"trusted_proxies"`
+
+	// MaxBodySize is the process-wide default request body ceiling in bytes.
+	// Zero means "unset" and normalise replaces it with the built-in default;
+	// -1 means unlimited. A per-domain MaxBodySize overrides it.
+	MaxBodySize int64 `json:"max_body_size"`
+
 	AdminSecret     string            `json:"adminsecret"`
 	APISecret       string            `json:"apisecret"`
 	Secrets         map[string]string `json:"secrets"`

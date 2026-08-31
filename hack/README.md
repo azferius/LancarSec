@@ -46,7 +46,20 @@ from `Cf-Connecting-Ip`). That mode is deliberate: it is production's mode, and
 it is the mode where the memory DoS lives, because the map key comes straight
 from an attacker-controlled header.
 
-Two things are tuned for measurement, not for realism:
+Three things are tuned for measurement, not for realism:
+
+- **`trusted_proxies` contains loopback** (`127.0.0.1/32`, `::1/128`). From wave
+  6 on, `Cf-Connecting-Ip` is only believed when the socket peer is inside the
+  trusted set — that is the whole point of the wave. Both harnesses connect from
+  loopback, so without those two entries every request would resolve to the same
+  subject IP, `loadtest.sh -i` would become inert and `memgrowth.sh` would
+  measure a flat line for the wrong reason. **Do not copy this into a real
+  config**: trusting loopback is safe only because nothing remote can be a
+  loopback peer. A production file lists Cloudflare's ranges (which
+  `core/trusted` bundles) plus the operator's own balancers, and nothing else.
+  `cloudflare_enforce_origin` stays `false` here for the same reason — with it
+  on, the harness would still work from loopback, but any preflight from another
+  host would collect 403s instead of measurements.
 
 - **All four ratelimits are set to 1e9.** The harness must measure the proxy's
   work, not its refusal to work. With real limits, `loadtest.sh` (one fixed IP)

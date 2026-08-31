@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -62,6 +63,18 @@ const (
 
 	// minRatelimitWindow is the floor applied to proxy.ratelimit_time.
 	minRatelimitWindow = 10
+
+	// defaultMaxBodySize is the request body ceiling applied when the operator
+	// did not pick one, in bytes. Ten mebibytes is far above any challenge
+	// submission or admin API call and far below what it costs to relay an
+	// unbounded upload, so it is a ceiling that only abuse notices.
+	defaultMaxBodySize int64 = 10 << 20
+
+	// unlimitedBodySize is the sentinel an operator writes to opt a domain out
+	// of the ceiling entirely. It cannot be zero: zero is what an absent JSON
+	// key decodes to, and "the operator forgot to configure it" must not be
+	// spelled the same way as "the operator wants no limit at all".
+	unlimitedBodySize int64 = -1
 )
 
 // errNoDomains is a sentinel so the startup path can tell "the operator has not
@@ -137,6 +150,19 @@ func normalise(cfg *domains.Configuration) {
 		cfg.Proxy.RatelimitWindow = minRatelimitWindow
 	}
 
+	// CloudflareEnforceOrigin is NOT defaulted. Its zero value is the safe one
+	// and it stays that way: a true default would 403 every peer outside the
+	// trusted set the moment an operator upgraded, including the operator's
+	// own management address, and the rejection happens before any
+	// authentication so there is nothing to log in with. The operator opts in
+	// once the trusted list is verified. This comment is the default.
+
+	cfg.Proxy.TrustedProxies = normaliseTrustedProxies(cfg.Proxy.TrustedProxies)
+
+	if cfg.Proxy.MaxBodySize == 0 {
+		cfg.Proxy.MaxBodySize = defaultMaxBodySize
+	}
+
 	for i := range cfg.Domains {
 		domain := &cfg.Domains[i]
 
@@ -151,7 +177,62 @@ func normalise(cfg *domains.Configuration) {
 		if domain.Stage2Difficulty == 0 {
 			domain.Stage2Difficulty = defaultStage2Difficulty
 		}
+
+		// Resolve the per-domain ceiling here rather than in build or in the
+		// request path, so exactly one place knows what "unset" means and the
+		// request path only ever sees a final number.
+		if domain.MaxBodySize == 0 {
+			domain.MaxBodySize = cfg.Proxy.MaxBodySize
+		}
 	}
+}
+
+// normaliseTrustedProxies canonicalises the operator's trusted-proxy list so
+// trusted.Load and validate both see the same strings.
+//
+// It trims, drops empties, accepts a bare address as its single-host prefix
+// (an operator writing their own jump host as "217.217.27.27" means /32, and
+// making that a hard rejection buys nothing), masks each prefix to its network
+// address so "10.0.0.7/8" and "10.0.0.0/8" are one entry, and deduplicates.
+//
+// An entry it cannot parse is left exactly as the operator wrote it, minus
+// surrounding whitespace: validate names it in the rejection, and naming back
+// a string the pipeline had silently rewritten would be worse than useless.
+//
+// It is idempotent, which normalise's contract requires: masking and
+// single-host expansion are both fixed points.
+func normaliseTrustedProxies(entries []string) []string {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	out := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		// netip.PrefixFrom silently drops an IPv6 zone, so a zoned address is
+		// deliberately NOT expanded: "fe80::1%eth0" would become the
+		// zone-less "fe80::1/128", which is a different and much larger claim
+		// than the operator wrote. It is left alone and validate rejects it.
+		if addr, err := netip.ParseAddr(entry); err == nil && addr.Zone() == "" {
+			entry = netip.PrefixFrom(addr, addr.BitLen()).String()
+		} else if prefix, err := netip.ParsePrefix(entry); err == nil {
+			entry = prefix.Masked().String()
+		}
+
+		if _, duplicate := seen[entry]; duplicate {
+			continue
+		}
+		seen[entry] = struct{}{}
+		out = append(out, entry)
+	}
+
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +256,23 @@ func validate(cfg *domains.Configuration) error {
 		if strings.Contains(secret.value, "CHANGE_ME") {
 			return fmt.Errorf("proxy %s still contains CHANGE_ME", secret.name)
 		}
+	}
+
+	// Every trusted-proxy entry is parsed HERE, before anything is published,
+	// with exactly the parser trusted.Load uses. That placement is the whole
+	// reason a reload with a broken CIDR list leaves the running trusted set
+	// intact: validate runs before build and publish, so a typo in
+	// trusted_proxies is refused with the proxy still serving on the previous
+	// list rather than half-installing a new one. See publish for the other
+	// half of the argument.
+	for _, entry := range cfg.Proxy.TrustedProxies {
+		if _, err := netip.ParsePrefix(entry); err != nil {
+			return fmt.Errorf("proxy trusted_proxies entry %q is not a CIDR: %w", entry, err)
+		}
+	}
+
+	if err := validateBodySize("proxy max_body_size", cfg.Proxy.MaxBodySize); err != nil {
+		return err
 	}
 
 	if len(cfg.Domains) == 0 {
@@ -213,6 +311,10 @@ func validate(cfg *domains.Configuration) error {
 			return fmt.Errorf("domain %q has stage2Difficulty %d, want 1..%d", domain.Name, domain.Stage2Difficulty, stage2TokenLength-1)
 		}
 
+		if err := validateBodySize(fmt.Sprintf("domain %q maxBodySize", domain.Name), domain.MaxBodySize); err != nil {
+			return err
+		}
+
 		for j, rule := range domain.FirewallRules {
 			if err := validateAction(rule.Action); err != nil {
 				return fmt.Errorf("domain %q firewall rule %d: %w", domain.Name, j, err)
@@ -220,6 +322,20 @@ func validate(cfg *domains.Configuration) error {
 		}
 	}
 
+	return nil
+}
+
+// validateBodySize rejects a body ceiling http.MaxBytesReader cannot express.
+//
+// Zero is accepted rather than rejected because normalise has already replaced
+// it, and validate is also run directly by tests over hand-built
+// configurations: treating "the key is absent" as an error here would move the
+// meaning of unset out of normalise and into two places. Anything below the
+// -1 unlimited sentinel is a typo with no possible reading.
+func validateBodySize(what string, size int64) error {
+	if size < unlimitedBodySize {
+		return fmt.Errorf("%s is %d, want a positive byte count or %d for unlimited", what, size, unlimitedBodySize)
+	}
 	return nil
 }
 
@@ -307,6 +423,9 @@ func build(cfg *domains.Configuration) (*staged, error) {
 				DisableRawStage3:    domain.DisableRawStage3,
 				DisableBypassStage2: domain.DisableBypassStage2,
 				DisableRawStage2:    domain.DisableRawStage2,
+
+				// Already resolved by normalise: never zero, -1 for unlimited.
+				MaxBodySize: domain.MaxBodySize,
 			},
 		})
 	}
@@ -353,6 +472,34 @@ func publish(s *staged, m mode) {
 	// --- process-wide settings -------------------------------------------
 	domains.Config = s.cfg
 	proxy.Cloudflare = s.cfg.Proxy.Cloudflare
+	proxy.CloudflareEnforceOrigin = s.cfg.Proxy.CloudflareEnforceOrigin
+	proxy.MaxBodySize = s.cfg.Proxy.MaxBodySize
+
+	// The trusted-proxy set is installed HERE, in publish, and not in build.
+	//
+	// trusted.Load is one call that does two things: it parses, which can
+	// fail, and it replaces a set the request path reads, which is a publish.
+	// The pipeline's invariant does not let both happen in build - build is
+	// allowed to fail, and a build that failed after having already swapped
+	// the trusted set would leave a refused configuration's idea of who is
+	// trusted running under the previous configuration's rules, which is the
+	// exact class of half-applied state wave 4 existed to delete.
+	//
+	// So the two halves are split across the two stages that can each hold
+	// one: validate does the parsing (see the ParsePrefix loop there, which
+	// names the offending string), publish does the install. A reload whose
+	// trusted_proxies list is broken is therefore refused in validate, before
+	// build allocates anything and long before this line runs, and the running
+	// proxy keeps the set it already had.
+	//
+	// The error is discarded, and this is the only place in the package that
+	// discards one. By the time publish runs, validate has already parsed
+	// every operator-supplied entry with the same parser, so the only failure
+	// left is a corrupt BUNDLED Cloudflare list - a build defect, not a
+	// configuration one - and publish is contractually unable to fail. Load
+	// replaces the set atomically or not at all, so a failure here leaves the
+	// previous set installed rather than an empty one.
+	_, _ = loadTrusted(s.cfg.Proxy.TrustedProxies)
 
 	proxy.CookieSecret = s.cfg.Proxy.Secrets["cookie"]
 	proxy.JSSecret = s.cfg.Proxy.Secrets["javascript"]

@@ -1,6 +1,12 @@
 {
     "proxy": {
         "cloudflare": true,
+        "cloudflare_enforce_origin": false,
+        "trusted_proxies": [
+            "192.0.2.0/24",
+            "2001:db8::/32"
+        ],
+        "max_body_size": 10485760,
         "ratelimit_time": 120,
         "adminsecret": "CHANGE_ME",
         "apisecret": "CHANGE_ME",
@@ -63,7 +69,8 @@
             "disableBypassStage3": 100,
             "disableRawStage3": 250,
             "disableBypassStage2": 50,
-            "disableRawStage2": 75
+            "disableRawStage2": 75,
+            "maxBodySize": 0
         },
         {
             "name": "9090.example.net",
@@ -101,7 +108,8 @@
             "disableBypassStage3": 100,
             "disableRawStage3": 250,
             "disableBypassStage2": 50,
-            "disableRawStage2": 75
+            "disableRawStage2": 75,
+            "maxBodySize": 52428800
         },
         {
             "name": "example.net",
@@ -139,7 +147,8 @@
             "disableBypassStage3": 100,
             "disableRawStage3": 250,
             "disableBypassStage2": 50,
-            "disableRawStage2": 75
+            "disableRawStage2": 75,
+            "maxBodySize": 0
         }
     ]
 }

@@ -95,6 +95,9 @@ func cfgIsolate(t *testing.T) {
 	oldAdmin, oldAPI := proxy.AdminSecret, proxy.APISecret
 	oldCookie, oldJS, oldCaptcha := proxy.CookieSecret, proxy.JSSecret, proxy.CaptchaSecret
 	oldIPRatelimit := proxy.IPRatelimit
+	oldEnforceOrigin := proxy.CloudflareEnforceOrigin
+	oldMaxBody := proxy.MaxBodySize
+	oldLoadTrusted := loadTrusted
 
 	domains.Config = nil
 	domains.Domains = []string{}
@@ -112,7 +115,26 @@ func cfgIsolate(t *testing.T) {
 		proxy.AdminSecret, proxy.APISecret = oldAdmin, oldAPI
 		proxy.CookieSecret, proxy.JSSecret, proxy.CaptchaSecret = oldCookie, oldJS, oldCaptcha
 		proxy.IPRatelimit = oldIPRatelimit
+		proxy.CloudflareEnforceOrigin = oldEnforceOrigin
+		proxy.MaxBodySize = oldMaxBody
+		loadTrusted = oldLoadTrusted
 	})
+}
+
+// cfgSpyTrusted replaces the trusted.Load seam with a recorder and returns it.
+// Every call publish makes lands in the slice, so a test can assert not only
+// what was installed but that a refused configuration installed nothing at all.
+func cfgSpyTrusted(t *testing.T) *[][]string {
+	t.Helper()
+
+	calls := &[][]string{}
+	previous := loadTrusted
+	loadTrusted = func(extra []string) (int, error) {
+		*calls = append(*calls, append([]string(nil), extra...))
+		return len(extra), nil
+	}
+	t.Cleanup(func() { loadTrusted = previous })
+	return calls
 }
 
 func cfgWrite(t *testing.T, cfg *domains.Configuration) {

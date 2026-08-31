@@ -78,6 +78,23 @@ var (
 	Cloudflare    bool
 	MaxLogLength  int
 
+	// CloudflareEnforceOrigin mirrors Proxy.CloudflareEnforceOrigin from the
+	// published configuration, the same way Cloudflare above mirrors
+	// Proxy.Cloudflare. Written only by core/config.publish. When it is true
+	// AND Cloudflare is true, the request path rejects any socket peer that is
+	// not inside the trusted-proxy set.
+	//
+	// It is false by default and stays false unless the operator opts in: see
+	// the field comment in core/domains for why that default is not
+	// negotiable.
+	CloudflareEnforceOrigin bool
+
+	// MaxBodySize mirrors Proxy.MaxBodySize - the process-wide default request
+	// body ceiling in bytes, with -1 meaning unlimited. Per-domain limits are
+	// resolved into domains.DomainSettings.MaxBodySize; this is the fallback
+	// for a request that never resolves to a configured domain.
+	MaxBodySize int64 = 10 << 20
+
 	CpuUsage string
 	RamUsage string
 

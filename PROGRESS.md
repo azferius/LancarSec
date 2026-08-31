@@ -148,6 +148,40 @@ comment says.
 
 ---
 
+## Wave 6, config half — MERGE THIS FIRST, IT HAS AN UNWIRED SEAM
+
+`core/config` landed wave 6's configuration surface ahead of `core/trusted`, so it ships with a
+placeholder where the call into that package goes. **`core/config/trusted.go` is the integration
+point and it is two lines**: import `core/trusted`, set `var loadTrusted = trusted.Load`, delete
+`trustedLoadUnwired`. The file says the same thing at the top. Until that happens the trusted set is
+empty at runtime, which means **no forwarded client-IP header is believed from anyone** — fail-closed
+against spoofing, but in Cloudflare mode it attributes every visitor to Cloudflare's own address, and
+with `cloudflare_enforce_origin` on it rejects every request. The contract is fixed:
+
+    func Load(extra []string) (int, error)
+
+New keys, all defaulted in `normalise` and rejected in `validate`, single pipeline, no second path:
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `proxy.trusted_proxies` | `[]` | Merged with the bundled Cloudflare ranges by `trusted.Load`. A bare address is accepted as its /32 or /128; prefixes are masked and deduplicated; an entry that will not parse is rejected **by name**. A zoned v6 address is refused rather than silently de-zoned. |
+| `proxy.cloudflare_enforce_origin` | `false` | **Do not default this to true.** The check runs before any authentication, so turning it on before DNS is cut over — or before the operator's own address is in the trusted list — is a total, unrecoverable lockout from the origin. Consumed by the middleware; mirrored to `proxy.CloudflareEnforceOrigin`. |
+| `proxy.max_body_size` | 10 MiB | Process-wide ceiling in bytes. `-1` is unlimited; `0` means "unset" and is replaced by the default. |
+| `domains[].maxBodySize` | inherits `proxy.max_body_size` | Per-domain override, because an upload endpoint and a static site do not want the same number. Resolved in `normalise`, so `DomainSettings.MaxBodySize` is always final and never zero. |
+
+`trusted.Load` runs in **publish**, not build. It both parses (fallible) and swaps a set the request
+path reads (a publish), and the pipeline invariant does not allow both in build — a build that failed
+after the swap would leave a refused configuration's trusted set running. So the halves are split
+across the two stages that can each hold one: `validate` parses every entry with `netip.ParsePrefix`
+and names the bad one, `publish` installs. A reload with a broken CIDR list is therefore refused
+before `build` allocates anything, and the running trusted set survives untouched.
+
+`hack/config.test.json` now trusts loopback so the load harnesses still resolve distinct subject IPs
+from `Cf-Connecting-Ip`; see `hack/README.md`. `examples/config.json` shows the format using RFC 5737
+/ RFC 3849 documentation prefixes only — a template must never ship a routable range, since trusting
+a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against the real structs by
+`TestExampleConfigTemplate` / `TestHackTemplateStillLoads`, so a template that rots fails the build.
+
 ## Traps that will cost you time
 
 - **Check `git merge-base` before trusting a subagent's view of the tree.** Wave 4 lost time to
@@ -165,6 +199,9 @@ comment says.
   invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
   happens once, atomically, after the security work.
 - **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
+- **`core/config/trusted.go` holds an unwired seam.** `loadTrusted` is a placeholder until
+  `core/trusted` is merged in; see the wave-6 section above. `go build` is green with it in place,
+  which is exactly why it is easy to ship by accident.
 
 ---
 

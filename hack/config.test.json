@@ -1,6 +1,12 @@
 {
     "proxy": {
         "cloudflare": true,
+        "cloudflare_enforce_origin": false,
+        "trusted_proxies": [
+            "127.0.0.1/32",
+            "::1/128"
+        ],
+        "max_body_size": 10485760,
         "ratelimit_time": 120,
         "adminsecret": "harness-admin-not-a-real-secret",
         "apisecret": "harness-api-not-a-real-secret",
@@ -48,7 +54,8 @@
             "disableBypassStage3": 1000000000,
             "disableRawStage3": 1000000000,
             "disableBypassStage2": 1000000000,
-            "disableRawStage2": 1000000000
+            "disableRawStage2": 1000000000,
+            "maxBodySize": 0
         }
     ]
 }
