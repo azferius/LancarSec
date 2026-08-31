@@ -31,7 +31,8 @@ it, and do not relicense the files in this directory. The top-level `LICENSE`
 
 ## What was changed from upstream
 
-Three things. None affects runtime behaviour.
+Three things. The first two are cosmetic; the third is a deliberate behaviour
+change and is the only place this package diverges from upstream semantics.
 
 1. **Line endings normalised to LF.** Upstream ships `filter_info.go`, `lexer.rl`,
    `parser.y` and `README.md` with CRLF; the rest with LF. This repo is LF-only
@@ -41,33 +42,65 @@ Three things. None affects runtime behaviour.
    `{ /*lexer.ts++; lexer.te--;*/ token_kind = token_UNPARSED` on one line;
    gofmt splits the statement onto its own line. Cosmetic only, but it is a
    deviation and it is why `diff` against upstream is not empty for this file.
+3. **The `matches` operand assertion is comma-ok (wave 4).** Upstream's
+   `predicate: token_FIELD token_TEST_MATCHES token_UNPARSED` action compiles
+   the pattern with `regexp.Compile(val.(string))`, an unchecked assertion on
+   whatever `checkFieldNameVsTypeValue` returned. That value is only a `string`
+   for an `FT_STRING`/`FT_BYTES` field whose literal parsed as neither a quoted
+   string nor colon-hex — so `net.IP`, `int`, `bool` and `[]byte` operands all
+   panicked, and `NewFilter` has no `recover()`. LancarSec replaces it with
+
+   ```go
+   pattern, isString := val.(string)
+   if !isString {
+       str := fmt.Sprintf("Field \"%s\" can not be used with \"matches\": the pattern must be a string, but \"%s\" was parsed as %T.", …)
+       filterlex.Error(str)
+       return 1
+   }
+   r_expr, err := regexp.Compile(pattern)
+   ```
+
+   so a bad operand is an ordinary parse error naming the field and the type the
+   operand actually produced, and `NewFilter` returns `(nil, error)` as it does
+   for every other malformed rule. **This is applied to both `parser.go` and
+   `parser.y`**, so regenerating the parser from the yacc grammar reproduces the
+   fix instead of silently reverting it. Covered by `matches_test.go`.
 
 Everything else is byte-identical to upstream after CRLF stripping. Verified
 per-file with `diff <(tr -d '
 ' < $GOMODCACHE/.../<f>) core/gofilter/<f>`:
-`filter_main.go`, `filter_info.go`, `nodes.go`, `parser.go`, `filter_test.go`
-and `LICENSE` are 0 diff lines; `lexer.go` is 5 (the reflow above).
+`filter_main.go`, `filter_info.go`, `nodes.go`, `filter_test.go` and `LICENSE`
+are 0 diff lines; `lexer.go` is 5 (the reflow in change 2); `parser.go` and
+`parser.y` carry change 3 and nothing else. `matches_test.go` is LancarSec's
+own file and has no upstream counterpart.
 
-Re-run that check after any edit here. If you intend to modify this package —
-for example to fix the reachable panic recorded below — record the change in
-this list so the provenance stays auditable.
+Re-run that check after any edit here. If you intend to modify this package,
+record the change in the numbered list above so the provenance stays auditable.
 
-## Known defect carried over from upstream
+## The `matches` panic — fixed in wave 4
 
-`parser.go` compiles a `matches` operand with `regexp.Compile(val.(string))`,
-an unchecked type assertion. Any `matches` rule whose right-hand side is not a
-quoted string panics:
+Recorded here because it is the reason this package needed to be patchable
+in-tree, and because the fix is the one intentional semantic deviation in the
+list above.
+
+`parser.go` used to compile a `matches` operand with
+`regexp.Compile(val.(string))`, an unchecked type assertion. Any `matches` rule
+whose right-hand side did not parse to a string panicked:
 
     ip.src matches 1.2.3.4          panic: interface {} is net.IP, not string
     ip.asn matches 1234             panic: interface {} is int, not string
     http.user_agent matches ff:ee   panic: interface {} is []uint8, not string
     proxy.attack matches true       panic: interface {} is bool, not string
 
-`NewFilter` does not recover. Both call sites — `config.buildDomain` at startup
-and `core/server/monitor.go` on live reload — are therefore one config typo away
-from killing the proxy. Not fixed here: wave 2 does not change behaviour. Fix it
-in a later wave, either with a comma-ok assertion in the vendored parser or a
-recover at both call sites.
+`NewFilter` does not recover, and both call sites — `config.buildDomain` at
+startup and `core/server/monitor.go` on live reload — were therefore one config
+typo away from killing the proxy. Wave 4 fixed it in the parser (change 3
+above), which is the right layer: a bare `recover()` at the two call sites would
+have turned the crash into a silently half-applied reload rather than a named
+error. The same four rules now produce, for example:
+
+    Field "ip.asn" can not be used with "matches": the pattern must be a string,
+    but "1234" was parsed as int.
 
 ## Regenerating the parser and lexer
 
@@ -81,8 +114,10 @@ ragel -Z lexer.rl                    # -> lexer.go   (Ragel 6.x)
 go run golang.org/x/tools/cmd/goyacc@latest -o parser.go -p filter parser.y
 ```
 
-After regenerating, re-apply changes 2 and 3 above, or `gofmt -w` and re-check
-`go vet`.
+After regenerating, re-apply change 2 above (or `gofmt -w`) and re-check
+`go vet`. Change 3 lives in `parser.y` as well, so a regenerated `parser.go`
+carries it automatically — but run `go test ./core/gofilter/` afterwards:
+`matches_test.go` is what proves it survived the round trip.
 
 ## Filter syntax (from the upstream README)
 
@@ -99,8 +134,9 @@ Not implemented upstream: `upper()`/`lower()`, the slice operator
 
 ## Known quirks — measured, not inferred (2026-08-30)
 
-These are upstream behaviours preserved as-is. They are documented here so a
-later wave can fix them deliberately rather than discover them in production.
+These are upstream behaviours, documented here so a later wave can fix them
+deliberately rather than discover them in production. All are preserved as-is
+except number 2, which wave 4 changed on purpose.
 
 1. **`or` binds tighter than `and`.** `parser.y` declares `%left token_TEST_AND`
    before `%left token_TEST_OR`, and in yacc later declarations have *higher*
@@ -109,18 +145,18 @@ later wave can fix them deliberately rather than discover them in production.
    `a == false and b == true or c == true` with `a=false, b=true, c=true`
    returns `false`. Existing rules in `config.json` were written against this
    behaviour — changing it is a breaking change, not a bugfix.
-2. **`matches` panics on a non-string operand.** In `parser.go` case 13 the
-   parser does `val.(string)` on the value returned by
+2. ~~**`matches` panics on a non-string operand.**~~ **Fixed in wave 4** — see
+   change 3 in "What was changed from upstream" and the section above. Upstream
+   `parser.go` case 13 did `val.(string)` on the value returned by
    `checkFieldNameVsTypeValue`, which is only a `string` for `FT_STRING`/`FT_BYTES`
-   fields whose literal is neither a quoted string nor colon-hex. All four of
-   these panic rather than returning an error:
-   - `http.user_agent matches ff:ee` → `interface {} is []uint8, not string`
-   - `ip.asn matches 1234` → `interface {} is int, not string`
-   - `ip.src matches 1.2.3.4` → `interface {} is net.IP, not string`
-   - `proxy.attack matches true` → `interface {} is bool, not string`
-   `NewFilter` has no `recover()`, so a typo in a rule panics the caller.
-   In LancarSec that is `config.buildDomain` (startup) and
-   `server.ReloadConfig` (`core/server/monitor.go:456`, live reload).
+   fields whose literal is neither a quoted string nor colon-hex, so all four of
+   `http.user_agent matches ff:ee`, `ip.asn matches 1234`,
+   `ip.src matches 1.2.3.4` and `proxy.attack matches true` panicked out of
+   `NewFilter` and took the caller with them — `config.buildDomain` at startup
+   and `server.ReloadConfig` on live reload. They now return a parse error
+   naming the field and the operand's real type. This entry stays in the list
+   because it is the one quirk LancarSec chose to diverge on; the rest below are
+   still preserved as-is.
 3. **`[]byte`-valued fields never match string comparisons.** `applyRange`
    matches `[]uint8` before the `default` arm, so a `[]byte` field value is
    iterated byte-by-byte and each `byte` is compared against a `string`.

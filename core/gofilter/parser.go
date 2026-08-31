@@ -742,7 +742,21 @@ filterdefault:
 		//line parser.y:292
 		{
 			if val, ok := checkFieldNameVsTypeValue(filterlex, (string)(filterDollar[1].data), token_TEST_MATCHES, filterDollar[3].data); ok {
-				r_expr, err := regexp.Compile(val.(string))
+				// LancarSec deviation from upstream kor44/gofilter: upstream
+				// writes val.(string) here, which panics for every field type
+				// whose literal does not parse as a string -- net.IP, int,
+				// bool, []byte. NewFilter has no recover, so one typo in a
+				// firewall rule killed the whole proxy at config load or at
+				// live reload. Comma-ok plus a parse error naming the field and
+				// the type the operand actually produced.
+				pattern, isString := val.(string)
+				if !isString {
+					str := fmt.Sprintf("Field \"%s\" can not be used with \"matches\": the pattern must be a string, but \"%s\" was parsed as %T.", (string)(filterDollar[1].data), (string)(filterDollar[3].data), val)
+					filterlex.Error(str)
+					return 1
+				}
+
+				r_expr, err := regexp.Compile(pattern)
 				if err != nil {
 					str := fmt.Sprintf("Incorrect reqular expresstion \"%s\": %s.", (string)(filterDollar[3].data), err)
 					filterlex.Error(str)

@@ -33,6 +33,12 @@ func main() {
 
 	fmt.Println("Starting Proxy ...")
 
+	// The TUI's `add` command runs the same wizard config.Load uses when there
+	// are no domains configured. It is wired here rather than called directly
+	// from core/server because core/config imports core/server, so the reverse
+	// import would be a cycle.
+	server.AddDomain = config.AddDomain
+
 	config.Load()
 
 	fmt.Println("Loaded Config ...")

@@ -33,6 +33,54 @@ var (
 	helpMode   = false
 )
 
+// AddDomain is the interactive add-a-domain wizard the TUI's `add` command
+// runs. It is config.AddDomain, wired by main at startup.
+//
+// It is a variable rather than a direct call because core/config imports
+// core/server (init.go needs server.RoundTripper), so core/server importing
+// core/config would be an import cycle. Verified with
+// `go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./core/config`.
+//
+// This existed as a second, drifted copy of the wizard in core/utils until
+// wave 4: utils.AddDomain omitted the Stage2Difficulty question, so every
+// domain added from the running TUI got Stage2Difficulty 0 -- the same defect
+// the reload path has. Deleting that copy is what makes the two paths agree.
+//
+// Once core/transport lands and core/config stops importing core/server, this
+// can collapse back into a plain `config.AddDomain()` call at the use site.
+var AddDomain func()
+
+// monitorJobs are the long-lived background workers Monitor starts. They are a
+// table rather than four `go f()` statements so that adding a worker means
+// adding a row -- there is no longer a launch site where someone can drop in an
+// unsupervised goroutine without it being obvious.
+//
+// Before wave 4 all four were launched bare. Three of them had
+// `defer pnc.PanicHndl()` inside, which writes crash.log and then RE-RAISES, so
+// a panic still killed the process; evaluateRatelimit had no handler at all, so
+// a panic there killed the process with no record of why. Either way the
+// ratelimit clock -- the thing that rebuilds the sliding-window totals and
+// prefills the buckets the request path writes into -- died with it.
+//
+// pnc.Supervise records the panic and restarts the worker with a capped
+// exponential backoff instead. The inner PanicHndl calls are left in place:
+// they capture the stack at the original panic site, which is strictly more
+// information than the supervisor's own frame, and their re-raise is now caught
+// one level up rather than reaching the runtime.
+var monitorJobs = []struct {
+	name string
+	run  func()
+}{
+	// Responsible for handling user-commands
+	{"commands", commands},
+	// Responsible for clearing outdated cache and data
+	{"clearProxyCache", clearProxyCache},
+	// Responsible for generating non-bruteforceable secrets
+	{"generateOTPSecrets", generateOTPSecrets},
+	// Responsible for keeping track of ratelimit
+	{"evaluateRatelimit", evaluateRatelimit},
+}
+
 func Monitor() {
 
 	defer pnc.PanicHndl()
@@ -49,17 +97,9 @@ func Monitor() {
 	proxy.CurrHour, _, _ = proxy.LastSecondTime.Clock()
 	proxy.CurrHourStr = strconv.Itoa(proxy.CurrHour)
 
-	//Responsible for handeling user-commands
-	go commands()
-
-	//Responsible for clearing outdated cache and data
-	go clearProxyCache()
-
-	//Responsible for generating non-bruteforable secrets
-	go generateOTPSecrets()
-
-	//Responsible for keeping track of ratelimit
-	go evaluateRatelimit()
+	for _, job := range monitorJobs {
+		pnc.Supervise(job.name, job.run)
+	}
 
 	PrintMutex.Lock()
 	fmt.Println("\033[" + fmt.Sprint(11+proxy.MaxLogLength) + ";1H")
@@ -345,7 +385,13 @@ func commands() {
 			case "add":
 				screen.Clear()
 				screen.MoveTopLeft()
-				utils.AddDomain()
+				if AddDomain == nil {
+					fmt.Println("[ " + utils.PrimaryColor("add is unavailable: the domain wizard was not wired at startup") + " ]")
+					fmt.Println("\033[" + fmt.Sprint(12+proxy.MaxLogLength) + ";1H")
+					fmt.Print("[ " + utils.PrimaryColor("Command") + " ]: \033[s")
+					break
+				}
+				AddDomain()
 				screen.Clear()
 				screen.MoveTopLeft()
 				fmt.Println("[ " + utils.PrimaryColor("Loading") + " ] ...")
