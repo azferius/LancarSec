@@ -44,7 +44,6 @@ LICENSE         text eol=lf
 # linguist-vendored and linguist-generated collapse the file in GitHub review
 # diffs, and a change to security data must stay visible.
 global/fingerprints/*.json text eol=lf
-global/proxy/version.json  text eol=lf
 
 # --- Binary assets: never diff, never munge -------------------------------
 *.png    binary

@@ -116,8 +116,15 @@ func TestFingerprintGolden(t *testing.T) {
 			// Chrome/Chromium sends a GREASE value in the first cipher slot and
 			// the first curve slot. Dropping index 0 is exactly right here --
 			// this is the case the "ignore first elements" comment was written
-			// for -- and the result byte-matches the "Chromium" entry that
-			// fingerprint.go ships.
+			// for -- and the result byte-matches a shipped Chromium entry.
+			//
+			// FLIPPED (wave 4, fingerprint embedding): this key is labelled
+			// "Chromium Old" in the bundled global/fingerprints data, not
+			// "Chromium". The hardcoded fallback table this test was written
+			// against called it "Chromium"; that fallback is gone, and in any
+			// production deployment the network fetch had already relabelled it
+			// this way at every boot. The bundle carries a second, newer key
+			// under the plain "Chromium" label for current Chrome builds.
 			name: "chrome-like hello with GREASE in the first slot",
 			hello: tls.ClientHelloInfo{
 				CipherSuites: []uint16{
@@ -136,7 +143,7 @@ func TestFingerprintGolden(t *testing.T) {
 			want: "0x1301,0x1302,0x1303,0xc02b,0xc02f,0xc02c,0xc030,0xcca9,0xcca8," +
 				"0xc013,0xc014,0x9c,0x9d,0x2f,0x35," +
 				"0x583235353139,0x437572766550323536,0x437572766550333834,0x0,",
-			known:  "Chromium",
+			known:  "Chromium Old",
 			reason: "GREASE occupies index 0, so dropping it recovers the real suite list",
 		},
 		{
@@ -523,40 +530,65 @@ func TestFingerprintTablesAreWellFormed(t *testing.T) {
 		}
 	}
 
-	// BUG (a later wave should flip this): BotFingerprints contains an entry
-	// whose key begins with a stray "(" --
+	// FLIPPED (wave 4, fingerprint embedding). The hardcoded fallback table had
+	// a BotFingerprints entry whose key began with a stray "(" --
 	//
 	//     "(0xcca9,0xcca8,..."  -> "Host-Tracker (page-speed)"
 	//
-	// Fingerprint never emits a leading "(", so this entry is dead: that bot is
-	// silently unclassified. Pinned here so the typo is visible in a diff when
-	// the tables are regenerated.
+	// Fingerprint never emits a leading "(", so that entry was dead and the bot
+	// was silently unclassified. The bundled data carries the same signature
+	// with the paren removed, so the entry is now reachable. Asserted in the
+	// negative so a regression that reintroduces the typo -- or a hand-edit that
+	// pastes the old fallback back in -- fails here.
+	//
+	// The generic loop above already rejects any key without a trailing comma;
+	// this is the leading-junk half of the same class, which that loop cannot
+	// see.
 	const deadKeyPrefix = "(0xcca9,"
-	found := false
 	for fp := range BotFingerprints {
 		if strings.HasPrefix(fp, deadKeyPrefix) {
-			found = true
+			t.Errorf("BotFingerprints key %q begins with %q; Fingerprint never emits a leading "+
+				"paren, so this entry can never match and that bot goes unclassified",
+				fp, deadKeyPrefix)
 		}
 	}
-	if !found {
-		t.Errorf("expected the malformed BotFingerprints key starting %q to still be present; "+
-			"if a wave fixed it, delete this assertion", deadKeyPrefix)
+
+	// FLIPPED (wave 4, fingerprint embedding). The two long crawler
+	// fingerprints -- "Unsolicited Cralwer" (typo) and "Unsolicited Crawler" --
+	// are no longer in BotFingerprints at all. The bundled data promotes both to
+	// ForbiddenFingerprints, which means they are now HARD-BLOCKED rather than
+	// merely labelled. That is a real behaviour change; see the report for wave
+	// 4.
+	botLabels := map[string]bool{}
+	for _, label := range BotFingerprints {
+		botLabels[label] = true
+	}
+	if botLabels["Unsolicited Cralwer"] || botLabels["Unsolicited Crawler"] {
+		t.Error("the Unsolicited Crawler signatures are expected to live in ForbiddenFingerprints " +
+			"(hard block), not BotFingerprints (label only); if a wave moved them back, that " +
+			"un-blocks those crawlers and this assertion must be flipped again")
 	}
 
-	// BUG (a later wave should flip this): the two long crawler fingerprints are
-	// labelled "Unsolicited Cralwer" (typo) and "Unsolicited Crawler". Any
-	// operator rule written as `ip.bot eq "Unsolicited Crawler"` therefore misses
-	// half the crawlers it was meant to catch.
-	labels := map[string]bool{}
-	for _, label := range BotFingerprints {
-		labels[label] = true
+	// BUG (a later wave should flip this): the bundled ForbiddenFingerprints
+	// carries two misspelled labels, "Unsolicited Cralwer" alongside the correct
+	// "Unsolicited Crawler", and "Exploit Cralwer" alongside "Exploit-Crawler".
+	// Labels are what operators compare against in firewall rules, so a rule
+	// written as `ip.bot eq "Unsolicited Crawler"` still misses half the
+	// signatures it was meant to name. Pinned so the typos stay visible in a
+	// diff; fixing them is a data change, not a code change.
+	forbiddenLabels := map[string]bool{}
+	for _, label := range ForbiddenFingerprints {
+		forbiddenLabels[label] = true
 	}
-	if !labels["Unsolicited Cralwer"] {
-		t.Error(`expected the misspelled bot label "Unsolicited Cralwer" to still be present; ` +
-			`if a wave fixed the typo, delete this assertion`)
+	for _, typo := range []string{"Unsolicited Cralwer", "Exploit Cralwer"} {
+		if !forbiddenLabels[typo] {
+			t.Errorf("expected the misspelled ForbiddenFingerprints label %q to still be present; "+
+				"if a wave fixed the typo, update this assertion and TestFingerprintTableLabels "+
+				"in the same commit", typo)
+		}
 	}
-	if !labels["Unsolicited Crawler"] {
-		t.Error(`expected the correctly spelled bot label "Unsolicited Crawler" to still be present`)
+	if !forbiddenLabels["Unsolicited Crawler"] {
+		t.Error(`expected the correctly spelled label "Unsolicited Crawler" to still be present`)
 	}
 }
 
@@ -580,17 +612,25 @@ func TestFingerprintTableLabels(t *testing.T) {
 		table map[string]string
 		want  map[string]int
 	}{
+		// FLIPPED (wave 4, fingerprint embedding). All three want-sets below were
+		// written against the hardcoded fallback tables in fingerprint.go. Those
+		// are gone; the tables now come from the embedded global/fingerprints
+		// bundle, which is what a production deployment was already running --
+		// the old startup fetch overwrote the fallbacks with exactly this data
+		// on every successful boot. The per-entry delta is recorded in the wave
+		// 4 report.
 		{
 			name:  "KnownFingerprints",
 			table: KnownFingerprints,
 			want: map[string]int{
-				"Chromium":    1,
-				"Firefox":     1,
-				"Firefox-Dev": 1,
-				"Edge":        1,
-				"Tor":         1,
-				"Safari":      1,
-				"Dalvik":      1,
+				"Chromium":     1,
+				"Chromium Old": 1, // the key the old fallback called plain "Chromium"
+				"Firefox":      1,
+				"Firefox-Dev":  1,
+				"Edge":         1,
+				"Tor":          2, // two Tor builds share the label, deliberately
+				"Safari":       1,
+				"Dalvik":       1,
 			},
 		},
 		{
@@ -599,20 +639,39 @@ func TestFingerprintTableLabels(t *testing.T) {
 			want: map[string]int{
 				"Checkhost":                 1,
 				"Host-Tracker (http)":       1,
-				"Host-Tracker (page-speed)": 1,
+				"Host-Tracker (page-speed)": 1, // key no longer has the dead leading "("
 				"Postman":                   1,
 				"Curl":                      1,
 				"Aio-http":                  1,
 				"DataForSeo":                1,
 				"Python-Requests":           1,
-				"Unsolicited Cralwer":       1, // sic -- pinned typo, see above
-				"Unsolicited Crawler":       1,
+				"Python-HttpLib":            1,
+				"Go-Http-Client":            1,
+				"GoogleBot":                 1,
+				"Baiduspider/2.0":           1,
+				"Loadster":                  1,
+				"CensysInspect/1.1":         1,
+				"InternetMeasurement/1.0":   1,
+				"Zgrab Scanner":             1,
+				// "Unsolicited Cralwer"/"Unsolicited Crawler" moved to
+				// ForbiddenFingerprints -- they are hard-blocked now, not labelled.
 			},
 		},
 		{
+			// This table hard-blocks. It grew from 1 entry to 8, so the change
+			// here is the one with teeth: see TestForbiddenFingerprintIsIntact,
+			// which still pins the original Http-Flood (1) key byte-for-byte.
 			name:  "ForbiddenFingerprints",
 			table: ForbiddenFingerprints,
-			want:  map[string]int{"Http-Flood (1)": 1},
+			want: map[string]int{
+				"Http-Flood (1)":      1,
+				"Http-Flood (2)":      1,
+				"Headless Browser":    2,
+				"Exploit-Crawler":     1,
+				"Exploit Cralwer":     1, // sic -- pinned typo, see above
+				"Unsolicited Crawler": 1,
+				"Unsolicited Cralwer": 1, // sic -- pinned typo, see above
+			},
 		},
 	}
 
@@ -635,22 +694,39 @@ func TestFingerprintTableLabels(t *testing.T) {
 						tt.name, gotN, label)
 				}
 			}
-			if len(tt.table) != len(tt.want) {
-				t.Errorf("%s has %d entries, want %d", tt.name, len(tt.table), len(tt.want))
+			// FLIPPED (wave 4, fingerprint embedding): this compared the entry
+			// count against the number of DISTINCT labels, which only agreed
+			// while every label was unique. The embedded tables share a label
+			// across two keys twice ("Tor", "Headless Browser"), so the total
+			// must be the sum of the wanted counts. Summing is strictly
+			// stronger: the old form would have accepted a table that dropped
+			// one Tor key and duplicated another label to compensate.
+			wantTotal := 0
+			for _, n := range tt.want {
+				wantTotal += n
+			}
+			if len(tt.table) != wantTotal {
+				t.Errorf("%s has %d entries, want %d", tt.name, len(tt.table), wantTotal)
 			}
 		})
 	}
 }
 
-// httpFloodFingerprint is the single key in ForbiddenFingerprints, transcribed
-// verbatim from core/firewall/fingerprint.go.
+// httpFloodFingerprint is the Http-Flood (1) key in ForbiddenFingerprints,
+// transcribed verbatim from the hardcoded table that core/firewall/fingerprint.go
+// used to carry.
 //
-// ForbiddenFingerprints is the only table that gates OUTRIGHT BLOCKING, and it
-// has exactly one entry. A single transposed hex digit in this key -- the
-// classic way a hand-edited or regenerated table goes wrong -- does not break
-// anything loudly. It just means the one TLS signature the proxy ships to
-// hard-block an HTTP flood never matches again, and the flood is served. There
-// is no error, no log line, and no other entry to fall back on.
+// FLIPPED (wave 4, fingerprint embedding): it is no longer the ONLY key. The
+// embedded bundle ships 8 entries where the fallback shipped 1. The key itself
+// is byte-identical across both, which is the point of keeping this constant --
+// it proves the one signature the fork inherited survived the switch to
+// embedded data unchanged.
+//
+// ForbiddenFingerprints is the only table that gates OUTRIGHT BLOCKING. A
+// single transposed hex digit in this key -- the classic way a hand-edited or
+// regenerated table goes wrong -- does not break anything loudly. It just means
+// the TLS signature the proxy ships to hard-block an HTTP flood never matches
+// again, and the flood is served. There is no error and no log line.
 const httpFloodFingerprint = "0x1303,0x1302,0xc02f,0xc02b,0xc030,0xc02c,0x9e,0xc027,0x67,0xc028," +
 	"0x6b,0x9f,0xcca9,0xcca8,0xccaa,0xc0af,0xc0ad,0xc0a3,0xc09f,0xc05d,0xc061,0xc053," +
 	"0xc0ae,0xc0ac,0xc0a2,0xc09e,0xc05c,0xc060,0xc052,0xc024,0xc023,0xc00a,0xc014,0x39," +
@@ -671,8 +747,11 @@ const httpFloodFingerprint = "0x1303,0x1302,0xc02f,0xc02b,0xc030,0xc02c,0x9e,0xc
 // the suite instead of quietly disarming the block list.
 func TestForbiddenFingerprintIsIntact(t *testing.T) {
 	t.Run("the shipped key is byte-exact", func(t *testing.T) {
-		if n := len(ForbiddenFingerprints); n != 1 {
-			t.Fatalf("ForbiddenFingerprints has %d entries, want exactly 1; "+
+		// FLIPPED (wave 4, fingerprint embedding): 1 -> 8. The count is pinned
+		// rather than dropped so that silently shrinking the block list -- the
+		// failure the discarded fetch error used to produce -- still fails here.
+		if n := len(ForbiddenFingerprints); n != 8 {
+			t.Fatalf("ForbiddenFingerprints has %d entries, want exactly 8; "+
 				"if a wave added one, extend this test rather than deleting it", n)
 		}
 		label, ok := ForbiddenFingerprints[httpFloodFingerprint]

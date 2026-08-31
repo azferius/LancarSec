@@ -51,12 +51,15 @@
 # ---------------------------------------------------------------------------
 # Hard runtime requirements this image satisfies
 # ---------------------------------------------------------------------------
-#  * CA CERTIFICATES ARE MANDATORY, not optional. core/config/init.go:238
-#    (VersionCheck) calls http.Get("https://raw.githubusercontent.com/...")
-#    and core/config/init.go:225-227 PANICS when it returns an error. The
-#    three fingerprint tables are fetched over HTTPS too (init.go:104-106),
-#    though those errors are discarded. A bare `FROM scratch` image panics
-#    on boot. ca-certificates is installed below.
+#  * CA CERTIFICATES ARE STILL NEEDED, but no longer at boot. The version
+#    check and the three fingerprint fetches that used to make a bare
+#    `FROM scratch` image PANIC on startup are gone: the tables are compiled
+#    in (global/fingerprints, //go:embed) and the version check was deleted.
+#    The proxy now boots with no outbound network at all. What still needs a
+#    trust store is the Discord attack webhook (core/utils, called from
+#    core/server/monitor.go:136) and any HTTPS customer backend the reverse
+#    proxy dials. ca-certificates is installed below; dropping it degrades
+#    those two paths rather than killing the process.
 #
 #  * THE WORKING DIRECTORY MUST BE WRITABLE. main.go:21 opens crash.log with
 #    O_CREATE and log.Fatal()s if that fails; core/pnc/panicHandler.go:16
@@ -66,11 +69,12 @@
 #
 #  * config.json MUST BE BIND-MOUNTED. It is the only file this tree reads
 #    from the working directory (core/config/init.go:27, and again on reload
-#    at core/server/monitor.go:405). Nothing reads global/ or assets/ today:
-#    the fingerprint JSON is fetched over HTTPS and the challenge markup is
-#    inlined as Go string literals in core/server/middleware.go. They are
-#    still copied in, because .dockerignore deliberately keeps them in the
-#    build context for the wave that bundles them locally.
+#    at core/server/monitor.go:405). global/fingerprints/*.json is read at
+#    BUILD time by //go:embed, not at run time, so the copy of global/ in the
+#    runtime image is documentation rather than a dependency; the challenge
+#    markup is still inlined as Go string literals in
+#    core/server/middleware.go. Both are copied in anyway, because
+#    .dockerignore deliberately keeps them in the build context.
 #
 #    If config.json is absent the proxy does NOT fall back to a default. It
 #    enters the interactive generator (core/config/generate.go). With no TTY
@@ -155,7 +159,8 @@ LABEL org.opencontainers.image.title="LancarSec" \
       org.opencontainers.image.licenses="GPL-2.0-only" \
       org.opencontainers.image.source="https://github.com/azferius/lancarsec"
 
-# ca-certificates: mandatory, see the VersionCheck note at the top.
+# ca-certificates: needed for the Discord webhook and HTTPS backends, not for
+# boot. See the note at the top.
 # The unprivileged account owns /app because the process writes crash.log and
 # rewrites config.json there.
 RUN apk add --no-cache ca-certificates \
@@ -166,10 +171,10 @@ WORKDIR /app
 
 COPY --from=builder /out/lancarsec /usr/local/bin/lancarsec
 
-# Not read by any code path in this tree yet; carried so the wave that reads
-# fingerprints from disk instead of over HTTPS does not need a Dockerfile
-# change. LICENSE ships because this is GPL v2 and the image is a binary
-# distribution.
+# global/fingerprints/*.json is compiled into the binary by //go:embed, so the
+# runtime image does not read it; it is carried so an operator can diff the
+# shipped classification tables against the running build. LICENSE ships
+# because this is GPL v2 and the image is a binary distribution.
 COPY --chown=65532:65532 global/ /app/global/
 COPY --chown=65532:65532 assets/html/ /app/assets/html/
 COPY LICENSE /app/LICENSE

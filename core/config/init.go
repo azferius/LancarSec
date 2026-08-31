@@ -3,16 +3,18 @@ package config
 import (
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azferius/lancarsec/core/domains"
+	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/utils"
 
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
@@ -102,9 +104,8 @@ func Load() {
 
 	fmt.Println("Loading Fingerprints ...")
 
-	GetFingerprints("https://raw.githubusercontent.com/41Baloo/balooProxy/main/global/fingerprints/known_fingerprints.json", &firewall.KnownFingerprints)
-	GetFingerprints("https://raw.githubusercontent.com/41Baloo/balooProxy/main/global/fingerprints/bot_fingerprints.json", &firewall.BotFingerprints)
-	GetFingerprints("https://raw.githubusercontent.com/41Baloo/balooProxy/main/global/fingerprints/malicious_fingerprints.json", &firewall.ForbiddenFingerprints)
+	// The fingerprint tables are compiled in (see global/fingerprints); there is
+	// nothing to fetch and nothing that can fail at this point.
 
 	for i, domain := range domains.Config.Domains {
 		domains.Domains = append(domains.Domains, domain.Name)
@@ -222,45 +223,10 @@ func Load() {
 
 	firewall.Mutex.Unlock()
 
-	vcErr := VersionCheck()
-	if vcErr != nil {
-		panic("[ " + utils.PrimaryColor("!") + " ] [ " + vcErr.Error() + " ]")
-	}
-
 	if len(domains.Domains) == 0 {
 		AddDomain()
 		Load()
 	} else {
 		proxy.WatchedDomain = domains.Domains[0]
 	}
-}
-
-func VersionCheck() error {
-	resp, err := http.Get("https://raw.githubusercontent.com/41Baloo/balooProxy/main/global/proxy/version.json")
-	if err != nil {
-		return errors.New("Failed to check for proxy version: " + err.Error())
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return errors.New("Failed to check for proxy version: " + err.Error())
-	}
-
-	var proxyVersions GLOBAL_PROXY_VERSIONS
-	err = json.Unmarshal(body, &proxyVersions)
-	if err != nil {
-		return errors.New("Failed to check for proxy version: " + err.Error())
-	}
-
-	if proxyVersions.StableVersion > proxy.ProxyVersion {
-
-		fmt.Println("[ " + utils.PrimaryColor("!") + " ] [ New Proxy Version " + fmt.Sprint(proxyVersions.StableVersion) + " Found. You Are using " + fmt.Sprint(proxy.ProxyVersion) + ". Consider Downloading The New Version From Github Or " + proxyVersions.Download + " ]")
-		fmt.Println("[ " + utils.PrimaryColor("+") + " ] [ Automatically Starting Proxy In 10 Seconds ]")
-
-		time.Sleep(10 * time.Second)
-
-	}
-
-	return nil
 }

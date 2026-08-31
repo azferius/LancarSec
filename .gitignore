@@ -133,4 +133,3 @@ Thumbs.db
 # operator committing a live one, so it needs an explicit exception.
 !hack/config.test.json
 !global/fingerprints/*.json
-!global/proxy/version.json
