@@ -13,16 +13,10 @@ import (
 
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/proxy"
-	"github.com/azferius/lancarsec/core/utils"
-
-	"github.com/azferius/lancarsec/core/domains"
-	"github.com/azferius/lancarsec/core/firewall"
+	"github.com/azferius/lancarsec/core/gofilter"
 	"github.com/azferius/lancarsec/core/proxy"
 	"github.com/azferius/lancarsec/core/transport"
 	"github.com/azferius/lancarsec/core/utils"
-
-	"github.com/azferius/lancarsec/core/gofilter"
 )
 
 func Load() {
