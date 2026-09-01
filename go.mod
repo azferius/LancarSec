@@ -1,8 +1,8 @@
 module github.com/azferius/lancarsec
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.14
+toolchain go1.26.7
 
 require (
 	github.com/shirou/gopsutil/v4 v4.26.7
