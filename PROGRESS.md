@@ -373,7 +373,8 @@ delivered 01:40, zero outbox activity by 03:30) — standups handled internally.
   PrintMutex, GetOwnIP (whole ip.go), LogHeapProfile/LogGoroutineProfile (whole debug.go),
   HashToInt + 5 tests, QuickchartResponse; pnc.LogError; domains.CacheResponse; firewall.RequestLog
   (whole requests.go); proxy.JSDifficulty. Excluded on purpose: `proxy.FailRequestRatelimit` (owner
-  decision, W3/W4a) and the api.go RELOAD no-op.
+  decision, W3/W4a). (The api.go RELOAD no-op was not reachable for this batch — it was
+  deleted in an earlier wave and is pinned gone by `TestDeletedActionsAreGone`.)
 - **PERF-11/12 (`cdc269c`)** the reserved-endpoint switch concatenated
   `"/_bProxy/"+AdminSecret+"/api/v1"` per request — one alloc on the hottest path. Cached keyed
   on the secret (reload/test-safe).
