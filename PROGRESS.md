@@ -351,6 +351,38 @@ The ultracode re-audit (dated section at the tail of docs/AUDIT.md; 90 findings 
   byte-equivalence, rendered-page pins load-bearing (exact `new BalooPow(...,5,...,!1)`, exact
   salts/challenge hex, captcha PNG decodes), guard mutation test.
 
+### Wave 9 W4b outcome (2026-09-01, `185ac60`–`cdc269c`)
+
+Solo batch, scoped disjoint from W3 (jim: `core/config/*`) and W4a (pam: firewall window maps,
+middleware counting, monitor tick). jim/pam confirmed dead sessions (assignment envelopes
+delivered 01:40, zero outbox activity by 03:30) — standups handled internally.
+
+- **CONC-06 (`185ac60`)** `proxy.Initialised` was a plain bool written by the monitor goroutine
+  (evaluateRatelimit, outside firewall.Mutex) and polled from main before the listener starts —
+  data race under the Go memory model. Now an `atomic.Bool` (Store in `monitor.go`, Load in
+  `main.go`). `atomic.Bool` contains `noCopy`, so the test fixture's snapshot-by-value is vet-
+  rejected; fixtures now Store(false) at setup and in Cleanup.
+- **CONC-07 (`199e9c6`)** lost-update in `utils.ReadLogs`: RLock'd snapshot → release → trim
+  decision → Lock'd copy-back with the stale slice header, so entries AddLogs appended in between
+  were silently dropped. Now snapshot + trim under one write Lock; terminal I/O loop stays
+  outside (no hot-path stall).
+- **CRYPTO-07 (`8fa0964`)** crash.log 0644 → 0600 — full stack traces can embed request material
+  and it sits beside the 0600 secrets. Its only other entry point (dead `LogError`) deleted with it.
+- **QUAL-09/CRYPTO-11 dead code (`8268a21`)** 13 symbols deleted, every one grep-verified
+  caller-free before cutting, with their pin tests: utils SafeString/closestTo10/JsonEscape/
+  PrintMutex, GetOwnIP (whole ip.go), LogHeapProfile/LogGoroutineProfile (whole debug.go),
+  HashToInt + 5 tests, QuickchartResponse; pnc.LogError; domains.CacheResponse; firewall.RequestLog
+  (whole requests.go); proxy.JSDifficulty. Excluded on purpose: `proxy.FailRequestRatelimit` (owner
+  decision, W3/W4a) and the api.go RELOAD no-op.
+- **PERF-11/12 (`cdc269c`)** the reserved-endpoint switch concatenated
+  `"/_bProxy/"+AdminSecret+"/api/v1"` per request — one alloc on the hottest path. Cached keyed
+  on the secret (reload/test-safe).
+- **Stale entries corrected:** audit perf item 8's `InitPlaceholders` unguarded `RequestLogger[0]`/
+  `[len-1]` was already fixed in wave 8 (renders "-"); item 10's `GetCertificate` stack-copy is
+  real but its actual fix (store `*DomainSettings` in DomainsMap) is W3 config-publish territory —
+  deferred, not forgotten. CONC-05 verified already fixed in wave 8 (`&http.Client{Timeout:10s}`).
+- **Gates:** gofmt/vet/build/mod tidy clean; `go test -race ./...` all 12 packages ok.
+
 ### Already fixed — do not re-scope (waves 5/6)
 
 Cookie substring check → exact-match + constant-time compare, stage-1 `HttpOnly`, cookie
