@@ -77,6 +77,18 @@ const (
 	unlimitedBodySize int64 = -1
 )
 
+// defaultRatelimits fills the proxy.ratelimits keys the operator left out.
+// The values are the shipped example's: a missing key used to publish 0, and
+// a threshold of 0 blocks EVERYONE after one window tick (HTTP-05). normalise
+// writes the defaults into the snapshot so validate, the mirrors and the
+// middleware's cfg reads all see the same numbers.
+var defaultRatelimits = map[string]int{
+	"requests":           500,
+	"unknownFingerprint": 150,
+	"challengeFailures":  40,
+	"noRequestsSent":     10,
+}
+
 // errNoDomains is a sentinel so the startup path can tell "the operator has not
 // configured a domain yet" (which is a prompt) from "this config is broken"
 // (which is a refusal). A reload never prompts: see Reload in init.go.
@@ -157,6 +169,15 @@ func normalise(cfg *domains.Configuration) {
 		cfg.Proxy.RatelimitWindow = minRatelimitWindow
 	}
 
+	// HTTP-05: an absent proxy.ratelimits key used to publish 0, and a
+	// threshold of 0 blocks EVERYONE after one window tick. Fill the missing
+	// keys with the shipped defaults and say which, so an operator who
+	// spelled a key wrong learns it here instead of in an outage. A key the
+	// operator DID set is respected as written, including 0.
+	if filled := fillDefaultRatelimits(cfg); len(filled) > 0 {
+		fmt.Println("[ " + utils.PrimaryColor("ratelimits: using defaults for missing keys: "+strings.Join(filled, ", ")) + " ]")
+	}
+
 	// CloudflareEnforceOrigin is NOT defaulted. Its zero value is the safe one
 	// and it stays that way: a true default would 403 every peer outside the
 	// trusted set the moment an operator upgraded, including the operator's
@@ -192,6 +213,25 @@ func normalise(cfg *domains.Configuration) {
 			domain.MaxBodySize = cfg.Proxy.MaxBodySize
 		}
 	}
+}
+
+// fillDefaultRatelimits writes the defaults under every known proxy.ratelimits
+// key the operator left out, and returns the keys it filled in a fixed order so
+// the load warning is deterministic. It mutates cfg in place and is idempotent:
+// a second run finds every key present and fills nothing.
+func fillDefaultRatelimits(cfg *domains.Configuration) []string {
+	if cfg.Proxy.Ratelimits == nil {
+		cfg.Proxy.Ratelimits = map[string]int{}
+	}
+
+	var filled []string
+	for _, key := range []string{"requests", "unknownFingerprint", "challengeFailures", "noRequestsSent"} {
+		if _, present := cfg.Proxy.Ratelimits[key]; !present {
+			cfg.Proxy.Ratelimits[key] = defaultRatelimits[key]
+			filled = append(filled, key)
+		}
+	}
+	return filled
 }
 
 // normaliseTrustedProxies canonicalises the operator's trusted-proxy list so

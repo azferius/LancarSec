@@ -224,6 +224,46 @@ func TestNormaliseDefaultsEmptySchemeToHTTP(t *testing.T) {
 	}
 }
 
+// HTTP-05: an absent proxy.ratelimits key used to publish 0, and a threshold
+// of 0 blocks everyone after one window tick. Missing keys get the shipped
+// defaults; keys the operator DID set are respected as written, including 0.
+func TestNormaliseFillsMissingRatelimitKeys(t *testing.T) {
+	// Entirely absent map: all four keys land with their defaults.
+	cfg := &domains.Configuration{Domains: []domains.Domain{{Name: "a", Backend: "b"}}}
+	normalise(cfg)
+	for _, key := range []string{"requests", "unknownFingerprint", "challengeFailures", "noRequestsSent"} {
+		if got := cfg.Proxy.Ratelimits[key]; got != defaultRatelimits[key] {
+			t.Errorf("Ratelimits[%q] = %d, want the %d default", key, got, defaultRatelimits[key])
+		}
+	}
+
+	// Partially set map: the operator's value survives, only gaps are filled.
+	cfg2 := &domains.Configuration{
+		Proxy:   domains.Proxy{Ratelimits: map[string]int{"requests": 777, "challengeFailures": 0}},
+		Domains: []domains.Domain{{Name: "a", Backend: "b"}},
+	}
+	normalise(cfg2)
+	if cfg2.Proxy.Ratelimits["requests"] != 777 {
+		t.Errorf("Ratelimits[requests] = %d, want the configured 777", cfg2.Proxy.Ratelimits["requests"])
+	}
+	if cfg2.Proxy.Ratelimits["challengeFailures"] != 0 {
+		t.Errorf("Ratelimits[challengeFailures] = %d, want the operator's explicit 0", cfg2.Proxy.Ratelimits["challengeFailures"])
+	}
+	for _, key := range []string{"unknownFingerprint", "noRequestsSent"} {
+		if got := cfg2.Proxy.Ratelimits[key]; got != defaultRatelimits[key] {
+			t.Errorf("Ratelimits[%q] = %d, want the %d default", key, got, defaultRatelimits[key])
+		}
+	}
+
+	// Idempotent: a second pass refills nothing (the fixed key order keeps the
+	// warning list stable too).
+	before := len(cfg2.Proxy.Ratelimits)
+	normalise(cfg2)
+	if len(cfg2.Proxy.Ratelimits) != before {
+		t.Error("normalise is not idempotent for ratelimits")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // validate
 // ---------------------------------------------------------------------------
