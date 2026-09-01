@@ -36,11 +36,12 @@ var (
 )
 
 func adminAPIPath() string {
+	secret := domains.Current().Proxy.AdminSecret
 	adminPathMu.Lock()
 	defer adminPathMu.Unlock()
-	if adminPathFor != proxy.AdminSecret {
-		adminPathFor = proxy.AdminSecret
-		adminPathBuilt = "/_bProxy/" + proxy.AdminSecret + "/api/v1"
+	if adminPathFor != secret {
+		adminPathFor = secret
+		adminPathBuilt = "/_bProxy/" + secret + "/api/v1"
 	}
 	return adminPathBuilt
 }
@@ -92,17 +93,23 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// can push through to a customer origin is the write timeout, and the
 	// proxy's own read of the body is unbounded.
 	//
+	// WAVE 9 W4 (CONC-02/AUTHZ-05/CRYPTO-04): ONE config load per request.
+	// Everything config-derived below reads through this snapshot, so a reload
+	// swaps the whole set at once - never a new secret beside an old
+	// threshold. The mirror globals (proxy.CookieSecret, thresholds,
+	// proxy.Cloudflare) remain published for serve.go's startup wiring and
+	// tests, but the request path must not read them.
+	cfg := domains.Current()
+
 	// hasRequestBody is not a micro-optimisation. net/http hands a bodyless
 	// request http.NoBody, which is NOT nil, so a plain `Body != nil` test
 	// wraps every GET - and a maxBytesReader is a heap allocation per request
 	// on the exact path a flood takes. Measured at 112 B/op and 1 alloc/op on
 	// BenchmarkMiddlewareDecisionPath before this guard.
 	// WAVE 9 W3 (AUTHZ-06): the ceiling is wired from the published
-	// configuration. The former MaxRequestBodyBytes atomic was written only by
-	// init and read the config by nobody, so an operator's max_body_size (and
-	// its -1 unlimited sentinel) did nothing. normalise resolves the field:
-	// never zero at runtime, -1 means unlimited.
-	if limit := domains.Config.Proxy.MaxBodySize; limit > 0 && hasRequestBody(request) {
+	// configuration. normalise resolves the field: never zero at runtime, -1
+	// means unlimited.
+	if limit := cfg.Proxy.MaxBodySize; limit > 0 && hasRequestBody(request) {
 		request.Body = http.MaxBytesReader(writer, request.Body, limit)
 	}
 
@@ -144,7 +151,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// to Cloudflare locks the operator out of their own origin, so it is the
 	// operator's decision to make once they know their traffic only arrives
 	// through the edge. See core/config/pipeline.go, which does not default it.
-	if domains.Config.Proxy.Cloudflare && proxy.CloudflareEnforceOrigin {
+	if cfg.Proxy.Cloudflare && cfg.Proxy.CloudflareEnforceOrigin {
 		if peer := peerAddr(request.RemoteAddr); !peer.IsValid() || !trusted.IsTrusted(peer) {
 			writer.Header().Set("Content-Type", "text/plain")
 			SendResponseWithStatus(http.StatusForbidden, "403 Forbidden", buffer, writer)
@@ -160,7 +167,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	var ipCount int
 	var ipCountCookie int
 
-	if domains.Config.Proxy.Cloudflare {
+	if cfg.Proxy.Cloudflare {
 
 		tlsFp = "Cloudflare"
 		browser = "Cloudflare"
@@ -265,7 +272,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			"http.cookie":     request.Header.Get("Cookie"),
 
 			"proxy.stage":         domainData.Stage,
-			"proxy.cloudflare":    domains.Config.Proxy.Cloudflare,
+			"proxy.cloudflare":    cfg.Proxy.Cloudflare,
 			"proxy.stage_locked":  domainData.StageManuallySet,
 			"proxy.attack":        domainData.RawAttack,
 			"proxy.bypass_attack": domainData.BypassAttack,
@@ -287,7 +294,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if susLv > 0 {
 
 		//Ratelimit faster if client repeatedly fails the verification challenge (feel free to play around with the threshhold)
-		if ipCountCookie > proxy.FailChallengeRatelimit {
+		if ipCountCookie > cfg.Proxy.Ratelimits["challengeFailures"] {
 			writer.Header().Set("Content-Type", "text/plain")
 			// WAVE 9: real 429s with Retry-After; these bodies used to leave
 			// as cacheable 200s. 10 matches the 10-second window granularity
@@ -299,7 +306,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		}
 
 		//Ratelimit spamming Ips (feel free to play around with the threshhold)
-		if ipCount > proxy.IPRatelimit {
+		if ipCount > cfg.Proxy.Ratelimits["requests"] {
 			writer.Header().Set("Content-Type", "text/plain")
 			writer.Header().Set("Retry-After", "10")
 			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R2)", buffer, writer)
@@ -308,7 +315,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 		//Ratelimit fingerprints that don't belong to major browsers
 		if browser == "" {
-			if fpCount > proxy.FPRatelimit {
+			if fpCount > cfg.Proxy.Ratelimits["unknownFingerprint"] {
 				writer.Header().Set("Content-Type", "text/plain")
 				writer.Header().Set("Retry-After", "10")
 				SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R3)", buffer, writer)
@@ -445,11 +452,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// back. Redact before logging; empty secrets must not be replaced (an
 	// empty needle would splice [redacted] between every character).
 	loggedURI := request.RequestURI
-	if proxy.AdminSecret != "" {
-		loggedURI = strings.ReplaceAll(loggedURI, proxy.AdminSecret, "[redacted]")
+	if adminSecret := cfg.Proxy.AdminSecret; adminSecret != "" {
+		loggedURI = strings.ReplaceAll(loggedURI, adminSecret, "[redacted]")
 	}
-	if proxy.APISecret != "" {
-		loggedURI = strings.ReplaceAll(loggedURI, proxy.APISecret, "[redacted]")
+	if apiSecret := cfg.Proxy.APISecret; apiSecret != "" {
+		loggedURI = strings.ReplaceAll(loggedURI, apiSecret, "[redacted]")
 	}
 
 	firewall.Mutex.Lock()

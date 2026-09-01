@@ -27,7 +27,7 @@ func Serve() {
 
 	defer pnc.PanicHndl()
 
-	if domains.Config.Proxy.Cloudflare {
+	if domains.Current().Proxy.Cloudflare {
 
 		// WAVE 8: http2.ConfigureServer used to be applied to this plain-:80
 		// listener. Cloudflare terminates TLS in front of it, the listener is

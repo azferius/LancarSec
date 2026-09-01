@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net/http/httputil"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azferius/lancarsec/core/gofilter"
@@ -13,8 +14,29 @@ var (
 	Domains     = []string{}
 	DomainsMap  sync.Map
 	DomainsData = map[string]DomainData{}
-	Config      *Configuration
+
+	// configStore holds the published configuration. It replaced the plain
+	// `Config *Configuration` variable: publish used to assign that while the
+	// request path read it concurrently, and every reload was a data race on
+	// the one value every request starts from (CONC-02/AUTHZ-05/CRYPTO-04).
+	configStore atomic.Pointer[Configuration]
 )
+
+// Current returns the last published configuration, or nil before the first
+// publish. The request path reads everything config-derived through this one
+// atomic load, so a reload publishes the whole set at once or not at all —
+// never a new secret beside an old threshold.
+func Current() *Configuration {
+	return configStore.Load()
+}
+
+// Publish atomically installs c as the running configuration. The config
+// pipeline calls it as the last step of publish, after every derived global
+// and mirror is written, so a reader that sees the new configuration also
+// sees the state published alongside it.
+func Publish(c *Configuration) {
+	configStore.Store(c)
+}
 
 type Configuration struct {
 	Proxy   Proxy    `json:"proxy"`

@@ -87,7 +87,7 @@ func cfgIsolate(t *testing.T) {
 	t.Helper()
 	t.Chdir(t.TempDir())
 
-	oldConfig := domains.Config
+	oldConfig := domains.Current()
 	oldDomains := domains.Domains
 	oldData := domains.DomainsData
 	oldWatched := proxy.WatchedDomain
@@ -100,13 +100,13 @@ func cfgIsolate(t *testing.T) {
 	oldMaxBody := proxy.MaxBodySize
 	oldLoadTrusted := loadTrusted
 
-	domains.Config = nil
+	domains.Publish(nil)
 	domains.Domains = []string{}
 	domains.DomainsData = map[string]domains.DomainData{}
 	domains.DomainsMap = sync.Map{}
 
 	t.Cleanup(func() {
-		domains.Config = oldConfig
+		domains.Publish(oldConfig)
 		domains.Domains = oldDomains
 		domains.DomainsData = oldData
 		domains.DomainsMap = sync.Map{}
@@ -744,7 +744,7 @@ func TestReloadReadsTheFile(t *testing.T) {
 
 // A refused reload must leave the running proxy EXACTLY as it was. This is the
 // property the pipeline exists for: the old code decoded straight into
-// domains.Config, so a malformed or rejected file was already live.
+// the published snapshot, so a malformed or rejected file was already live.
 func TestReloadRefusalPublishesNothing(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -793,7 +793,7 @@ func TestReloadRefusalPublishesNothing(t *testing.T) {
 			}
 			resetTransports = func(map[string]struct{}) { t.Error("a refused reload reset the transports") }
 
-			wantConfig := domains.Config
+			wantConfig := domains.Current()
 			wantDomains := append([]string(nil), domains.Domains...)
 			wantData := domains.DomainsData["a.example"]
 			wantSettings := cfgSettings(t, "a.example")
@@ -806,7 +806,7 @@ func TestReloadRefusalPublishesNothing(t *testing.T) {
 				t.Fatal("Reload accepted a config it must refuse")
 			}
 
-			if domains.Config != wantConfig {
+			if domains.Current() != wantConfig {
 				t.Error("domains.Config was replaced by a refused reload")
 			}
 			if len(domains.Domains) != len(wantDomains) {

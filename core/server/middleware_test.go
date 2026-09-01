@@ -118,7 +118,7 @@ type mwEnv struct {
 func mwSaveGlobals(tb testing.TB) {
 	tb.Helper()
 
-	oldConfig := domains.Config
+	oldConfig := domains.Current()
 	oldDomainList := domains.Domains
 	oldDomainsData := domains.DomainsData
 
@@ -151,7 +151,7 @@ func mwSaveGlobals(tb testing.TB) {
 	oldRAM := proxy.RamUsage()
 
 	tb.Cleanup(func() {
-		domains.Config = oldConfig
+		domains.Publish(oldConfig)
 		domains.Domains = oldDomainList
 		domains.DomainsData = oldDomainsData
 		domains.DomainsMap = sync.Map{}
@@ -267,7 +267,7 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 	proxy.SetRamUsage("")
 
 	// --- config ---
-	domains.Config = &domains.Configuration{
+	domains.Publish(&domains.Configuration{
 		Proxy: domains.Proxy{
 			Cloudflare:      false,
 			AdminSecret:     mwAdminSecret,
@@ -281,7 +281,7 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 			},
 		},
 		Domains: []domains.Domain{{Name: mwDomain}},
-	}
+	})
 	domains.Domains = []string{mwDomain}
 
 	domains.DomainsMap = sync.Map{}
@@ -2390,7 +2390,7 @@ func TestMiddlewareStrippingDoesNotBreakVerification(t *testing.T) {
 func TestMiddlewareCloudflareMode(t *testing.T) {
 	t.Run("Cf-Connecting-Ip becomes the subject ip", func(t *testing.T) {
 		env := mwNewEnv(t)
-		domains.Config.Proxy.Cloudflare = true
+		domains.Current().Proxy.Cloudflare = true
 		proxy.Cloudflare = true
 		// FLIPPED BY WAVE 6: the header is believed only from a trusted peer.
 		mwTrustPeers(t, mwIP+"/32")
@@ -2431,7 +2431,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 	// different client.
 	t.Run("Cf-Connecting-Ip from an untrusted peer cannot escape the peer's ratelimit", func(t *testing.T) {
 		env := mwNewEnv(t)
-		domains.Config.Proxy.Cloudflare = true
+		domains.Current().Proxy.Cloudflare = true
 		proxy.Cloudflare = true
 		env.mwSetStage(1)
 		firewall.AccessIps["192.0.2.99"] = proxy.IPRatelimit + 1 // the real peer is ratelimited
@@ -2452,7 +2452,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 	// trusted proxy is believed, which is the whole point of the mode.
 	t.Run("Cf-Connecting-Ip from a trusted peer is believed", func(t *testing.T) {
 		env := mwNewEnv(t)
-		domains.Config.Proxy.Cloudflare = true
+		domains.Current().Proxy.Cloudflare = true
 		proxy.Cloudflare = true
 		mwTrustPeers(t, "192.0.2.0/24")
 		env.mwSetStage(0)
@@ -2476,7 +2476,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 
 		t.Run("R1 fires on the subject ip's challenge failures", func(t *testing.T) {
 			env := mwNewEnv(t)
-			domains.Config.Proxy.Cloudflare = true
+			domains.Current().Proxy.Cloudflare = true
 			proxy.Cloudflare = true
 			mwTrustPeers(t, mwIP+"/32")
 			// FLIPPED BY WAVE 6: stage 1, not stage 0. A whitelisted request is
@@ -2497,7 +2497,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 
 		t.Run("R2 fires on the subject ip's request count", func(t *testing.T) {
 			env := mwNewEnv(t)
-			domains.Config.Proxy.Cloudflare = true
+			domains.Current().Proxy.Cloudflare = true
 			proxy.Cloudflare = true
 			mwTrustPeers(t, mwIP+"/32")
 			env.mwSetStage(1) // FLIPPED BY WAVE 6, as above
@@ -2515,7 +2515,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 
 		t.Run("both counters are reported verbatim", func(t *testing.T) {
 			env := mwNewEnv(t)
-			domains.Config.Proxy.Cloudflare = true
+			domains.Current().Proxy.Cloudflare = true
 			proxy.Cloudflare = true
 			mwTrustPeers(t, mwIP+"/32")
 			env.mwSetStage(0)
@@ -2539,7 +2539,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 	// answer is now the socket peer, which every request has.
 	t.Run("missing Cf-Connecting-Ip falls back to the socket peer", func(t *testing.T) {
 		env := mwNewEnv(t)
-		domains.Config.Proxy.Cloudflare = true
+		domains.Current().Proxy.Cloudflare = true
 		proxy.Cloudflare = true
 		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
@@ -3304,7 +3304,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a body under the limit is proxied", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		domains.Config.Proxy.MaxBodySize = 64
+		domains.Current().Proxy.MaxBodySize = 64
 
 		rec := mwDo(mwPost(32))
 
@@ -3318,7 +3318,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a body over the limit does not reach the backend intact", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		domains.Config.Proxy.MaxBodySize = 16
+		domains.Current().Proxy.MaxBodySize = 16
 
 		rec := mwDo(mwPost(4096))
 
@@ -3335,7 +3335,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a zero limit disables the cap", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		domains.Config.Proxy.MaxBodySize = 0
+		domains.Current().Proxy.MaxBodySize = 0
 
 		rec := mwDo(mwPost(4096))
 
@@ -3413,7 +3413,8 @@ func TestMiddlewareEnforceOriginRejectsUntrustedPeers(t *testing.T) {
 			// test could not tell "refused" from "challenged".
 			env.mwSetStage(0)
 
-			domains.Config.Proxy.Cloudflare = tc.cloudflare
+			domains.Current().Proxy.Cloudflare = tc.cloudflare
+			domains.Current().Proxy.CloudflareEnforceOrigin = tc.enforce
 			proxy.Cloudflare = tc.cloudflare
 			proxy.CloudflareEnforceOrigin = tc.enforce
 

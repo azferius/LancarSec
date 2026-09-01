@@ -298,7 +298,7 @@ func TestReloadWithABrokenTrustedListKeepsTheRunningConfiguration(t *testing.T) 
 	if len(*calls) != 1 {
 		t.Fatalf("loadTrusted was called %d times after the first reload, want 1", len(*calls))
 	}
-	published := domains.Config
+	published := domains.Current()
 	wantDomains := append([]string(nil), domains.Domains...)
 	wantData := domains.DomainsData["a.example"]
 	wantSettings := cfgSettings(t, "a.example")
@@ -321,7 +321,7 @@ func TestReloadWithABrokenTrustedListKeepsTheRunningConfiguration(t *testing.T) 
 	if len(*calls) != 1 {
 		t.Errorf("loadTrusted was called %d times, want 1 — the refused reload installed a trusted set", len(*calls))
 	}
-	if domains.Config != published {
+	if domains.Current() != published {
 		t.Error("domains.Config was replaced by a refused reload")
 	}
 	if proxy.MaxBodySize != 4096 {

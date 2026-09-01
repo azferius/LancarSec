@@ -13,7 +13,7 @@ import (
 
 // Generate writes a fresh config.json from an interactive dialogue and seeds it
 // with one domain. It no longer installs the generated configuration into
-// domains.Config: Load re-runs the whole pipeline over what was written, so
+// the live config: Load re-runs the whole pipeline over what was written, so
 // nothing reaches the running proxy without being validated first.
 func Generate() error {
 
@@ -58,10 +58,11 @@ func Generate() error {
 // AddDomain appends one interactively configured domain to the live
 // configuration and writes it back to config.json.
 func AddDomain() error {
-	if domains.Config == nil {
+	current := domains.Current()
+	if current == nil {
 		return errors.New("no configuration loaded")
 	}
-	return appendDomain(domains.Config)
+	return appendDomain(current)
 }
 
 // appendDomain is the shared body: it asks for a domain, appends it to the

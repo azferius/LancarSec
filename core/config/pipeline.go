@@ -128,7 +128,7 @@ type staged struct {
 // ---------------------------------------------------------------------------
 
 // parse reads config.json into a NEW Configuration. It deliberately does not
-// decode into domains.Config: the old code did, which meant a half-decoded or
+// decode into the published snapshot: the old code did, which meant a half-decoded or
 // malformed document was already live for every in-flight request before
 // anything had been checked. The decoder error is returned, not discarded.
 func parse(path string) (*domains.Configuration, error) {
@@ -482,18 +482,19 @@ func compileFilter(expression string) (filter *gofilter.Filter, err error) {
 // publish installs a built configuration. It is the ONLY function in this
 // package that writes global state, and it cannot fail.
 //
-// WAVE 7: this is the single function that has to change. Replace the
-// `domains.Config = s.cfg` assignment with the atomic.Pointer store and the
-// firewall.Mutex section with whatever guards the domain tables then. The
-// merge/converge logic below is orthogonal to the publish mechanism and should
-// survive untouched - it is what preserves mitigation state across a reload, so
-// it has to keep happening between reading the old tables and installing the
-// new ones.
+// WAVE 7→9 (W4d, CONC-02/AUTHZ-05/CRYPTO-04): the `domains.Config = s.cfg`
+// assignment is gone. The snapshot is installed LAST, via domains.Publish,
+// after every mirror and domain table it describes is already written — a
+// reader that sees the new snapshot also sees the state published alongside
+// it. The request path reads config exclusively through domains.Current().
+// The remaining mirror globals (proxy.CookieSecret, thresholds, timeouts) are
+// still written for the serve.go startup path and test pins; no request-path
+// reader may touch them — see middleware.go, which takes one
+// `cfg := domains.Current()` load per request.
 func publish(s *staged, m mode) {
-	previous := domains.Config
+	previous := domains.Current()
 
 	// --- process-wide settings -------------------------------------------
-	domains.Config = s.cfg
 	proxy.Cloudflare = s.cfg.Proxy.Cloudflare
 	proxy.CloudflareEnforceOrigin = s.cfg.Proxy.CloudflareEnforceOrigin
 	proxy.MaxBodySize = s.cfg.Proxy.MaxBodySize
@@ -610,6 +611,9 @@ func publish(s *staged, m mode) {
 	domains.Domains = names
 
 	firewall.Mutex.Unlock()
+
+	// The snapshot swap is the last config-derived write in publish (W4d).
+	domains.Publish(s.cfg)
 
 	// (Re)configure the fresh per-domain upstream transports, then drop the
 	// pooled connections of domains that went away or moved.

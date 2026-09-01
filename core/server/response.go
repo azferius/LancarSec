@@ -9,7 +9,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
-	"github.com/azferius/lancarsec/core/proxy"
+	"github.com/azferius/lancarsec/core/domains"
 )
 
 func SendResponse(str string, buffer *bytes.Buffer, writer http.ResponseWriter) {
@@ -85,7 +85,8 @@ func servePowAsset(writer http.ResponseWriter, asset []byte) {
 // for tuning an evasion. Both used to be served to anyone who cleared the
 // challenge.
 func authorisedProxyEndpoint(request *http.Request) bool {
-	secret := proxy.APISecret
+	// WAVE 9 W4: read through the published snapshot, not the mirror global.
+	secret := domains.Current().Proxy.APISecret
 	if secret == "" {
 		// An unset secret must not turn into "everyone matches the empty
 		// string".
