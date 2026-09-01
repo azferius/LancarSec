@@ -887,3 +887,38 @@ func TestReloadIsIdempotent(t *testing.T) {
 		t.Errorf("domains.Domains = %v, want two entries and no duplicates", domains.Domains)
 	}
 }
+
+// WAVE 10: hide_version_header is a tri-state. Absent -> header HIDDEN (a
+// mitigation product should not announce its version); explicit false -> shown
+// (the operator's opt-in); explicit true -> hidden. Pinned through the real
+// normalise stage because the request-path pins in core/server set the
+// resolved bool directly and cannot catch a resolution regression here.
+func TestNormaliseResolvesHideVersionHeaderTriState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*domains.Configuration)
+		want  bool
+	}{
+		{"absent means hidden", func(c *domains.Configuration) {}, false},
+		{"explicit false opts back in", func(c *domains.Configuration) {
+			f := false
+			c.Proxy.HideVersionHeader = &f
+		}, true},
+		{"explicit true stays hidden", func(c *domains.Configuration) {
+			v := true
+			c.Proxy.HideVersionHeader = &v
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgIsolate(t)
+
+			cfg := cfgFixture("a.example")
+			tc.setup(cfg)
+			cfgPublish(t, cfg, modeStartup)
+
+			if got := domains.Current().Proxy.ShowVersionHeader; got != tc.want {
+				t.Errorf("ShowVersionHeader = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

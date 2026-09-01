@@ -195,7 +195,7 @@ func normalise(cfg *domains.Configuration) {
 	// should not announce its exact version. Only an explicit
 	// "hide_version_header": false opts back in. The request path reads the
 	// resolved bool, never the pointer.
-	cfg.Proxy.ShowVersionHeader = cfg.Proxy.HideVersionHeader == nil || *cfg.Proxy.HideVersionHeader
+	cfg.Proxy.ShowVersionHeader = cfg.Proxy.HideVersionHeader != nil && !*cfg.Proxy.HideVersionHeader
 
 	for i := range cfg.Domains {
 		domain := &cfg.Domains[i]
