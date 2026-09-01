@@ -445,7 +445,10 @@ outbox activity) — standups handled internally.
   secrets on load and reload (pipeline.go:527-533). There is nothing left to republish.
 - **Verification:** gates green first — gofmt/vet/build/mod tidy clean, `go test -race ./...`
   all 12 packages ok; new tests (`TestMiddlewareRedactsSecretsFromAccessLogs`, three
-  validate-reject cases) live. Independent scoped verifier launched after commit.
+  validate-reject cases) live. Independent scoped verifier returned **PASS** on all claims
+  including adversarial probes (empty-secret redaction without corruption, both-secrets-empty
+  verbatim logging, 16/15-byte secret boundary) and a fresh `-count=1` race suite; spot-checked
+  (HEAD hash, tree clean, zero code references to the deleted atomic).
 
 ### Already fixed — do not re-scope (waves 5/6)
 
