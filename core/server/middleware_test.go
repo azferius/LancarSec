@@ -1366,11 +1366,11 @@ func TestMiddlewareStage3CaptchaFromCache(t *testing.T) {
 	env.mwSetStage(3)
 
 	token := mwCaptchaToken()
-	secretPart := token[:6]
 	publicPart := token[6:]
 	// Pre-seed the image cache so the response is fully deterministic (captcha
-	// generation itself uses math/rand).
-	firewall.CacheImgs.Store(secretPart, [2]string{"CAPTCHA_PNG_DATA", "MASK_PNG_DATA"})
+	// generation itself uses math/rand). WAVE 11: the cache is keyed on the
+	// full token, not its 24-bit secret prefix.
+	firewall.CacheImgs.Store(token, [2]string{"CAPTCHA_PNG_DATA", "MASK_PNG_DATA"})
 
 	rec := mwDo(mwRequest("/"))
 
@@ -1400,15 +1400,15 @@ func TestMiddlewareStage3CaptchaGenerationCaches(t *testing.T) {
 	env.mwSetStage(3)
 
 	token := mwCaptchaToken()
-	secretPart := token[:6]
 
 	rec := mwDo(mwRequest("/"))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,iVBOR`)
 
-	got, ok := firewall.CacheImgs.Load(secretPart)
+	// WAVE 11: the cache is keyed on the full token.
+	got, ok := firewall.CacheImgs.Load(token)
 	if !ok {
-		t.Fatalf("CacheImgs has no entry for secret part %q after generating a captcha", secretPart)
+		t.Fatalf("CacheImgs has no entry for the full token %q after generating a captcha", mwTrunc(token, 16))
 	}
 	pair, ok := got.([2]string)
 	if !ok {

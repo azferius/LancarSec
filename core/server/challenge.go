@@ -235,7 +235,12 @@ func serveStage3Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, encr
 
 	captchaData := ""
 	maskData := ""
-	captchaCache, captchaExists := firewall.CacheImgs.Load(secretPart)
+	// WAVE 11: the cache is keyed on the FULL token, not secretPart. Six hex
+	// chars are 24 bits - birthday collisions start around 4000 concurrent
+	// stage-3 clients, and a collision served client B the PNG carrying
+	// client A's complete token. The full token is blake3 hex of the access
+	// key, so it is collision-free as a key.
+	captchaCache, captchaExists := firewall.CacheImgs.Load(encryptedIP)
 
 	if !captchaExists {
 		randomShift := utils.RandomIntN(50) - 25
@@ -290,7 +295,7 @@ func serveStage3Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, encr
 		captchaData = base64.StdEncoding.EncodeToString(captchaBuf.Bytes())
 		maskData = base64.StdEncoding.EncodeToString(maskBuf.Bytes())
 
-		firewall.CacheImgs.Store(secretPart, [2]string{captchaData, maskData})
+		firewall.CacheImgs.Store(encryptedIP, [2]string{captchaData, maskData})
 	} else {
 		captchaDataTmp := captchaCache.([2]string)
 		captchaData = captchaDataTmp[0]
