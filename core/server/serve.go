@@ -123,7 +123,7 @@ func handlePort80(w http.ResponseWriter, r *http.Request) {
 
 	if !domainFound {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprint(w, "balooProxy: "+r.Host+" does not exist. If you are the owner please check your config.json if you believe this is a mistake")
+		fmt.Fprint(w, "LancarSec: "+r.Host+" does not exist. If you are the owner please check your config.json if you believe this is a mistake")
 		return
 	}
 

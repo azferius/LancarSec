@@ -191,6 +191,12 @@ func normalise(cfg *domains.Configuration) {
 		cfg.Proxy.MaxBodySize = defaultMaxBodySize
 	}
 
+	// WAVE 10: hide_version_header defaults to HIDDEN - a mitigation product
+	// should not announce its exact version. Only an explicit
+	// "hide_version_header": false opts back in. The request path reads the
+	// resolved bool, never the pointer.
+	cfg.Proxy.ShowVersionHeader = cfg.Proxy.HideVersionHeader == nil || *cfg.Proxy.HideVersionHeader
+
 	for i := range cfg.Domains {
 		domain := &cfg.Domains[i]
 

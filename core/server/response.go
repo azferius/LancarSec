@@ -55,8 +55,8 @@ func SendResponseWithStatus(status int, str string, buffer *bytes.Buffer, writer
 
 // The paths the vendored stage-2 proof-of-work bundle is served from.
 const (
-	powBalooPowPath = "/_bProxy/balooPow.min.js"
-	powCryptoJSPath = "/_bProxy/crypto-js.min.js"
+	powBalooPowPath = "/_lancarsec/balooPow.min.js"
+	powCryptoJSPath = "/_lancarsec/crypto-js.min.js"
 )
 
 // servePowAsset writes one of the embedded stage-2 scripts byte for byte.
@@ -78,9 +78,9 @@ func servePowAsset(writer http.ResponseWriter, asset []byte) {
 // authorisedProxyEndpoint reports whether a request carries the API secret in
 // the same header core/api reads.
 //
-// /_bProxy/stats reports live bypassed-requests-per-second, which is direct
+// /_lancarsec/stats reports live bypassed-requests-per-second, which is direct
 // feedback to an attacker on whether his flood is getting through, plus the
-// build fingerprint; /_bProxy/fingerprint reports the caller's ratelimit
+// build fingerprint; /_lancarsec/fingerprint reports the caller's ratelimit
 // counters and the proxy's view of his TLS fingerprint, which is a free oracle
 // for tuning an evasion. Both used to be served to anyone who cleared the
 // challenge.
@@ -93,6 +93,23 @@ func authorisedProxyEndpoint(request *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(request.Header.Get("Proxy-Secret")), []byte(secret)) == 1
+}
+
+// authorisedAdminEndpoint is the WAVE 10 gate for /_lancarsec/api/v1, the
+// admin API. The admin secret used to live in the URL path
+// (/_bProxy/<adminsecret>/api/v1): it landed in access logs, browser history
+// and Referer headers, and the legacy path had to be proxied to know it was
+// not a real site. The secret now travels in the Admin-Secret header against
+// a FIXED path, and a failed check is a plain 404 - same signalling rule as
+// proxyEndpointNotFound.
+func authorisedAdminEndpoint(request *http.Request) bool {
+	secret := domains.Current().Proxy.AdminSecret
+	if secret == "" {
+		// An unset secret must not turn into "everyone matches the empty
+		// string".
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(request.Header.Get("Admin-Secret")), []byte(secret)) == 1
 }
 
 // proxyEndpointNotFound answers an unauthorised proxy endpoint with a plain

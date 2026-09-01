@@ -259,7 +259,7 @@ func ratelimitKeyFor(addr netip.Addr, rendered string) string {
 
 // ipString renders the subject address for the places that need an exact
 // identity: the access key, the stage-3 cookie name, the access log, the
-// backend identity headers and the gated /_bProxy/fingerprint report.
+// backend identity headers and the gated /_lancarsec/fingerprint report.
 //
 // An invalid address renders as "" rather than netip's "invalid IP", so a
 // request whose peer could not be parsed does not put that literal into a

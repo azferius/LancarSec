@@ -25,10 +25,19 @@ import (
 
 // proxyCookieSuffix is the shared suffix of every challenge cookie the proxy
 // issues: "_1"+suffix for stage 1, "_2"+suffix for stage 2 and "_3"+suffix
-// for stage 3. Renaming this token is wave 10's job - it invalidates every
-// clearance cookie in flight - so it stays spelled exactly as it is on the
-// wire today.
-const proxyCookieSuffix = "__bProxy_v"
+// for stage 3.
+//
+// WAVE 10 rebrand: the token was renamed from "__bProxy_v" to "__lSec_v",
+// which by itself invalidates every clearance cookie in flight. To keep the
+// cutover from challenging every established client, legacyProxyCookieSuffix
+// below is still ACCEPTED for one release (issued never).
+const proxyCookieSuffix = "__lSec_v"
+
+// legacyProxyCookieSuffix is the pre-rebrand cookie token. One release of
+// grace: a client presenting it is verified and immediately re-issued the new
+// name, and stripProxyCookies strips it from every forwarded request either
+// way. Remove this const (and its use sites) one release after the cutover.
+const legacyProxyCookieSuffix = "__bProxy_v"
 
 // challengeCookieName is the name of the cookie a client is expected to
 // present for a given suspicion level. Levels with no challenge (0, and
@@ -68,7 +77,7 @@ func requestCookie(request *http.Request, name string) (string, bool) {
 	// token, and a cookie name is client-chosen junk the moment an attacker
 	// invents one. So fall back to walking the header ourselves rather than
 	// letting a name that does not parse as a token hide a presented cookie.
-	// WAVE 9: the stage-3 name the proxy issues ("_3__bProxy_v") is itself a
+	// WAVE 9: the stage-3 name the proxy issues ("_3__lSec_v") is itself a
 	// valid token now that it no longer embeds the client ip, so the primary
 	// request.Cookie lookup covers it; the walk remains for exact-match
 	// robustness and is still never a substring test.
@@ -81,6 +90,62 @@ func requestCookie(request *http.Request, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// carriesProxyToken reports whether a raw Cookie header or a single cookie
+// NAME carries one of the proxy's clearance tokens - current or legacy. The
+// match is a substring test BY DESIGN here: it is what stripProxyCookies and
+// the verify grace use to catch a token under ANY prefix, and neither site
+// uses it to decide what a request is.
+//
+// WAVE 10: the legacy arm goes away with legacyProxyCookieSuffix.
+func carriesProxyToken(s string) bool {
+	return strings.Contains(s, proxyCookieSuffix) || strings.Contains(s, legacyProxyCookieSuffix)
+}
+
+// legacyCookieNames returns the pre-rebrand cookie NAMES a challenged client
+// may still present for susLv, in lookup order. The proxy never issues these
+// any more; they exist only for the one-release verify grace. Legacy stage-3
+// cookies predate wave 9, so the name may embed the raw client ip - the ip is
+// passed in and both spellings are offered. The constant-time compare at the
+// verify site gates the VALUE either way.
+//
+// WAVE 10: remove this helper with legacyProxyCookieSuffix.
+func legacyCookieNames(susLv int, ip string) []string {
+	switch susLv {
+	case 1:
+		return []string{"_1" + legacyProxyCookieSuffix}
+	case 2:
+		return []string{"_2" + legacyProxyCookieSuffix}
+	case 3:
+		names := []string{"_3" + legacyProxyCookieSuffix}
+		if ip != "" {
+			return append(names, ip+"_3"+legacyProxyCookieSuffix)
+		}
+		return names
+	default:
+		return nil
+	}
+}
+
+// reissueClearanceCookie re-writes the CURRENT name for susLv with the token
+// the client just proved via a legacy cookie, so an established client
+// migrates off the old name during the grace release instead of carrying it
+// forever. Stage 1 gets HttpOnly (the proxy is its only reader); stages 2 and
+// 3 cannot - the challenge pages rewrite those names from script, and a
+// browser refuses to let script set an HttpOnly cookie - so they are written
+// exactly as the pages write them.
+//
+// WAVE 10: remove this helper with legacyProxyCookieSuffix.
+func reissueClearanceCookie(writer http.ResponseWriter, susLv int, encryptedIP string) {
+	if susLv < 1 || susLv > 3 || encryptedIP == "" {
+		return
+	}
+	cookie := challengeCookieName(susLv) + "=" + encryptedIP + "; SameSite=Lax; path=/; Secure"
+	if susLv == 1 {
+		cookie += "; HttpOnly"
+	}
+	writer.Header().Add("Set-Cookie", cookie)
 }
 
 // stripProxyCookies removes every challenge cookie from the request before it
@@ -96,7 +161,7 @@ func stripProxyCookies(request *http.Request) {
 	rewritten := make([]string, 0, len(headers))
 	changed := false
 	for _, header := range headers {
-		if !strings.Contains(header, proxyCookieSuffix) {
+		if !carriesProxyToken(header) {
 			rewritten = append(rewritten, header)
 			continue
 		}
@@ -107,10 +172,10 @@ func stripProxyCookies(request *http.Request) {
 		for _, pair := range pairs {
 			pair = strings.TrimSpace(pair)
 			cookieName, _, _ := strings.Cut(pair, "=")
-			// Matched on the suffix, not on equality: "_1__bProxy_v",
-			// "<ip>_3__bProxy_v" and any other prefix an attacker invents all
-			// carry the same token and all have to go.
-			if strings.Contains(cookieName, proxyCookieSuffix) {
+			// Matched on a suffix, not on equality: "_1__lSec_v", the legacy
+			// "_1__bProxy_v" and any other prefix an attacker invents all
+			// carry a proxy token and all have to go.
+			if carriesProxyToken(cookieName) {
 				continue
 			}
 			kept = append(kept, pair)
@@ -219,7 +284,7 @@ func renderPowChallenge(writer http.ResponseWriter, buffer *bytes.Buffer, cookie
 		// Unreachable with these value types, but a half-rendered page must
 		// never leave as 200.
 		buffer.Reset()
-		log.Printf("BalooProxy: failed to render proof-of-work challenge page: %v", err)
+		log.Printf("LancarSec: failed to render proof-of-work challenge page: %v", err)
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
 		return

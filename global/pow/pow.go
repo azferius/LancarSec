@@ -4,7 +4,7 @@
 // from cdnjs — a mutable ref with no SRI, so the repo owner, jsDelivr or
 // cdnjs could neuter or mutate the challenge for every challenged visitor
 // mid-attack, and the client's IP leaked to two third parties on every
-// challenge. They are now embedded and served first-party from /_bProxy/
+// challenge. They are now embedded and served first-party from /_lancarsec/
 // (see core/server/middleware.go).
 //
 // The worker inside balooPow imported crypto-js 4.0.0 from cdnjs itself;

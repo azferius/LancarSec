@@ -20,8 +20,10 @@ import (
 const (
 	// apiV2Prefix is the path marker core/server routes to ProcessV2. It is
 	// duplicated rather than shared because the middleware owns the routing
-	// decision and this package owns the parsing of what is left.
-	apiV2Prefix = "/_bProxy/api/v2"
+	// decision and this package owns the parsing of what is left. WAVE 10: the
+	// middleware rewrites the legacy /_bProxy/api/v2 spelling onto this prefix
+	// inside its v2 branch, so this stays the only spelling parsed here.
+	apiV2Prefix = "/_lancarsec/api/v2"
 
 	// maxBodyBytes caps the admin API request body. An API_REQUEST is two short
 	// strings; anything larger is either a mistake or an attempt to make the
@@ -119,7 +121,9 @@ func delayAuthFailure(ctx context.Context) {
 	}
 }
 
-// Process handles the v1 admin API, reached at /_bProxy/<adminsecret>/api/v1.
+// Process handles the v1 admin API, reached at the fixed /_lancarsec/api/v1
+// path with the admin secret in the Admin-Secret header (WAVE 10: the core
+// server gate checks that; this re-checks the API secret below).
 //
 // It reports whether the request was handled. Every path below now handles the
 // request, including authentication failure; returning false after having
@@ -298,7 +302,7 @@ func handleDomainActions(action string, writer http.ResponseWriter, domainData *
 	}
 }
 
-// ProcessV2 handles the path-addressed admin API, /_bProxy/api/v2/[:domain/]:action.
+// ProcessV2 handles the path-addressed admin API, /_lancarsec/api/v2/[:domain/]:action.
 //
 // It reports whether the request was handled. As with Process, everything past
 // the routing marker is now handled here rather than falling through to the

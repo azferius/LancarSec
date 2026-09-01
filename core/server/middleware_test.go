@@ -84,20 +84,20 @@ func mwJSToken() string      { return utils.Encrypt(mwAccessKey(2), mwJSOTP) }
 func mwCaptchaToken() string { return utils.Encrypt(mwAccessKey(3), mwCaptchaOTP) }
 
 // mwStage1Cookie / mwStage2Cookie / mwStage3Cookie are the cookie NAMES the
-// proxy issues and now requires per stage. Wave 10 owns renaming the shared
-// "__bProxy_v" token; until then these are the wire names.
+// proxy issues and now requires per stage, after the wave-10 rebrand of the
+// shared token to "__lSec_v".
 const (
-	mwStage1Cookie = "_1__bProxy_v"
-	mwStage2Cookie = "_2__bProxy_v"
+	mwStage1Cookie = "_1__lSec_v"
+	mwStage2Cookie = "_2__lSec_v"
 )
 
 // WAVE 9: mwStage3Cookie no longer embeds the client ip. The stage-3 name used
-// to be ip+"_3__bProxy_v", but an IPv6 ip carries ':' and browsers reject ':'
+// to be ip+"_3__bProxy_v" (pre-rebrand spelling), but an IPv6 ip carries ':' and browsers reject ':'
 // in document.cookie NAMES, which made stage 3 unsolvable for every IPv6
 // client. Binding the token to the ip lives in the token VALUE (the access key
 // is length-prefixed over the ip as of wave 5), not in the name. The helper
 // keeps its function shape so the flipped call sites below stay visible.
-func mwStage3Cookie() string { return "_3__bProxy_v" }
+func mwStage3Cookie() string { return "_3__lSec_v" }
 
 // ---------------------------------------------------------------------------
 // harness
@@ -264,10 +264,14 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 	// --- config ---
 	domains.Publish(&domains.Configuration{
 		Proxy: domains.Proxy{
-			Cloudflare:      false,
-			AdminSecret:     mwAdminSecret,
-			APISecret:       mwAPISecret,
-			RatelimitWindow: 120,
+			Cloudflare:  false,
+			AdminSecret: mwAdminSecret,
+			APISecret:   mwAPISecret,
+			// The harness opts the version header back IN so the tests that
+			// pin "LancarSec-Proxy: 1.5" still exercise the set path; the
+			// default-hidden behaviour has its own test below.
+			ShowVersionHeader: true,
+			RatelimitWindow:   120,
 			Ratelimits: map[string]int{
 				"requests":           500,
 				"unknownFingerprint": 150,
@@ -389,8 +393,8 @@ func mwWithMethod(m string) mwReqOpt {
 	return func(r *http.Request) { r.Method = m }
 }
 
-// mwWithAPISecret authenticates a request to a gated /_bProxy/* endpoint.
-// FLIPPED BY WAVE 5: /_bProxy/stats and /_bProxy/fingerprint used to be served
+// mwWithAPISecret authenticates a request to a gated /_lancarsec/* endpoint.
+// FLIPPED BY WAVE 5: the stats and fingerprint endpoints used to be served
 // to any client that cleared the challenge.
 func mwWithAPISecret() mwReqOpt {
 	return mwWithHeader("Proxy-Secret", mwAPISecret)
@@ -517,8 +521,8 @@ func TestMiddlewareUnknownDomain(t *testing.T) {
 			}
 			// The version header is set AFTER the domain lookup, so unknown-domain
 			// responses carry no proxy header at all.
-			if v := rec.Result().Header.Get("baloo-Proxy"); v != "" {
-				t.Errorf("baloo-Proxy = %q, want empty on the unknown-domain path", v)
+			if v := rec.Result().Header.Get("LancarSec-Proxy"); v != "" {
+				t.Errorf("LancarSec-Proxy = %q, want empty on the unknown-domain path", v)
 			}
 			if env.mwBackendHits() != 0 {
 				t.Errorf("backend was reached on the unknown-domain path")
@@ -728,8 +732,8 @@ func TestMiddlewareDomainsMapMissingReturns404(t *testing.T) {
 	// The guard sits AFTER the counter bump and the version header, unlike the
 	// unknown-domain check at the top of Middleware. Pinning that here so a
 	// later wave that hoists the settings lookup has to say so.
-	if v := rec.Result().Header.Get("baloo-Proxy"); v != "1.5" {
-		t.Errorf("baloo-Proxy = %q, want 1.5", v)
+	if v := rec.Result().Header.Get("LancarSec-Proxy"); v != "1.5" {
+		t.Errorf("LancarSec-Proxy = %q, want 1.5", v)
 	}
 	if got := env.mwDomainData().TotalRequests; got != 1 {
 		t.Errorf("TotalRequests = %d, want 1", got)
@@ -844,7 +848,7 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			// with Retry-After matching the 10-second counter window.
 			mwAssertStatus(t, rec, http.StatusTooManyRequests)
 			mwAssertBodyContains(t, rec, tc.wantBody)
-			mwAssertBodyContains(t, rec, "Blocked by BalooProxy.")
+			mwAssertBodyContains(t, rec, "Blocked by LancarSec.")
 			if ra := rec.Result().Header.Get("Retry-After"); ra != "10" {
 				t.Errorf("Retry-After = %q, want 10", ra)
 			}
@@ -854,8 +858,8 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 				t.Errorf("Content-Type = %q, want text/plain", ct)
 			}
-			if v := rec.Result().Header.Get("baloo-Proxy"); v != "1.5" {
-				t.Errorf("baloo-Proxy = %q, want 1.5", v)
+			if v := rec.Result().Header.Get("LancarSec-Proxy"); v != "1.5" {
+				t.Errorf("LancarSec-Proxy = %q, want 1.5", v)
 			}
 			if env.mwBackendHits() != 0 {
 				t.Error("backend was reached despite the ratelimit")
@@ -875,7 +879,7 @@ func TestMiddlewareRatelimits(t *testing.T) {
 			// That is the single most likely slip when these checks are moved
 			// into a helper, and in production it means the proxy prints "you
 			// have been ratelimited" and then serves the flood anyway.
-			wantExact := "Blocked by BalooProxy.\n" + tc.wantBody
+			wantExact := "Blocked by LancarSec.\n" + tc.wantBody
 			if got := rec.Body.String(); got != wantExact {
 				t.Errorf("body = %q, want exactly %q (the ratelimit branch must return immediately)", mwTrunc(got, 400), wantExact)
 			}
@@ -1178,6 +1182,69 @@ func TestMiddlewareStage1Challenge(t *testing.T) {
 	}
 }
 
+// WAVE 10 (BRAND): hide_version_header defaults to hidden - the proxy does not
+// announce its exact build to an attacker probing it. The header only comes
+// back when the config opts in explicitly.
+func TestMiddlewareVersionHeaderHiddenByDefault(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+
+	cfg := *domains.Current()
+	cfg.Proxy.ShowVersionHeader = false
+	domains.Publish(&cfg)
+
+	rec := mwDo(mwRequest("/"))
+	mwAssertBodyContains(t, rec, mwBackendBody)
+	if v := rec.Result().Header.Get("LancarSec-Proxy"); v != "" {
+		t.Errorf("LancarSec-Proxy = %q, want empty without an explicit opt-in", v)
+	}
+}
+
+// WAVE 10: one-release verify grace for the rebrand. A client still carrying
+// the pre-rebrand cookie NAME is verified against the same token space and is
+// re-issued the current name in the same response; the token VALUE is what
+// actually gates.
+func TestMiddlewareLegacyCookieGrace(t *testing.T) {
+	t.Run("stage 1 legacy name verifies and is re-issued", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(1)
+
+		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v="+mwCookieToken())))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+		wantReissue := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
+		if got := rec.Result().Header.Get("Set-Cookie"); got != wantReissue {
+			t.Errorf("reissue Set-Cookie = %q, want %q", got, wantReissue)
+		}
+	})
+
+	t.Run("legacy name with a wrong value does not verify", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(1)
+
+		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v=deadbeef")))
+		// A failed legacy check is just a fresh stage-1 challenge: 302 plus a
+		// new token under the CURRENT name - never the presented junk.
+		mwAssertStatus(t, rec, http.StatusFound)
+		wantChallenge := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
+		if got := rec.Result().Header.Get("Set-Cookie"); got != wantChallenge {
+			t.Errorf("Set-Cookie = %q, want the fresh stage-1 challenge cookie %q", got, wantChallenge)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached on a failed legacy check")
+		}
+	})
+
+	t.Run("stage 2 legacy name verifies", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(2)
+
+		rec := mwDo(mwRequest("/", mwWithCookie("_2__bProxy_v="+mwJSToken())))
+		mwAssertStatus(t, rec, http.StatusOK)
+		mwAssertBodyContains(t, rec, mwBackendBody)
+	})
+}
+
 // WAVE 9: a protocol-relative request-target used to become an open redirect.
 // "GET //evil.com/ HTTP/1.1" parses (viaRequest, no scheme) with the '//' left
 // in Path and Host EMPTY - url.ParseRequestURI never reads a scheme-less '//' as
@@ -1312,13 +1379,13 @@ func TestMiddlewareStage2Challenge(t *testing.T) {
 	}
 	mwAssertBodyContains(t, rec, publicSalt)
 	mwAssertBodyContains(t, rec, hashed)
-	mwAssertBodyContains(t, rec, `document.cookie="_2__bProxy_v=`+publicSalt+`"`)
+	mwAssertBodyContains(t, rec, `document.cookie="_2__lSec_v=`+publicSalt+`"`)
 	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(mwStage2Difficulty)+`,"`+hashed+`",!1)`)
 	// WAVE 9: FLIPPED. The proof-of-work scripts are vendored (global/pow) and
 	// served first-party; the mutable third-party CDN references with no SRI
 	// that neutered stage 2 whenever a CDN was down are gone.
-	mwAssertBodyContains(t, rec, `/_bProxy/balooPow.min.js`)
-	mwAssertBodyContains(t, rec, `/_bProxy/crypto-js.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/crypto-js.min.js`)
 	mwAssertBodyNotContains(t, rec, "cdn.jsdelivr.net")
 	mwAssertBodyNotContains(t, rec, "cdnjs.cloudflare.com")
 	if env.mwBackendHits() != 0 {
@@ -1348,7 +1415,7 @@ func TestMiddlewareStage2SolvedCookiePasses(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(2)
 
-	rec := mwDo(mwRequest("/", mwWithCookie("_2__bProxy_v="+mwJSToken())))
+	rec := mwDo(mwRequest("/", mwWithCookie(mwStage2Cookie+"="+mwJSToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
 	if env.mwBackendHits() != 1 {
@@ -1384,8 +1451,8 @@ func TestMiddlewareStage3PowPage(t *testing.T) {
 	// stage-specific branch.
 	mwAssertBodyContains(t, rec, `document.cookie="`+mwStage3Cookie()+`=`+publicSalt+`"+e.solution+"; SameSite=Lax; path=/; Secure"`)
 	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(difficulty)+`,"`+hashed+`",!1)`)
-	mwAssertBodyContains(t, rec, `/_bProxy/balooPow.min.js`)
-	mwAssertBodyContains(t, rec, `/_bProxy/crypto-js.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/crypto-js.min.js`)
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-3 challenge")
 	}
@@ -1405,7 +1472,7 @@ func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(3)
 
-	// The client sends "_3__bProxy_v=<solution><publicSalt>", which for a
+	// The client sends "_3__lSec_v=<solution><publicSalt>", which for a
 	// correct solution is the whole token.
 	rec := mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie()+"="+mwCaptchaToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
@@ -1660,7 +1727,7 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		env.mwSetStage(0)
 
 		// FLIPPED BY WAVE 5: /_bProxy/stats now requires the API secret.
-		rec := mwDo(mwRequest("/_bProxy/stats", mwWithAPISecret()))
+		rec := mwDo(mwRequest("/_lancarsec/stats", mwWithAPISecret()))
 		mwAssertStatus(t, rec, http.StatusOK)
 		if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
 			t.Errorf("Content-Type = %q, want text/plain", ct)
@@ -1688,7 +1755,7 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		firewall.BotFingerprints[mwFP] = "-bot"
 
 		// FLIPPED BY WAVE 5: /_bProxy/fingerprint now requires the API secret.
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret()))
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret()))
 		mwAssertStatus(t, rec, http.StatusOK)
 		mwAssertBodyContains(t, rec, "IP: "+mwIP)
 		mwAssertBodyContains(t, rec, "IP Requests: 7")
@@ -1705,7 +1772,7 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/verified"))
+		rec := mwDo(mwRequest("/_lancarsec/verified"))
 		mwAssertStatus(t, rec, http.StatusOK)
 		if body := rec.Body.String(); body != "verified" {
 			t.Errorf("body = %q, want %q", body, "verified")
@@ -1719,10 +1786,11 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/credits"))
+		rec := mwDo(mwRequest("/_lancarsec/credits"))
 		mwAssertStatus(t, rec, http.StatusOK)
-		// Required by the GPL. Flips in the wave that rebrands runtime strings.
-		want := "BalooProxy; Lightweight http reverse-proxy https://github.com/41Baloo/balooProxy. Protected by GNU GENERAL PUBLIC LICENSE Version 2, June 1991"
+		// Required by the GPL: rebranded in wave 10, upstream attribution kept
+		// and the license line corrected to the v3 the repository ships under.
+		want := "LancarSec; lightweight http reverse-proxy, based on BalooProxy by 41Baloo (https://github.com/41Baloo/balooProxy). Protected by GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007"
 		if body := rec.Body.String(); body != want {
 			t.Errorf("credits body = %q, want %q", body, want)
 		}
@@ -1735,10 +1803,10 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/not-a-real-endpoint"))
+		rec := mwDo(mwRequest("/_lancarsec/not-a-real-endpoint"))
 		mwAssertStatus(t, rec, http.StatusOK)
 		mwAssertBodyContains(t, rec, mwBackendBody)
-		if got := rec.Result().Header.Get("X-Echo-Path"); got != "/_bProxy/not-a-real-endpoint" {
+		if got := rec.Result().Header.Get("X-Echo-Path"); got != "/_lancarsec/not-a-real-endpoint" {
 			t.Errorf("backend saw path %q", got)
 		}
 	})
@@ -1750,7 +1818,7 @@ func TestMiddlewareReservedPathsRequireChallenge(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(1)
 
-	rec := mwDo(mwRequest("/_bProxy/stats"))
+	rec := mwDo(mwRequest("/_lancarsec/stats"))
 	mwAssertStatus(t, rec, http.StatusFound)
 	mwAssertBodyNotContains(t, rec, "Total Requests")
 	if env.mwBackendHits() != 0 {
@@ -1770,12 +1838,12 @@ func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
 		wantBody string
 		secret   bool
 	}{
-		{name: "stats", target: "/_bProxy/stats?x=1", wantBody: "Total Requests: 1", secret: true},
-		{name: "fingerprint", target: "/_bProxy/fingerprint?x=1", wantBody: "IP: " + mwIP, secret: true},
-		{name: "verified", target: "/_bProxy/verified?x=1", wantBody: "verified"},
-		{name: "credits", target: "/_bProxy/credits?x=1", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
-		{name: "credits with a bare query marker", target: "/_bProxy/credits?", wantBody: "BalooProxy; Lightweight http reverse-proxy"},
-		{name: "verified with a fragment-looking query", target: "/_bProxy/verified?a=b&c=d", wantBody: "verified"},
+		{name: "stats", target: "/_lancarsec/stats?x=1", wantBody: "Total Requests: 1", secret: true},
+		{name: "fingerprint", target: "/_lancarsec/fingerprint?x=1", wantBody: "IP: " + mwIP, secret: true},
+		{name: "verified", target: "/_lancarsec/verified?x=1", wantBody: "verified"},
+		{name: "credits", target: "/_lancarsec/credits?x=1", wantBody: "LancarSec; lightweight http reverse-proxy"},
+		{name: "credits with a bare query marker", target: "/_lancarsec/credits?", wantBody: "LancarSec; lightweight http reverse-proxy"},
+		{name: "verified with a fragment-looking query", target: "/_lancarsec/verified?a=b&c=d", wantBody: "verified"},
 	}
 
 	for _, tc := range cases {
@@ -1806,9 +1874,10 @@ func TestMiddlewareReservedPathsIgnoreTheQueryString(t *testing.T) {
 		env.mwSetStage(0)
 		proxy.SetCpuUsage("12.5%")
 
-		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1?x=1",
+		req := mwRequest("/_lancarsec/api/v1?x=1",
 			mwWithMethod(http.MethodPost),
-			mwWithHeader("proxy-secret", mwAPISecret),
+			mwWithHeader("Admin-Secret", mwAdminSecret),
+			mwWithHeader("Proxy-Secret", mwAPISecret),
 		)
 		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
 		rec := mwDo(req)
@@ -1840,7 +1909,7 @@ func TestMiddlewareStatsReportsTotalAndBypassedSeparately(t *testing.T) {
 	env.mwSetStage(0)
 	mwDo(mwRequest("/"))
 
-	rec := mwDo(mwRequest("/_bProxy/stats", mwWithAPISecret()))
+	rec := mwDo(mwRequest("/_lancarsec/stats", mwWithAPISecret()))
 
 	mwAssertStatus(t, rec, http.StatusOK)
 	// 3 blocked + 1 allowed + this one = 5 total; 1 allowed + this one = 2
@@ -1863,9 +1932,10 @@ func TestMiddlewareAdminAPIv1(t *testing.T) {
 		proxy.SetCpuUsage("12.5%")
 		proxy.SetRamUsage("34.5%")
 
-		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1",
+		req := mwRequest("/_lancarsec/api/v1",
 			mwWithMethod(http.MethodPost),
-			mwWithHeader("proxy-secret", mwAPISecret),
+			mwWithHeader("Admin-Secret", mwAdminSecret),
+			mwWithHeader("Proxy-Secret", mwAPISecret),
 		)
 		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
 		rec := mwDo(req)
@@ -1896,7 +1966,7 @@ func TestMiddlewareAdminAPIv1(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/" + mwAdminSecret + "/api/v1"))
+		rec := mwDo(mwRequest("/_lancarsec/api/v1", mwWithHeader("Admin-Secret", mwAdminSecret)))
 
 		// Wave 5 flipped this. api.Process used to return false on an auth
 		// failure, and the switch case has no return, so an unauthenticated
@@ -1915,20 +1985,27 @@ func TestMiddlewareAdminAPIv1(t *testing.T) {
 		}
 	})
 
-	t.Run("wrong admin secret in the path is not an api call", func(t *testing.T) {
+	t.Run("the legacy secret-in-path spelling is dead, not proxied", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		req := mwRequest("/_bProxy/wrong-secret/api/v1",
+		// WAVE 10: the admin path used to embed the admin secret
+		// (/_bProxy/<adminsecret>/api/v1). The rebrand moved it to the fixed
+		// /_lancarsec/api/v1 with the secret in the Admin-Secret header, and
+		// the legacy spelling - even with the CORRECT secret in it - is
+		// answered 404 by the reserved switch and never handed to the customer
+		// backend, which would have logged the secret.
+		req := mwRequest("/_bProxy/"+mwAdminSecret+"/api/v1",
 			mwWithMethod(http.MethodPost),
 			mwWithHeader("proxy-secret", mwAPISecret),
 		)
 		req.Body = mwBody(`{"action":"GET_PROXY_STATS"}`)
 		rec := mwDo(req)
 
-		mwAssertBodyContains(t, rec, mwBackendBody)
-		if env.mwBackendHits() != 1 {
-			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		mwAssertStatus(t, rec, http.StatusNotFound)
+		mwAssertBodyNotContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0", env.mwBackendHits())
 		}
 	})
 }
@@ -1939,7 +2016,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		env.mwSetStage(0)
 		proxy.SetCpuUsage("99%")
 
-		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS_CPU_USAGE",
+		rec := mwDo(mwRequest("/_lancarsec/api/v2/GET_PROXY_STATS_CPU_USAGE",
 			mwWithHeader("Proxy-Secret", mwAPISecret)))
 
 		mwAssertStatus(t, rec, http.StatusOK)
@@ -1953,7 +2030,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/api/v2/"+mwDomain+"/GET_TOTAL_REQUESTS",
+		rec := mwDo(mwRequest("/_lancarsec/api/v2/"+mwDomain+"/GET_TOTAL_REQUESTS",
 			mwWithHeader("Proxy-Secret", mwAPISecret)))
 
 		mwAssertStatus(t, rec, http.StatusOK)
@@ -1964,7 +2041,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/api/v2/nope.example/GET_TOTAL_REQUESTS",
+		rec := mwDo(mwRequest("/_lancarsec/api/v2/nope.example/GET_TOTAL_REQUESTS",
 			mwWithHeader("Proxy-Secret", mwAPISecret)))
 
 		mwAssertBodyContains(t, rec, `"ERROR":"ERR_DOMAIN_NOT_FOUND"`)
@@ -1979,7 +2056,7 @@ func TestMiddlewareAPIv2(t *testing.T) {
 		// unauthenticated admin request used to be proxied to the customer
 		// backend, so the endpoint could be located by response-code
 		// differencing without guessing the secret.
-		rec := mwDo(mwRequest("/_bProxy/api/v2/GET_PROXY_STATS"))
+		rec := mwDo(mwRequest("/_lancarsec/api/v2/GET_PROXY_STATS"))
 		mwAssertStatus(t, rec, http.StatusNotFound)
 		mwAssertBodyNotContains(t, rec, mwBackendBody)
 		if env.mwBackendHits() != 0 {
@@ -2045,8 +2122,8 @@ func TestMiddlewareForwardsClientInfoHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
-	if v := h.Get("baloo-Proxy"); v != "1.5" {
-		t.Errorf("baloo-Proxy = %q, want 1.5", v)
+	if v := h.Get("LancarSec-Proxy"); v != "1.5" {
+		t.Errorf("LancarSec-Proxy = %q, want 1.5", v)
 	}
 	if env.mwBackendHits() != 1 {
 		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
@@ -2259,7 +2336,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(),
 			mwWithHeader("Cf-Connecting-Ip", "198.51.100.44")))
 
 		mwAssertBodyContains(t, rec, "IP: 198.51.100.44")
@@ -2303,7 +2380,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			mwWithRemoteAddr("192.0.2.99:1234"),
 			mwWithHeader("Cf-Connecting-Ip", "1.1.1.1")))
 
-		if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R2)"; got != want {
+		if got, want := rec.Body.String(), "Blocked by LancarSec.\nYou have been ratelimited. (R2)"; got != want {
 			t.Errorf("body = %q, want %q: the spoofed header bought a fresh bucket", mwTrunc(got, 200), want)
 		}
 		if env.mwBackendHits() != 0 {
@@ -2342,7 +2419,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(),
 			mwWithHeader("Cf-Ja3-Hash", "aa11bb33cc55dd77ff00ee22cc44aa66")))
 
 		mwAssertBodyContains(t, rec, "Fingerprint: aa11bb33cc55dd77ff00ee22cc44aa66")
@@ -2364,7 +2441,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		proxy.Cloudflare = true
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(),
 			mwWithHeader("Cf-Ja3-Hash", "aa11bb33cc55dd77ff00ee22cc44aa66")))
 
 		mwAssertBodyContains(t, rec, "Fingerprint: Cloudflare")
@@ -2390,7 +2467,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
-			if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R1)"; got != want {
+			if got, want := rec.Body.String(), "Blocked by LancarSec.\nYou have been ratelimited. (R1)"; got != want {
 				t.Errorf("body = %q, want %q", mwTrunc(got, 200), want)
 			}
 			if env.mwBackendHits() != 0 {
@@ -2408,7 +2485,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
-			if got, want := rec.Body.String(), "Blocked by BalooProxy.\nYou have been ratelimited. (R2)"; got != want {
+			if got, want := rec.Body.String(), "Blocked by LancarSec.\nYou have been ratelimited. (R2)"; got != want {
 				t.Errorf("body = %q, want %q", mwTrunc(got, 200), want)
 			}
 			if env.mwBackendHits() != 0 {
@@ -2425,7 +2502,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			firewall.AccessIps[cfIP] = 7
 			firewall.AccessIpsCookie[cfIP] = 3
 
-			rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithHeader("Cf-Connecting-Ip", cfIP)))
+			rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(), mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
 			mwAssertBodyContains(t, rec, "IP Requests: 7")
 			mwAssertBodyContains(t, rec, "IP Challenge Requests: 3")
@@ -2447,7 +2524,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		mwTrustPeers(t, mwIP+"/32")
 		env.mwSetStage(0)
 
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret()))
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret()))
 		mwAssertBodyContains(t, rec, "IP: "+mwIP+"\n")
 
 		firewall.Mutex.RLock()
@@ -2495,7 +2572,7 @@ func TestMiddlewareIPv6IsParsedAndKeyedOnTheSlash64(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(), mwWithRemoteAddr(tc.remote)))
+		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(), mwWithRemoteAddr(tc.remote)))
 		// The reported identity is the EXACT address, never the bucket: a log
 		// row or an abuse report naming a /64 is useless.
 		mwAssertBodyContains(t, rec, "IP: "+tc.wantIP+"\n")
@@ -2630,7 +2707,7 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 				// buckets.
 				addr := mwIP + ":" + strconv.Itoa(20000+w*perWorker+i)
 				rec := httptest.NewRecorder()
-				Middleware(rec, mwRequest("/_bProxy/verified", mwWithRemoteAddr(addr)))
+				Middleware(rec, mwRequest("/_lancarsec/verified", mwWithRemoteAddr(addr)))
 				if body := rec.Body.String(); body != "verified" {
 					t.Errorf("body = %q, want %q", mwTrunc(body, 80), "verified")
 					return

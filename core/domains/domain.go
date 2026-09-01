@@ -163,8 +163,21 @@ type Proxy struct {
 	// to every domain's upstream connections; see transport.Configure.
 	BackendTLSSkipVerify bool `json:"backend_tls_skip_verify"`
 
-	AdminSecret     string            `json:"adminsecret"`
-	APISecret       string            `json:"apisecret"`
+	AdminSecret string `json:"adminsecret"`
+	APISecret   string `json:"apisecret"`
+
+	// HideVersionHeader suppresses the "LancarSec-Proxy" response header. It
+	// is a pointer so an absent key can be told from an explicit false: the
+	// header is HIDDEN unless the operator opts back in with
+	// "hide_version_header": false - a mitigation product should not
+	// announce its exact version by default.
+	HideVersionHeader *bool `json:"hide_version_header"`
+
+	// ShowVersionHeader is the resolved form of HideVersionHeader (absent or
+	// true = hidden), set by config normalise. The request path reads only
+	// this, never the pointer.
+	ShowVersionHeader bool `json:"-"`
+
 	Secrets         map[string]string `json:"secrets"`
 	Timeout         TimeoutSettings   `json:"timeout"`
 	RatelimitWindow int               `json:"ratelimit_time"`

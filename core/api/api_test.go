@@ -97,7 +97,7 @@ func apiEnv(t *testing.T) {
 // apiV1 drives the v1 entry point. body is sent verbatim.
 func apiV1(t *testing.T, secret, body string) (*httptest.ResponseRecorder, bool) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/_bProxy/admin-secret/api/v1", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/_lancarsec/api/v1", strings.NewReader(body))
 	if secret != "" {
 		req.Header.Set("proxy-secret", secret)
 	}
@@ -804,7 +804,7 @@ func TestMalformedJSON(t *testing.T) {
 func TestTruncatedBody(t *testing.T) {
 	apiEnv(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/_bProxy/admin-secret/api/v1", &errReader{prefix: `{"action":"GET_PRO`})
+	req := httptest.NewRequest(http.MethodPost, "/_lancarsec/api/v1", &errReader{prefix: `{"action":"GET_PRO`})
 	req.Header.Set("proxy-secret", apiSecret)
 	req.ContentLength = 512
 	rec := httptest.NewRecorder()

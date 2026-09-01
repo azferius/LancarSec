@@ -160,7 +160,7 @@ func TrimTime(timestamp int) int {
 // StageToString renders a suspicion level as the string component that
 // core/server/middleware.go appends to the token cache key
 // ("<ip><tlsFp><userAgent><hourBucket>" + this), and that the same file prints
-// in the "Suspicious request of level ..." block page and in /_bProxy/stats.
+// in the "Suspicious request of level ..." block page and in /_lancarsec/stats.
 //
 // It used to be a switch over 1..4 with everything else — including 0 and every
 // negative — falling into "5+". susLv 0 is the whitelist verdict and susLv >= 5

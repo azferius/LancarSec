@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/azferius/lancarsec/core/api"
 	"github.com/azferius/lancarsec/core/domains"
@@ -23,28 +22,6 @@ import (
 	"github.com/azferius/lancarsec/core/utils"
 	"github.com/azferius/lancarsec/global/pow"
 )
-
-// adminAPIPath caches the reserved admin endpoint instead of concatenating
-// "/_bProxy/" + secret + "/api/v1" inside the per-request switch, which was one
-// string allocation on every request (W4 PERF-11/12). The cache is keyed on the
-// secret so a config reload or a test that swaps proxy.AdminSecret keeps
-// working; an unchanged secret hits the fast path with a single mutex lock.
-var (
-	adminPathMu    sync.Mutex
-	adminPathBuilt string
-	adminPathFor   string
-)
-
-func adminAPIPath() string {
-	secret := domains.Current().Proxy.AdminSecret
-	adminPathMu.Lock()
-	defer adminPathMu.Unlock()
-	if adminPathFor != secret {
-		adminPathFor = secret
-		adminPathBuilt = "/_bProxy/" + secret + "/api/v1"
-	}
-	return adminPathBuilt
-}
 
 func Middleware(writer http.ResponseWriter, request *http.Request) {
 
@@ -220,7 +197,12 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	domains.DomainsData[domainName] = domainData
 	firewall.Mutex.Unlock()
 
-	writer.Header().Set("baloo-Proxy", "1.5")
+	// WAVE 10 (BRAND): the version header is hidden by default - a mitigation
+	// product should not announce its exact build to the attacker probing it.
+	// "hide_version_header": false in the config opts back in.
+	if cfg.Proxy.ShowVersionHeader {
+		writer.Header().Set("LancarSec-Proxy", "1.5")
+	}
 
 	//SyncMap because semi-readonly
 	settingsQuery, _ := domains.DomainsMap.Load(domainName)
@@ -314,7 +296,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			// the counters above are kept in, which is the soonest the same
 			// client's count can have drained.
 			writer.Header().Set("Retry-After", "10")
-			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R1)", buffer, writer)
+			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by LancarSec.\nYou have been ratelimited. (R1)", buffer, writer)
 			return
 		}
 
@@ -322,7 +304,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		if ipCount > cfg.Proxy.Ratelimits["requests"] {
 			writer.Header().Set("Content-Type", "text/plain")
 			writer.Header().Set("Retry-After", "10")
-			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R2)", buffer, writer)
+			SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by LancarSec.\nYou have been ratelimited. (R2)", buffer, writer)
 			return
 		}
 
@@ -331,7 +313,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			if fpCount > cfg.Proxy.Ratelimits["unknownFingerprint"] {
 				writer.Header().Set("Content-Type", "text/plain")
 				writer.Header().Set("Retry-After", "10")
-				SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by BalooProxy.\nYou have been ratelimited. (R3)", buffer, writer)
+				SendResponseWithStatus(http.StatusTooManyRequests, "Blocked by LancarSec.\nYou have been ratelimited. (R3)", buffer, writer)
 				return
 			}
 
@@ -352,7 +334,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if forbiddenFp != "" {
 		writer.Header().Set("Content-Type", "text/plain")
 		// WAVE 9: a hard block answers 403, not a cacheable 200.
-		SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nYour browser "+forbiddenFp+" is not allowed.", buffer, writer)
+		SendResponseWithStatus(http.StatusForbidden, "Blocked by LancarSec.\nYour browser "+forbiddenFp+" is not allowed.", buffer, writer)
 		return
 	}
 
@@ -394,7 +376,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
 			// WAVE 9: a hard block answers 403, not a cacheable 200.
-			SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
+			SendResponseWithStatus(http.StatusForbidden, "Blocked by LancarSec.\nSuspicious request of level "+susLvStr+" (base "+strconv.Itoa(domainData.Stage)+")", buffer, writer)
 			return
 		}
 		firewall.CacheIps.Store(accessKey, encryptedIP)
@@ -421,6 +403,24 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if cookieName != "" && encryptedIP != "" {
 		if presented, found := requestCookie(request, cookieName); found {
 			verified = subtle.ConstantTimeCompare([]byte(presented), []byte(encryptedIP)) == 1
+		}
+		// WAVE 10: one-release verify grace for the rebrand. A client still
+		// carrying a pre-rebrand clearance cookie under the legacy name is
+		// verified against the same token space and re-issued the current
+		// name, so the cutover does not re-challenge every established client
+		// at once. The legacy name is never issued again; remove with
+		// legacyProxyCookieSuffix.
+		if !verified {
+			for _, legacyName := range legacyCookieNames(susLv, ip) {
+				presented, found := requestCookie(request, legacyName)
+				if !found {
+					continue
+				}
+				if subtle.ConstantTimeCompare([]byte(presented), []byte(encryptedIP)) == 1 {
+					verified = true
+					reissueClearanceCookie(writer, susLv, encryptedIP)
+				}
+			}
 		}
 	}
 
@@ -457,18 +457,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
 			// WAVE 9: a hard block answers 403, not a cacheable 200.
-			SendResponseWithStatus(http.StatusForbidden, "Blocked by BalooProxy.\nSuspicious request of level "+susLvStr, buffer, writer)
+			SendResponseWithStatus(http.StatusForbidden, "Blocked by LancarSec.\nSuspicious request of level "+susLvStr, buffer, writer)
 			return
 		}
 	}
 
 	//Access logs of clients that passed the challenge
-	// HTTP-06/CRYPTO-06: the reserved admin and API endpoints carry their
-	// secret in the URI (/_bProxy/<secret>/api/v1), so every successful call -
-	// including the operator's own tooling - landed in the access logs
-	// verbatim, where LastLogs viewers and the monitor TUI read the secret
-	// back. Redact before logging; empty secrets must not be replaced (an
-	// empty needle would splice [redacted] between every character).
+	// WAVE 10 moved the admin secret out of the URI into the Admin-Secret
+	// header, and the API secret was always a header, so a well-behaved call
+	// no longer puts a secret in the log line at all. The redaction stays for
+	// the grace release: a legacy /_bProxy/<adminsecret>/api/v1 request still
+	// carries the secret in its URI, and it is logged below (then 404'd by
+	// the reserved switch). Empty secrets must not be replaced (an empty
+	// needle would splice [redacted] between every character).
 	loggedURI := request.RequestURI
 	if adminSecret := cfg.Proxy.AdminSecret; adminSecret != "" {
 		loggedURI = strings.ReplaceAll(loggedURI, adminSecret, "[redacted]")
@@ -495,8 +496,18 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 
 	//Reserved proxy-paths
 
+	// WAVE 10: the legacy secret-in-path admin route is dead on arrival and is
+	// NEVER proxied - a cutover-era bookmark cannot leak the old admin secret
+	// to a customer backend. The secret is part of the path, so this is a
+	// shape match rather than an exact one; any /_bProxy/.../api/v1 dies here.
+	// It has already been logged redacted above.
+	if strings.HasPrefix(request.URL.Path, "/_bProxy/") && strings.HasSuffix(request.URL.Path, "/api/v1") {
+		proxyEndpointNotFound(writer, buffer)
+		return
+	}
+
 	switch request.URL.Path {
-	case "/_bProxy/stats":
+	case "/_lancarsec/stats", "/_bProxy/stats":
 		if !authorisedProxyEndpoint(request) {
 			proxyEndpointNotFound(writer, buffer)
 			return
@@ -504,7 +515,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("Stage: "+utils.StageToString(domainData.Stage)+"\nTotal Requests: "+strconv.Itoa(domainData.TotalRequests)+"\nBypassed Requests: "+strconv.Itoa(domainData.BypassedRequests)+"\nTotal R/s: "+strconv.Itoa(domainData.RequestsPerSecond)+"\nBypassed R/s: "+strconv.Itoa(domainData.RequestsBypassedPerSecond)+"\nProxy Fingerprint: "+proxy.Fingerprint, buffer, writer)
 		return
-	case "/_bProxy/fingerprint":
+	case "/_lancarsec/fingerprint", "/_bProxy/fingerprint":
 		if !authorisedProxyEndpoint(request) {
 			proxyEndpointNotFound(writer, buffer)
 			return
@@ -517,24 +528,42 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// named on the first line.
 		SendResponse("IP: "+ip+"\nRatelimit Key: "+rateKey+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
 		return
-	case "/_bProxy/verified":
+	case "/_lancarsec/verified", "/_bProxy/verified":
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("verified", buffer, writer)
 		return
-	case adminAPIPath():
+	// WAVE 10: the admin API moved to a FIXED path; the secret travels in the
+	// Admin-Secret header instead of the URL, where it landed in access logs,
+	// browser history and Referer headers. api.Process still re-authenticates
+	// with the Proxy-Secret/API secret in constant time, so both gates hold.
+	case "/_lancarsec/api/v1":
+		if !authorisedAdminEndpoint(request) {
+			proxyEndpointNotFound(writer, buffer)
+			return
+		}
 		result := api.Process(writer, request, domainData)
 		if result {
 			return
 		}
 
 	//Do not remove or modify this. It is required by the license
-	case "/_bProxy/credits":
+	case "/_bProxy/credits", "/_lancarsec/credits":
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("BalooProxy; Lightweight http reverse-proxy https://github.com/41Baloo/balooProxy. Protected by GNU GENERAL PUBLIC LICENSE Version 2, June 1991", buffer, writer)
+		// WAVE 10: rebranded; upstream attribution kept and the license line
+		// corrected to the GPL v3 this repository actually ships under.
+		SendResponse("LancarSec; lightweight http reverse-proxy, based on BalooProxy by 41Baloo (https://github.com/41Baloo/balooProxy). Protected by GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007", buffer, writer)
 		return
 	}
 
-	if strings.HasPrefix(request.URL.Path, "/_bProxy/api/v2") {
+	// WAVE 10: the API v2 prefix moved to /_lancarsec/api/v2; the legacy
+	// spelling is honoured for one release. The rewrite is scoped INSIDE this
+	// branch - the only caller of ProcessV2 - so api.go's TrimPrefix keeps
+	// working for both spellings and no /_bProxy path is ever rewritten for
+	// the backend.
+	if path := request.URL.Path; strings.HasPrefix(path, "/_lancarsec/api/v2") || strings.HasPrefix(path, "/_bProxy/api/v2") {
+		if strings.HasPrefix(path, "/_bProxy/") {
+			request.URL.Path = "/_lancarsec" + strings.TrimPrefix(path, "/_bProxy")
+		}
 		result := api.ProcessV2(writer, request)
 		if result {
 			return
