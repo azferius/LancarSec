@@ -739,6 +739,43 @@ func TestMiddlewareDomainsMapMissingReturns404(t *testing.T) {
 	}
 }
 
+// WAVE 9 W2 (HTTP-03): the "debug" pseudo-domain is registered by the config
+// pipeline with a DomainSettings that has NO backend proxy. A request naming
+// it used to fall all the way through Middleware to
+// domainSettings.DomainProxy.ServeHTTP and panic on the nil proxy - once per
+// connection, with main.go's io.Discard swallowing the trace. It must be
+// refused exactly like a host with no configuration at all.
+func TestMiddlewareDebugDomainWithoutBackendReturns404(t *testing.T) {
+	env := mwNewEnv(t)
+
+	// Mirror core/config.ensureDebugDomain: a settings row with a zero
+	// DomainSettings - DomainProxy nil.
+	domains.DomainsData["debug"] = domains.DomainData{
+		Name:          "debug",
+		Stage:         0,
+		LastLogs:      []domains.DomainLog{},
+		RequestLogger: []domains.RequestLog{},
+	}
+	domains.DomainsMap.Store("debug", domains.DomainSettings{Name: "debug"})
+
+	rec := httptest.NewRecorder()
+	if got := mwRecover(func() { Middleware(rec, mwRequest("/", mwWithHost("debug"))) }); got != nil {
+		t.Fatalf("Middleware panicked on the backend-less debug pseudo-domain: %v", got)
+	}
+
+	mwAssertStatus(t, rec, http.StatusNotFound)
+	mwAssertBodyContains(t, rec, "404 Not Found")
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if ct := rec.Result().Header.Get("Content-Type"); ct != "text/plain" {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if env.mwBackendHits() != 0 {
+		t.Error("backend was reached for the debug pseudo-domain")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ratelimits R1 / R2 / R3
 // ---------------------------------------------------------------------------
@@ -1419,6 +1456,12 @@ func mwCountOpaqueGreen(t *testing.T, b64 string) int {
 
 // mwExtractPNG pulls the base64 payload the captcha page assigns to
 // captcha_image.src / mask_image.src.
+//
+// WAVE 9 W2: the page is rendered by html/template, whose JS-string escaper
+// rewrites the base64 alphabet's '+' and '/' to \u002b and \/ (same strings
+// once the browser parses the JavaScript, different bytes on the wire). Undo
+// exactly those two before base64-decoding; the payload alphabet contains no
+// other character the escaper maps.
 func mwExtractPNG(t *testing.T, body, jsVar string) string {
 	t.Helper()
 	marker := jsVar + `.src="data:image/png;base64,`
@@ -1431,7 +1474,7 @@ func mwExtractPNG(t *testing.T, body, jsVar string) string {
 	if j < 0 {
 		t.Fatalf("unterminated %s payload", jsVar)
 	}
-	return rest[:j]
+	return strings.NewReplacer(`\/`, `/`, `\u002b`, `+`).Replace(rest[:j])
 }
 
 // The stage-3 answer the proxy checks is encryptedIP[:6]; the string drawn in
