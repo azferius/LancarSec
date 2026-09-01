@@ -246,6 +246,11 @@ func normaliseTrustedProxies(entries []string) []string {
 // stage 3: validate
 // ---------------------------------------------------------------------------
 
+// minSecretLength is the floor for every operator-supplied secret. Anything
+// shorter is brute-forceable in hours; AUDIT's secret-validation finding asks
+// for this positive check, not just the CHANGE_ME placeholder hunt.
+const minSecretLength = 16
+
 // validate rejects a configuration the proxy cannot serve safely. It runs on
 // both entry points: a reload that would have installed a CHANGE_ME secret used
 // to be accepted silently, because ReloadConfig never carried these checks.
@@ -260,6 +265,12 @@ func validate(cfg *domains.Configuration) error {
 		{"admin secret", cfg.Proxy.AdminSecret},
 		{"api secret", cfg.Proxy.APISecret},
 	} {
+		// A missing secrets map indexes to "" here, so the length check is
+		// also the missing-key check: an empty or short secret is refused
+		// with the key named, on both load and reload.
+		if len(secret.value) < minSecretLength {
+			return fmt.Errorf("proxy %s is %d bytes, want at least %d", secret.name, len(secret.value), minSecretLength)
+		}
 		if strings.Contains(secret.value, "CHANGE_ME") {
 			return fmt.Errorf("proxy %s still contains CHANGE_ME", secret.name)
 		}

@@ -58,13 +58,13 @@ func cfgFixture(names ...string) *domains.Configuration {
 	cfg := &domains.Configuration{
 		Proxy: domains.Proxy{
 			Cloudflare:      true,
-			AdminSecret:     "admin-secret",
-			APISecret:       "api-secret",
+			AdminSecret:     "admin-secret-0123456789",
+			APISecret:       "api-secret-0123456789",
 			RatelimitWindow: 120,
 			Secrets: map[string]string{
-				"cookie":     "cookie-secret",
-				"javascript": "js-secret",
-				"captcha":    "captcha-secret",
+				"cookie":     "cookie-secret-0123456789",
+				"javascript": "js-secret-0123456789",
+				"captcha":    "captcha-secret-0123456789",
 			},
 			Ratelimits: map[string]int{
 				"requests":           500,
@@ -248,6 +248,12 @@ func TestValidateRejects(t *testing.T) {
 		{"captcha secret", func(c *domains.Configuration) { c.Proxy.Secrets["captcha"] = "CHANGE_ME3" }},
 		{"admin secret", func(c *domains.Configuration) { c.Proxy.AdminSecret = "CHANGE_ME" }},
 		{"api secret", func(c *domains.Configuration) { c.Proxy.APISecret = "CHANGE_ME" }},
+
+		// A missing secrets map indexes to "" in validate, so empty and
+		// missing used to pass the CHANGE_ME-only check silently.
+		{"empty cookie secret", func(c *domains.Configuration) { c.Proxy.Secrets["cookie"] = "" }},
+		{"short admin secret", func(c *domains.Configuration) { c.Proxy.AdminSecret = "short" }},
+		{"missing secrets map", func(c *domains.Configuration) { c.Proxy.Secrets = nil }},
 
 		{"no domains", func(c *domains.Configuration) { c.Domains = nil }},
 		{"empty name", func(c *domains.Configuration) { c.Domains[0].Name = "" }},
@@ -506,7 +512,7 @@ func TestPublishStartupBuildsFreshDomains(t *testing.T) {
 		t.Error("the debug domain has no DomainsMap entry")
 	}
 	// Proxy-wide settings ReloadConfig used to skip entirely.
-	if proxy.AdminSecret != "admin-secret" || proxy.APISecret != "api-secret" {
+	if proxy.AdminSecret != "admin-secret-0123456789" || proxy.APISecret != "api-secret-0123456789" {
 		t.Errorf("admin/api secrets were not published: %q / %q", proxy.AdminSecret, proxy.APISecret)
 	}
 	if proxy.RatelimitWindow != 120 {

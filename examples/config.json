@@ -8,12 +8,12 @@
         ],
         "max_body_size": 10485760,
         "ratelimit_time": 120,
-        "adminsecret": "CHANGE_ME",
-        "apisecret": "CHANGE_ME",
+        "adminsecret": "CHANGE_ME_ADMIN_SECRET",
+        "apisecret": "CHANGE_ME_API_SECRET",
         "secrets": {
-            "captcha": "CHANGE_ME1",
-            "cookie": "CHANGE_ME2",
-            "javascript": "CHANGE_ME3"
+            "captcha": "CHANGE_ME_CAPTCHA_SECRET",
+            "cookie": "CHANGE_ME_COOKIE_SECRET",
+            "javascript": "CHANGE_ME_JS_SECRET"
         },
         "timeout": {
             "idle": 5,

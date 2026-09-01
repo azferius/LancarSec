@@ -150,11 +150,7 @@ func mwSaveGlobals(tb testing.TB) {
 	oldCPU := proxy.CpuUsage()
 	oldRAM := proxy.RamUsage()
 
-	oldMaxBody := MaxRequestBodyBytes.Load()
-
 	tb.Cleanup(func() {
-		MaxRequestBodyBytes.Store(oldMaxBody)
-
 		domains.Config = oldConfig
 		domains.Domains = oldDomainList
 		domains.DomainsData = oldDomainsData
@@ -3308,7 +3304,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a body under the limit is proxied", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		MaxRequestBodyBytes.Store(64)
+		domains.Config.Proxy.MaxBodySize = 64
 
 		rec := mwDo(mwPost(32))
 
@@ -3322,7 +3318,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a body over the limit does not reach the backend intact", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		MaxRequestBodyBytes.Store(16)
+		domains.Config.Proxy.MaxBodySize = 16
 
 		rec := mwDo(mwPost(4096))
 
@@ -3339,7 +3335,7 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 	t.Run("a zero limit disables the cap", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		MaxRequestBodyBytes.Store(0)
+		domains.Config.Proxy.MaxBodySize = 0
 
 		rec := mwDo(mwPost(4096))
 
@@ -3348,6 +3344,32 @@ func TestMiddlewareCapsTheRequestBody(t *testing.T) {
 			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
 		}
 	})
+}
+
+// HTTP-06/CRYPTO-06: the admin and API secrets ride in the request URI
+// (/_bProxy/<secret>/api/v1), so a call that reached the pipeline used to land
+// in the access logs verbatim - LastLogs viewers and the monitor TUI could read
+// the secret back out of the log.
+func TestMiddlewareRedactsSecretsFromAccessLogs(t *testing.T) {
+	env := mwNewEnv(t)
+	env.mwSetStage(0)
+
+	rec := mwDo(mwRequest("/?secret=" + mwAdminSecret + "&api=" + mwAPISecret))
+
+	mwAssertStatus(t, rec, http.StatusOK)
+	firewall.Mutex.Lock()
+	logs := domains.DomainsData[mwDomain].LastLogs
+	firewall.Mutex.Unlock()
+	if len(logs) == 0 {
+		t.Fatal("no access log entry was recorded")
+	}
+	path := logs[len(logs)-1].Path
+	if strings.Contains(path, mwAdminSecret) || strings.Contains(path, mwAPISecret) {
+		t.Errorf("access log leaked a secret: %q", path)
+	}
+	if !strings.Contains(path, "[redacted]") {
+		t.Errorf("access log lost the secret without a redaction marker: %q", path)
+	}
 }
 
 // TestMiddlewareEnforceOriginRejectsUntrustedPeers covers the wiring between

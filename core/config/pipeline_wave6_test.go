@@ -428,10 +428,10 @@ func TestExampleConfigTemplate(t *testing.T) {
 
 	// With the placeholders replaced it must pass end to end.
 	for key := range cfg.Proxy.Secrets {
-		cfg.Proxy.Secrets[key] = "replaced-" + key
+		cfg.Proxy.Secrets[key] = "replaced-" + key + "-0123456789"
 	}
-	cfg.Proxy.AdminSecret = "replaced-admin"
-	cfg.Proxy.APISecret = "replaced-api"
+	cfg.Proxy.AdminSecret = "replaced-admin-0123456789"
+	cfg.Proxy.APISecret = "replaced-api-0123456789"
 	normalise(cfg)
 	if err := validate(cfg); err != nil {
 		t.Fatalf("the example config fails validate once its placeholders are replaced: %v", err)

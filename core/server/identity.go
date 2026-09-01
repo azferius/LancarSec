@@ -1,16 +1,13 @@
 package server
 
-// Client identity and the two request limits that do not depend on the domain,
-// the client or the challenge stage. Split out of middleware.go (wave 9 W2,
-// QUAL-03): this file owns WHO a request is from; middleware.go owns what is
-// DECIDED about it.
+// Client identity — split out of middleware.go (wave 9 W2, QUAL-03): this
+// file owns WHO a request is from; middleware.go owns what is DECIDED about it.
 
 import (
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"github.com/azferius/lancarsec/core/trusted"
 )
@@ -33,30 +30,6 @@ import (
 // operator can assume: aggregating further would put unrelated customers of the
 // same ISP into one bucket, and one abuser would then ratelimit strangers.
 const ipv6RateBits = 64
-
-// MaxRequestBodyBytes caps the request body the proxy is willing to read from a
-// client, in bytes. Zero or negative means unlimited.
-//
-// It is an atomic rather than a plain int64 because the config pipeline writes
-// it on reload while requests are reading it.
-//
-// The default is 10 MiB. The proxy sits in front of ordinary web backends, and
-// the body is pure cost to it: on the stage-1, stage-2, stage-3 and block paths
-// the body is never read at all, and on the hot path it is streamed to a
-// backend that has its own limit. An unauthenticated, unchallenged client
-// should not be able to make the proxy pump an unbounded stream at a customer
-// origin, and 10 MiB is comfortably above ordinary form and image uploads while
-// being small enough that a flood of them is bounded work. Operators fronting a
-// large-upload endpoint raise it in config; there is no per-domain field to
-// hang this on yet (the config agent owns core/domains), so it is process-wide
-// for now - see the note in the wave-6 handoff.
-var MaxRequestBodyBytes atomic.Int64
-
-const defaultMaxRequestBodyBytes = 10 << 20
-
-func init() {
-	MaxRequestBodyBytes.Store(defaultMaxRequestBodyBytes)
-}
 
 // parseClientAddr parses one candidate client address into a comparable
 // netip.Addr, returning the zero Addr when it is not an address at all.

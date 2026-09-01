@@ -413,6 +413,40 @@ delivered 01:40, zero outbox activity by 03:30) — standups handled internally.
   keys (audit companion item) deferred to the PERF slice.
 - **Gates:** gofmt/vet/build clean; `go test -race ./...` all 12 packages ok.
 
+### Wave 9 W3 outcome (2026-09-01, solo — jim fallback)
+
+Config-correctness batch. jim confirmed dead session (assignment envelope delivered 01:40, zero
+outbox activity) — standups handled internally.
+
+- **AUTHZ-01/CRYPTO-02 positive secret validation.** `validate()` was CHANGE_ME-only, and a
+  missing `secrets` map indexed to `""` in the loop, so empty/missing/short secrets passed
+  silently. Now every operator secret has a `minSecretLength = 16` floor (brute-forceable in
+  hours below that) plus the CHANGE_ME hunt; the error names the offending key. Fixture,
+  example-template and harness-template secrets lengthened to match. `hack/config.test.json`
+  already carried ≥16-byte values — verified, not assumed.
+- **AUTHZ-06 body-limit wiring (the finding was "config read by nobody").** The pipeline parsed,
+  validated, normalised, built and published `Proxy.MaxBodySize` (default 10 MiB, per-domain
+  resolve, `proxy.MaxBodySize` mirror) — and enforcement read `server.MaxRequestBodyBytes`, an
+  atomic written only by `init()`, so an operator's `max_body_size` and its `-1` unlimited
+  sentinel did nothing. Import direction is server→config (monitor.go imports config), so config
+  cannot write server globals without a cycle: middleware now reads
+  `domains.Config.Proxy.MaxBodySize` directly (same pattern as the existing
+  `CloudflareEnforceOrigin` read; the racy-publish concern is the recorded CONC-02 debt). The
+  obsolete atomic is deleted. **Deferred with reasoning:** per-domain `maxBodySize` override
+  enforcement — the AUDIT finding was the process-wide dead knob, which this kills; per-domain
+  plumbing is a new surface, not a fix of the recorded defect.
+- **HTTP-06/CRYPTO-06 secret redaction in access logs.** `adminAPIPath()` builds
+  `/_bProxy/<secret>/api/v1`, so every successful admin/API call — including the operator's own
+  tooling — landed in `LastLogs` verbatim, readable from log viewers and the monitor TUI. Both
+  secrets are redacted to `[redacted]` before `AddLogs`; empty-needle guards prevent
+  `strings.ReplaceAll` splicing the marker between every character.
+- **AUTHZ-02 OTP republish — closed MOOT, not forgotten.** Wave 7 deleted the
+  CookieOTP/JSOTP/CaptchaOTP globals (proxy.go:103-105 comment); publish already republishes all
+  secrets on load and reload (pipeline.go:527-533). There is nothing left to republish.
+- **Verification:** gates green first — gofmt/vet/build/mod tidy clean, `go test -race ./...`
+  all 12 packages ok; new tests (`TestMiddlewareRedactsSecretsFromAccessLogs`, three
+  validate-reject cases) live. Independent scoped verifier launched after commit.
+
 ### Already fixed — do not re-scope (waves 5/6)
 
 Cookie substring check → exact-match + constant-time compare, stage-1 `HttpOnly`, cookie

@@ -97,7 +97,12 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// wraps every GET - and a maxBytesReader is a heap allocation per request
 	// on the exact path a flood takes. Measured at 112 B/op and 1 alloc/op on
 	// BenchmarkMiddlewareDecisionPath before this guard.
-	if limit := MaxRequestBodyBytes.Load(); limit > 0 && hasRequestBody(request) {
+	// WAVE 9 W3 (AUTHZ-06): the ceiling is wired from the published
+	// configuration. The former MaxRequestBodyBytes atomic was written only by
+	// init and read the config by nobody, so an operator's max_body_size (and
+	// its -1 unlimited sentinel) did nothing. normalise resolves the field:
+	// never zero at runtime, -1 means unlimited.
+	if limit := domains.Config.Proxy.MaxBodySize; limit > 0 && hasRequestBody(request) {
 		request.Body = http.MaxBytesReader(writer, request.Body, limit)
 	}
 
@@ -433,6 +438,20 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	//Access logs of clients that passed the challenge
+	// HTTP-06/CRYPTO-06: the reserved admin and API endpoints carry their
+	// secret in the URI (/_bProxy/<secret>/api/v1), so every successful call -
+	// including the operator's own tooling - landed in the access logs
+	// verbatim, where LastLogs viewers and the monitor TUI read the secret
+	// back. Redact before logging; empty secrets must not be replaced (an
+	// empty needle would splice [redacted] between every character).
+	loggedURI := request.RequestURI
+	if proxy.AdminSecret != "" {
+		loggedURI = strings.ReplaceAll(loggedURI, proxy.AdminSecret, "[redacted]")
+	}
+	if proxy.APISecret != "" {
+		loggedURI = strings.ReplaceAll(loggedURI, proxy.APISecret, "[redacted]")
+	}
+
 	firewall.Mutex.Lock()
 	utils.AddLogs(domains.DomainLog{
 		Time:      proxy.LastSecondTimeFormatted(),
@@ -441,7 +460,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		BotFP:     botFp,
 		TLSFP:     tlsFp,
 		Useragent: reqUa,
-		Path:      request.RequestURI,
+		Path:      loggedURI,
 	}, domainName)
 
 	domainData = domains.DomainsData[domainName]
