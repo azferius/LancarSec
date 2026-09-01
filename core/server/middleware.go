@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/azferius/lancarsec/core/api"
 	"github.com/azferius/lancarsec/core/domains"
@@ -22,6 +23,27 @@ import (
 	"github.com/azferius/lancarsec/core/utils"
 	"github.com/azferius/lancarsec/global/pow"
 )
+
+// adminAPIPath caches the reserved admin endpoint instead of concatenating
+// "/_bProxy/" + secret + "/api/v1" inside the per-request switch, which was one
+// string allocation on every request (W4 PERF-11/12). The cache is keyed on the
+// secret so a config reload or a test that swaps proxy.AdminSecret keeps
+// working; an unchanged secret hits the fast path with a single mutex lock.
+var (
+	adminPathMu    sync.Mutex
+	adminPathBuilt string
+	adminPathFor   string
+)
+
+func adminAPIPath() string {
+	adminPathMu.Lock()
+	defer adminPathMu.Unlock()
+	if adminPathFor != proxy.AdminSecret {
+		adminPathFor = proxy.AdminSecret
+		adminPathBuilt = "/_bProxy/" + proxy.AdminSecret + "/api/v1"
+	}
+	return adminPathBuilt
+}
 
 func Middleware(writer http.ResponseWriter, request *http.Request) {
 
@@ -452,7 +474,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("verified", buffer, writer)
 		return
-	case "/_bProxy/" + proxy.AdminSecret + "/api/v1":
+	case adminAPIPath():
 		result := api.Process(writer, request, domainData)
 		if result {
 			return
