@@ -384,6 +384,35 @@ delivered 01:40, zero outbox activity by 03:30) — standups handled internally.
   deferred, not forgotten. CONC-05 verified already fixed in wave 8 (`&http.Client{Timeout:10s}`).
 - **Gates:** gofmt/vet/build/mod tidy clean; `go test -race ./...` all 12 packages ok.
 
+### Wave 9 W4c outcome (2026-09-01, solo — pam fallback)
+
+- **CONC-01 (critical)** the three per-request window writes
+  (`WindowAccessIps`/`WindowUnkFps`/`WindowAccessIpsCookie` at middleware.go :191/:313/:406
+  pre-fix) incremented a bucket only the monitor's 5 s prefill (evaluateRatelimit) ever created.
+  If the prefill lagged past the 120 s horizon the write hit a nil inner map WHILE HOLDING
+  firewall.Mutex, the bare Unlock was skipped, and every later request, Monitor and
+  evaluateRatelimit blocked forever (net/http recovers the handler; `log.SetOutput(io.Discard)`
+  ate the panic report — a silent total outage). The wave-7 comment claiming lazy creation was
+  never implemented (AUDIT.md's exact point). Fix: `firewall.IncrWindow` — bucket created
+  lazily on first increment; prefill demoted to advisory. The pin test
+  `TestMiddlewareMissingWindowBucketPanicsAndWedgesMutex` (which required reproducing the panic
+  AND hand-replacing the leaked mutex) flipped to
+  `TestMiddlewareMissingWindowBucketIsCreatedLazily`: delete bucket → request serves 200 through
+  the backend → bucket exists → mutex free.
+- **CONC-04** same helper caps each 10-second bucket at 200k distinct keys
+  (`firewall.windowKeyCap`). Every key is attacker-controlled (spoofed Cf-Connecting-Ip, rotated
+  IPv6 source, raw TLS fp), so without a cap one connection rotating identities grows the maps
+  until OOM (audit: ~50k req/s × 120 s retention ≈ millions of string keys). Past the cap NEW
+  keys are dropped — the request still runs the rest of the pipeline; EXISTING keys keep
+  counting, so a volume flood against one identity is still ratelimited. Four tests: lazy
+  creation, cap drop, existing-key-still-counts, per-bucket independence.
+- **Deferred in W4 scope:** CONC-03 (defer-Unlock sweep in supervised workers) — the concrete
+  deadlock its evidence described was the CONC-01 nil-map panic, now structurally unreachable
+  at the three window sites; the remaining bare Lock/Unlock pairs (monitor TUI `clrlogs`/`stage`
+  sections, middleware :433 AddLogs section) wrap code that cannot panic. WindowUnkFps hashed
+  keys (audit companion item) deferred to the PERF slice.
+- **Gates:** gofmt/vet/build clean; `go test -race ./...` all 12 packages ok.
+
 ### Already fixed — do not re-scope (waves 5/6)
 
 Cookie substring check → exact-match + constant-time compare, stage-1 `HttpOnly`, cookie

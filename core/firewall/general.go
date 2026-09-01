@@ -35,6 +35,33 @@ var (
 	Connections = map[string]string{}
 )
 
+// windowKeyCap bounds the number of distinct keys a single 10-second bucket
+// may hold (CONC-04). Every key is attacker-controlled — a spoofed
+// Cf-Connecting-Ip header, a rotated IPv6 source, or the raw TLS fingerprint —
+// so without a cap one connection rotating identities grows the buckets until
+// the proxy OOMs. Past the cap, NEW keys are dropped (the request still runs
+// the rest of the pipeline); keys already in the bucket keep counting, so a
+// volume flood against one identity is still ratelimited.
+const windowKeyCap = 200_000
+
+// IncrWindow increments key in the 10-second bucket ts of a sliding-window
+// map, creating the bucket lazily (CONC-01). The monitor's prefill in
+// evaluateRatelimit is advisory: if it ever lags past the prefilled 120 s
+// horizon, a missing bucket must not turn the request path into a nil-map
+// panic while holding the write lock — the lock would never be released and
+// the whole proxy freezes. Caller must hold firewall.Mutex.
+func IncrWindow(bucket map[int]map[string]int, ts int, key string) {
+	inner, ok := bucket[ts]
+	if !ok {
+		inner = map[string]int{}
+		bucket[ts] = inner
+	}
+	if _, exists := inner[key]; !exists && len(inner) >= windowKeyCap {
+		return // CONC-04: bucket is full of distinct keys; drop, keep serving
+	}
+	inner[key]++
+}
+
 func OnStateChange(conn net.Conn, state http.ConnState) {
 
 	remoteAddr := conn.RemoteAddr().String()

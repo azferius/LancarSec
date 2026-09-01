@@ -184,11 +184,12 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	firewall.Mutex.Lock()
-	// When the monitor thread that's supposed to prefill these maps lags behind
-	// for some reason, this will become really messy. The mutex will be locked
-	// and never unlocked again, freezing the entire proxy. Wave 7's window
-	// rewrite replaces the prefill contract with lazy bucket creation.
-	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][rateKey]++
+	// CONC-01: bucket creation is lazy inside firewall.IncrWindow. The monitor
+	// prefill is advisory; if it lags past the 120 s horizon this must not
+	// panic on a nil inner map while holding the write lock (the lock would
+	// never be released, freezing the whole proxy). CONC-04: new keys are
+	// dropped once a bucket hits firewall.windowKeyCap.
+	firewall.IncrWindow(firewall.WindowAccessIps, int(proxy.Last10SecondTimestamp()), rateKey)
 	domainData = domains.DomainsData[domainName]
 	domainData.TotalRequests++
 	domains.DomainsData[domainName] = domainData
@@ -310,7 +311,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			}
 
 			firewall.Mutex.Lock()
-			firewall.WindowUnkFps[int(proxy.Last10SecondTimestamp())][tlsFp]++
+			// CONC-01/CONC-04: lazy creation + distinct-key cap, see IncrWindow.
+			firewall.IncrWindow(firewall.WindowUnkFps, int(proxy.Last10SecondTimestamp()), tlsFp)
 			firewall.Mutex.Unlock()
 		}
 	}
@@ -403,7 +405,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// default), which is the precise opposite of what `action: 0` means.
 		if susLv > 0 {
 			firewall.Mutex.Lock()
-			firewall.WindowAccessIpsCookie[int(proxy.Last10SecondTimestamp())][rateKey]++
+			// CONC-01/CONC-04: lazy creation + distinct-key cap, see IncrWindow.
+			firewall.IncrWindow(firewall.WindowAccessIpsCookie, int(proxy.Last10SecondTimestamp()), rateKey)
 			firewall.Mutex.Unlock()
 		}
 

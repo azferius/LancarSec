@@ -646,17 +646,23 @@ func TestMiddlewareWhitelistIsNotCountedAsAChallengeFailure(t *testing.T) {
 	}
 }
 
-// The sliding-window maps are prefilled by the monitor goroutine
-// (evaluateRatelimit). If that goroutine lags, Middleware writes to a nil map
-// WHILE HOLDING firewall.Mutex and the deferred-free Unlock is skipped, so the
-// panic wedges the mutex and freezes the whole proxy. The source comment at
-// middleware.go:89 documents this; this test pins it.
+// FIXED IN WAVE 9 (this test used to be named
+// TestMiddlewareMissingWindowBucketPanicsAndWedgesMutex and pinned the OLD
+// defect: a missing bucket panicked Middleware on "assignment to entry in nil
+// map" while holding firewall.Mutex, and the panic skipped the bare Unlock so
+// the write lock was leaked and the whole proxy froze — net/http recovered the
+// handler but every later request blocked on the mutex forever). The window
+// writes now go through firewall.IncrWindow, which creates the bucket lazily;
+// the monitor's prefill (evaluateRatelimit) is advisory.
 //
-// BUG (wave 7 flips this): the panic must become an ordinary lazily-created
-// bucket (and the lock must be released with defer).
-func TestMiddlewareMissingWindowBucketPanicsAndWedgesMutex(t *testing.T) {
+// The flip is pinned end-to-end: delete the current bucket, run a request,
+// expect NO panic, a completed backend round-trip, a lazily-created bucket,
+// and a released mutex.
+func TestMiddlewareMissingWindowBucketIsCreatedLazily(t *testing.T) {
 	env := mwNewEnv(t)
-	_ = env
+	// Stage 0 so the request runs the full stack to the backend — the point is
+	// that a missing bucket degrades counting, not serving.
+	env.mwSetStage(0)
 
 	firewall.Mutex.Lock()
 	delete(firewall.WindowAccessIps, mwTimestamp)
@@ -664,21 +670,26 @@ func TestMiddlewareMissingWindowBucketPanicsAndWedgesMutex(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
-	if got == nil {
-		t.Fatal("expected a panic when the current window bucket is missing, got none")
+	if got != nil {
+		t.Fatalf("Middleware panicked on a missing bucket: %v; bucket creation must be lazy (firewall.IncrWindow)", got)
 	}
-	if !strings.Contains(mwPanicString(got), "nil map") {
-		t.Errorf("panic = %v, want an 'assignment to entry in nil map' panic", got)
+	mwAssertStatus(t, rec, http.StatusOK)
+	mwAssertBodyContains(t, rec, mwBackendBody)
+
+	firewall.Mutex.RLock()
+	_, present := firewall.WindowAccessIps[mwTimestamp][mwIP]
+	firewall.Mutex.RUnlock()
+	if !present {
+		t.Fatalf("WindowAccessIps[%d][%s] was not created by the request; lazy creation missing", mwTimestamp, mwIP)
 	}
 
-	// firewall.Mutex is still held by the panicked call. Replace it, otherwise
-	// every later test in this package deadlocks. That this is necessary IS the
-	// defect being pinned.
-	if firewall.Mutex.TryLock() {
-		firewall.Mutex.Unlock()
-		t.Error("firewall.Mutex was released after the panic; the wedge documented in middleware.go:89 no longer reproduces")
+	// The old defect leaked the write lock on the panic path; the pinned
+	// contract is that the critical section is panic-free AND the bucket write
+	// cannot wedge the mutex.
+	if !firewall.Mutex.TryLock() {
+		t.Fatal("firewall.Mutex is still held after the request completed")
 	}
-	firewall.Mutex = &sync.RWMutex{}
+	firewall.Mutex.Unlock()
 }
 
 func mwPanicString(v any) string {
