@@ -26,7 +26,10 @@ func main() {
 
 	proxy.Fingerprint = Fingerprint
 
-	logFile, err := os.OpenFile("crash.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	// 0600 (CRYPTO-07): this create wins the mode if the file does not exist
+	// yet; InitHndl's 0600 only applies at its own create, which never happens
+	// after this line. Stack traces can embed request material.
+	logFile, err := os.OpenFile("crash.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		log.Fatal(err)
 	}
