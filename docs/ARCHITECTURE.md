@@ -487,3 +487,21 @@ BUILD / DEPLOY SURFACE
 - Dead ops code with no callers anywhere: `utils.GetOwnIP` (`core/utils/ip.go:8`, the only reference to checkip.amazonaws.com), `utils.LogHeapProfile` and `utils.LogGoroutineProfile` (`core/utils/debug.go:11`, `:25`), `pnc.LogError` (`core/pnc/panicHandler.go:34`), `utils.SafeString`/`closestTo10` (`core/utils/text.go:172`, `:191`), and `api.QuickchartResponse` (`core/utils/discord.go:276`).
 - An 11 MB prebuilt `oryxBuildBinary` is committed at the repo root and is picked up by the Dockerfile's `COPY . .`.
 
+
+---
+
+## Wave 10 delta (commits 335ffd2, de088a0, e7a7a58) — BalooProxy -> LancarSec rebrand
+
+The rebrand touches the surfaces described above as follows: the response header is now
+`LancarSec-Proxy: 1.5` and is HIDDEN by default — `hide_version_header` is a tri-state
+(absent -> hidden, explicit `false` -> shown, explicit `true` -> hidden) resolved in
+`core/config/pipeline.go:198` as `ShowVersionHeader = HideVersionHeader != nil && !*HideVersionHeader`.
+The challenge path is `/_lancarsec/` (legacy `/_bProxy/` still routed for one release);
+the cookie family is `__lSec_v` (legacy `__bProxy_v` grace). The admin API moved from
+`/_bProxy/<secret>/api/v1` (secret in URL path) to fixed `POST /_lancarsec/api/v1` with an
+`Admin-Secret` header; the legacy path shape-matches at `core/server/middleware.go:504`
+and 404s WITHOUT proxying. V2 lives at `/_lancarsec/api/v2/:domain/:action` with a
+`Proxy-Secret` header. Config load is now the normalise -> validate -> build -> publish
+pipeline in `core/config/pipeline.go` (replacing the direct-global writes of
+`core/config/init.go` described above); the header tri-state test is
+`TestNormaliseResolvesHideVersionHeaderTriState` in `core/config/pipeline_test.go`.
