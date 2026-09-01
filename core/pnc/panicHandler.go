@@ -24,7 +24,10 @@ var (
 )
 
 func InitHndl() {
-	f, err := os.OpenFile("crash.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	// 0600 (CRYPTO-07): crash.log carries full stack traces that can embed
+	// request material; it sits beside the 0600 secrets and must not be
+	// world-readable.
+	f, err := os.OpenFile("crash.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		// log.Fatal calls os.Exit, so nothing after this line can run. Upstream
 		// followed it with panic(err), which was dead code that read as a
@@ -63,9 +66,4 @@ func PanicHndl() {
 		writeCrashLog(errMsg)
 		panic(r)
 	}
-}
-
-func LogError(msg string) {
-	errMsg := fmt.Sprintf("[ "+time.Now().Format("15:04:05")+" ]: Error: %s\n", msg)
-	writeCrashLog(errMsg)
 }
