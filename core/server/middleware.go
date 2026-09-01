@@ -170,6 +170,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	if cfg.Proxy.Cloudflare {
 
 		tlsFp = "Cloudflare"
+		// WAVE 11 (AUDIT Cf-Ja3-Hash passthrough): behind Cloudflare every
+		// connection used to collapse onto the one sentinel fingerprint, so
+		// per-fingerprint deny-lists, bot lookups and token bindings never
+		// saw the real client. Cf-Ja3-Hash is the JA3 md5 Cloudflare computes
+		// on the client->edge TLS handshake, and like Cf-Connecting-Ip it is
+		// believed only from a trusted peer. It feeds the tlsFp slot;
+		// browser stays "Cloudflare", so the unknown-fingerprint path
+		// (R3 + WindowUnkFps) never sees these values.
+		if peer := peerAddr(request.RemoteAddr); peer.IsValid() && trusted.IsTrusted(peer) {
+			if ja3 := request.Header.Get("Cf-Ja3-Hash"); ja3 != "" {
+				tlsFp = ja3
+			}
+		}
 		browser = "Cloudflare"
 		botFp = ""
 		fpCount = 0

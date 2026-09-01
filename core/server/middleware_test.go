@@ -2467,6 +2467,46 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		}
 	})
 
+	// WAVE 11 (AUDIT Cf-Ja3-Hash passthrough): behind Cloudflare the
+	// fingerprint slot used to be the constant "Cloudflare", so
+	// ForbiddenFingerprints, bot lookups and token binding never saw the
+	// real client. The JA3 hash Cloudflare computed on the client->edge
+	// handshake now fills the slot.
+	t.Run("Cf-Ja3-Hash from a trusted peer fills the fingerprint slot", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Current().Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		mwTrustPeers(t, mwIP+"/32")
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
+			mwWithHeader("Cf-Ja3-Hash", "aa11bb33cc55dd77ff00ee22cc44aa66")))
+
+		mwAssertBodyContains(t, rec, "Fingerprint: aa11bb33cc55dd77ff00ee22cc44aa66")
+		// The browser slot is untouched: the unknown-fingerprint path keys on
+		// it, and R3 must stay off behind Cloudflare.
+		mwAssertBodyContains(t, rec, "Browser: Cloudflare")
+
+		firewall.Mutex.RLock()
+		unk := len(firewall.WindowUnkFps[mwTimestamp])
+		firewall.Mutex.RUnlock()
+		if unk != 0 {
+			t.Errorf("WindowUnkFps has %d entries, want 0 in cloudflare mode", unk)
+		}
+	})
+
+	t.Run("Cf-Ja3-Hash from an untrusted peer is not believed", func(t *testing.T) {
+		env := mwNewEnv(t)
+		domains.Current().Proxy.Cloudflare = true
+		proxy.Cloudflare = true
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/fingerprint", mwWithAPISecret(),
+			mwWithHeader("Cf-Ja3-Hash", "aa11bb33cc55dd77ff00ee22cc44aa66")))
+
+		mwAssertBodyContains(t, rec, "Fingerprint: Cloudflare")
+	})
+
 	// Cloudflare mode wires up its OWN pair of counters. Both must be read for
 	// the subject IP, not just the request counter: ipCountCookie is what R1
 	// (the challenge-failure limiter that outranks everything else) consults,
