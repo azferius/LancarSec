@@ -58,7 +58,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// challenge logic the browser would receive a challenge page instead of
 	// JavaScript and stage 2 would silently die. See servePowAsset.
 	switch request.URL.Path {
-	case powBalooPowPath:
+	case powAssetPath:
 		servePowAsset(writer, pow.BalooPow)
 		return
 	case powCryptoJSPath:

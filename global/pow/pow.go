@@ -15,7 +15,7 @@ package pow
 
 import _ "embed"
 
-//go:embed balooPow.min.js
+//go:embed pow.min.js
 var BalooPow []byte
 
 //go:embed crypto-js.min.js

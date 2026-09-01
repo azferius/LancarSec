@@ -55,7 +55,7 @@ func SendResponseWithStatus(status int, str string, buffer *bytes.Buffer, writer
 
 // The paths the vendored stage-2 proof-of-work bundle is served from.
 const (
-	powBalooPowPath = "/_lancarsec/balooPow.min.js"
+	powAssetPath    = "/_lancarsec/pow.min.js"
 	powCryptoJSPath = "/_lancarsec/crypto-js.min.js"
 )
 

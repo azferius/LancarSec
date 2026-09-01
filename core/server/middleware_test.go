@@ -1384,7 +1384,7 @@ func TestMiddlewareStage2Challenge(t *testing.T) {
 	// WAVE 9: FLIPPED. The proof-of-work scripts are vendored (global/pow) and
 	// served first-party; the mutable third-party CDN references with no SRI
 	// that neutered stage 2 whenever a CDN was down are gone.
-	mwAssertBodyContains(t, rec, `/_lancarsec/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/pow.min.js`)
 	mwAssertBodyContains(t, rec, `/_lancarsec/crypto-js.min.js`)
 	mwAssertBodyNotContains(t, rec, "cdn.jsdelivr.net")
 	mwAssertBodyNotContains(t, rec, "cdnjs.cloudflare.com")
@@ -1451,7 +1451,7 @@ func TestMiddlewareStage3PowPage(t *testing.T) {
 	// stage-specific branch.
 	mwAssertBodyContains(t, rec, `document.cookie="`+mwStage3Cookie()+`=`+publicSalt+`"+e.solution+"; SameSite=Lax; path=/; Secure"`)
 	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(difficulty)+`,"`+hashed+`",!1)`)
-	mwAssertBodyContains(t, rec, `/_lancarsec/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_lancarsec/pow.min.js`)
 	mwAssertBodyContains(t, rec, `/_lancarsec/crypto-js.min.js`)
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-3 challenge")

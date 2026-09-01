@@ -277,7 +277,7 @@ func renderPowChallenge(writer http.ResponseWriter, buffer *bytes.Buffer, cookie
 		PublicSalt:   publicSalt,
 		Challenge:    hashedEncryptedIP,
 		Difficulty:   template.JS(strconv.Itoa(difficulty)),
-		BalooPowPath: powBalooPowPath,
+		BalooPowPath: powAssetPath,
 		CryptoJSPath: powCryptoJSPath,
 	})
 	if err != nil {
