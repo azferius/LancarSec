@@ -24,10 +24,10 @@ import (
 )
 
 // proxyCookieSuffix is the shared suffix of every challenge cookie the proxy
-// issues: "_1"+suffix for stage 1, "_2"+suffix for stage 2 and
-// "<ip>_3"+suffix for stage 3. Renaming this token is wave 10's job - it
-// invalidates every clearance cookie in flight - so it stays spelled exactly
-// as it is on the wire today.
+// issues: "_1"+suffix for stage 1, "_2"+suffix for stage 2 and "_3"+suffix
+// for stage 3. Renaming this token is wave 10's job - it invalidates every
+// clearance cookie in flight - so it stays spelled exactly as it is on the
+// wire today.
 const proxyCookieSuffix = "__bProxy_v"
 
 // challengeCookieName is the name of the cookie a client is expected to
@@ -49,9 +49,8 @@ func challengeCookieName(susLv int) string {
 	case 2:
 		return "_2" + proxyCookieSuffix
 	case 3:
-		// The stage-3 page writes this name from JavaScript; see the
-		// document.cookie call in the stage-3 template below, which derives
-		// the name from THIS function so the two can never drift apart.
+		// The PoW page renders this name into its document.cookie call (the
+		// shared stage-2/stage-3 template), so the two can never drift apart.
 		return "_3" + proxyCookieSuffix
 	default:
 		return ""
