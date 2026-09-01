@@ -2,7 +2,6 @@ package domains
 
 import (
 	"crypto/tls"
-	"net/http"
 	"net/http/httputil"
 	"sync"
 	"time"
@@ -181,12 +180,4 @@ type RequestLog struct {
 	Allowed  int
 	Total    int
 	CpuUsage string
-}
-
-type CacheResponse struct {
-	Domain    string
-	Timestamp int
-	Status    int
-	Headers   http.Header
-	Body      []byte
 }

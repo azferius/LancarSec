@@ -98,8 +98,6 @@ var (
 
 	JSSecret string
 
-	JSDifficulty = 5
-
 	CaptchaSecret string
 
 	// CookieOTP/JSOTP/CaptchaOTP/CurrHourStr used to be deprecated mirrors of

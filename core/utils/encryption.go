@@ -231,11 +231,6 @@ func RandomString(length int) string {
 	return string(res)
 }
 
-func HashToInt(hash string) int {
-	subset := (uint16(hash[0]) << 8) | uint16(hash[1])
-	return int(subset)%15 + 1
-}
-
 // RandomIntN returns a uniformly random int in [0, n), drawn from crypto/rand.
 //
 // It exists because the stage-3 captcha in core/server/middleware.go drew every

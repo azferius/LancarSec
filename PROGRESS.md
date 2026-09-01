@@ -323,8 +323,33 @@ The ultracode re-audit (dated section at the tail of docs/AUDIT.md; 90 findings 
   defer unlocks in supervised workers (CONC-03); window-map cardinality caps (CONC-04);
   synchronized config publish (CONC-02/AUTHZ-05/CRYPTO-04); unsupervised webhook goroutines
   (CONC-05); `Initialised` atomic (CONC-06); ReadLogs lock (CONC-07); coarse-lock decomposition
-  + eviction sweep (CONC-08/09, PERF-01/02/05); stdin-EOF spin (CONC-10); domains publish
   (CONC-11); plus the re-audit's perf mediums/lows.
+
+### Wave 9 W2 outcome (2026-09-01, `7767cf8`)
+
+- **Decomposition (QUAL-03, item 8) — pure code motion.** The 1220-line monolith is now
+  `middleware.go` ~490 lines (the decision pipeline: what is DECIDED) plus three owned files:
+  `identity.go` (WHO the request is from: addr parsing, real IP, ratelimit keys, body cap,
+  accessKey encoding), `response.go` (HOW the proxy answers: SendResponse/SendResponseWithStatus,
+  proxy page headers, PoW assets, Proxy-Secret endpoint), `challenge.go` (what a challenged
+  client is SENT: cookie names/suffix, strip, stage 1/2/3 pages and handlers). Seven moved
+  functions verified byte-identical against `7767cf8~1`; the captcha generation block identical
+  whitespace-normalized.
+- **`html/template` migration.** Stage-2/stage-3 pages are `template.Must(...Parse(...))` with
+  typed actions; `escapeHTML`/`escapeJSString` helpers deleted. Byte-preservation strategy:
+  hex payloads are invisible to the escapers; the difficulty integer is `template.JS` of
+  `strconv.Itoa` (digits-only, verbatim — `jsValEscaper` would pad with spaces and break the
+  rendered-page pin); base64 captcha payloads do get re-escaped on the wire (`+`→`\u002b`,
+  `/`→`\/`) — same decoded bytes, and the test-side extractor unescapes before decoding.
+- **HTTP-03 nil-backend guard.** A request naming the `debug` pseudo-domain (registered by the
+  config pipeline with a zero `DomainSettings`, `DomainProxy` nil) now gets 404 + no-store +
+  text/plain instead of panicking per connection on `DomainProxy.ServeHTTP` (trace swallowed by
+  `io.Discard`). Mutation-tested: guard disabled → the tripwire test fails with the exact
+  nil-pointer panic; restored copy-verified with zero residue.
+- **Verification: independent PASS, 13 checks over two verifier rounds** — CI gates green
+  (`gofmt`/`go vet`/`go test -race` all 12 packages/`go mod tidy`), escape helpers gone,
+  byte-equivalence, rendered-page pins load-bearing (exact `new BalooPow(...,5,...,!1)`, exact
+  salts/challenge hex, captcha PNG decodes), guard mutation test.
 
 ### Already fixed — do not re-scope (waves 5/6)
 

@@ -293,8 +293,3 @@ type WebhookField struct {
 type WebhookImage struct {
 	Url string `json:"url"`
 }
-
-type QuickchartResponse struct {
-	Success string `json:"success"`
-	Url     string `json:"url"`
-}

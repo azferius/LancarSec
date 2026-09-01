@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"github.com/azferius/lancarsec/core/domains"
 	"github.com/azferius/lancarsec/core/firewall"
@@ -10,13 +9,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 )
 
-var (
-	PrintMutex   = &sync.Mutex{}
-	ColorsString = "0;31"
-)
+var ColorsString = "0;31"
 
 // Only run in locked thread
 func AddLogs(entry domains.DomainLog, domainName string) {
@@ -154,25 +149,12 @@ func AskString(question string, defaultVal string) string {
 	return input
 }
 
-func JsonEscape(i string) string {
-	b, err := json.Marshal(i)
-	if err != nil {
-		panic(err)
-	}
-	// Trim the beginning and trailing " character
-	return string(b[1 : len(b)-1])
-}
-
 // TrimTime floors a unix timestamp onto the 10-second bucket grid. It moved
 // to core/proxy in wave 7 (the clock lives there, and core/utils imports
 // core/proxy, so proxy cannot import utils back); this wrapper keeps the
 // import path the wave-3 TrimTime tests pin.
 func TrimTime(timestamp int) int {
 	return proxy.TrimTime(timestamp)
-}
-
-func SafeString(str string) string {
-	return string([]byte(str))
 }
 
 // StageToString renders a suspicion level as the string component that
@@ -204,22 +186,4 @@ func StageToString(stage int) string {
 		return "5+"
 	}
 	return strconv.Itoa(stage)
-}
-
-func closestTo10(n int) int {
-	if n == 0 {
-		return 10
-	}
-
-	if n%10 >= 5 {
-		return (n/10 + 1) * 10
-	}
-
-	result := n / 10 * 10
-
-	if result == 0 {
-		return 10
-	}
-
-	return result
 }
