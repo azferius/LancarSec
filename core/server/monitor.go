@@ -486,8 +486,7 @@ func ReloadConfig() {
 // Per-entry TTL needs timestamps at the Store sites (middleware.go) and lands
 // with wave 9's middleware split.
 var (
-	maxIpsCacheEntries  = 100_000 // accessKey -> token rows, ~hundreds of bytes each
-	maxImgsCacheEntries = 1_024   // captcha image + mask pairs, ~100s of KB each
+	maxIpsCacheEntries = 100_000 // accessKey -> token rows, ~hundreds of bytes each
 )
 
 // evictCaches runs one eviction pass: dump a cache wholesale when it is over
@@ -506,18 +505,6 @@ func evictCaches() {
 	if ipCachelen > maxIpsCacheEntries {
 		firewall.CacheIps.Range(func(key, value any) bool {
 			firewall.CacheIps.Delete(key)
-			return true
-		})
-	}
-
-	imgCachelen := 0
-	firewall.CacheImgs.Range(func(key, value any) bool {
-		imgCachelen++
-		return true
-	})
-	if imgCachelen > maxImgsCacheEntries {
-		firewall.CacheImgs.Range(func(key, value any) bool {
-			firewall.CacheImgs.Delete(key)
 			return true
 		})
 	}

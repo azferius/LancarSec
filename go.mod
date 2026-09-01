@@ -7,7 +7,6 @@ toolchain go1.26.7
 require (
 	github.com/shirou/gopsutil/v4 v4.26.7
 	github.com/zeebo/blake3 v0.2.4
-	golang.org/x/image v0.45.0
 	golang.org/x/net v0.58.0
 )
 

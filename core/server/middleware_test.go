@@ -11,10 +11,7 @@ package server
 // symbol collisions with monitor_test.go, which lives in the same package.
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -168,7 +165,6 @@ func mwSaveGlobals(tb testing.TB) {
 		firewall.BotFingerprints = oldBot
 		firewall.ForbiddenFingerprints = oldForbidden
 		firewall.CacheIps = sync.Map{}
-		firewall.CacheImgs = sync.Map{}
 
 		proxy.Cloudflare = oldCloudflare
 		proxy.AdminSecret = oldAdminSecret
@@ -244,7 +240,6 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 	firewall.BotFingerprints = map[string]string{}
 	firewall.ForbiddenFingerprints = map[string]string{}
 	firewall.CacheIps = sync.Map{}
-	firewall.CacheImgs = sync.Map{}
 
 	// --- proxy globals (as Monitor()/generateOTPSecrets() would leave them) ---
 	proxy.Cloudflare = false
@@ -1361,16 +1356,17 @@ func TestMiddlewareStage2SolvedCookiePasses(t *testing.T) {
 	}
 }
 
-func TestMiddlewareStage3CaptchaFromCache(t *testing.T) {
+func TestMiddlewareStage3PowPage(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(3)
 
 	token := mwCaptchaToken()
-	publicPart := token[6:]
-	// Pre-seed the image cache so the response is fully deterministic (captcha
-	// generation itself uses math/rand). WAVE 11: the cache is keyed on the
-	// full token, not its 24-bit secret prefix.
-	firewall.CacheImgs.Store(token, [2]string{"CAPTCHA_PNG_DATA", "MASK_PNG_DATA"})
+	// WAVE 11 (CRYPTO-03): stage 3 is the stage-2 proof-of-work machinery with
+	// the difficulty one higher; the public salt is the token minus that many
+	// trailing characters.
+	difficulty := mwStage2Difficulty + 1
+	publicSalt := token[:len(token)-difficulty]
+	hashed := utils.EncryptSha(token, "")
 
 	rec := mwDo(mwRequest("/"))
 
@@ -1378,188 +1374,53 @@ func TestMiddlewareStage3CaptchaFromCache(t *testing.T) {
 	if ct := rec.Result().Header.Get("Content-Type"); ct != "text/html" {
 		t.Errorf("Content-Type = %q, want text/html", ct)
 	}
-	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,CAPTCHA_PNG_DATA"`)
-	mwAssertBodyContains(t, rec, `mask_image.src="data:image/png;base64,MASK_PNG_DATA"`)
-	// WAVE 9: FLIPPED. The stage-3 cookie name no longer embeds the client ip
-	// (an IPv6 ip carries ':' and browsers refuse to store such a cookie), so
-	// the name is the bare stage-3 name and the token binding lives in the
-	// token VALUE.
-	mwAssertBodyContains(t, rec, `document.cookie="`+mwStage3Cookie()+`="+a+"`+publicPart+`; SameSite=Lax; path=/; Secure"`)
-	mwAssertBodyContains(t, rec, `fetch("https://"+location.hostname+"/_bProxy/verified")`)
-	// BUG: the captcha answer is checked against the secret half of the token,
-	// which is handed to the client inside the image; the public half is echoed
-	// into the page. Pinned only as "this is the shape of the page today".
-	mwAssertBodyContains(t, rec, "Drag the <b>slider</b>")
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store, no-cache, must-revalidate, max-age=0" {
+		t.Errorf("Cache-Control = %q", cc)
+	}
+	mwAssertBodyContains(t, rec, publicSalt)
+	mwAssertBodyContains(t, rec, hashed)
+	// The page sets the stage-3 cookie to the full token (salt + solution),
+	// exactly like stage 2, so the middleware cookie check needs no
+	// stage-specific branch.
+	mwAssertBodyContains(t, rec, `document.cookie="`+mwStage3Cookie()+`=`+publicSalt+`"+e.solution+"; SameSite=Lax; path=/; Secure"`)
+	mwAssertBodyContains(t, rec, `new BalooPow("`+publicSalt+`",`+strconv.Itoa(difficulty)+`,"`+hashed+`",!1)`)
+	mwAssertBodyContains(t, rec, `/_bProxy/balooPow.min.js`)
+	mwAssertBodyContains(t, rec, `/_bProxy/crypto-js.min.js`)
 	if env.mwBackendHits() != 0 {
 		t.Error("backend was reached during a stage-3 challenge")
 	}
-}
 
-func TestMiddlewareStage3CaptchaGenerationCaches(t *testing.T) {
-	env := mwNewEnv(t)
-	env.mwSetStage(3)
-
-	token := mwCaptchaToken()
-
-	rec := mwDo(mwRequest("/"))
-	mwAssertStatus(t, rec, http.StatusOK)
-	mwAssertBodyContains(t, rec, `captcha_image.src="data:image/png;base64,iVBOR`)
-
-	// WAVE 11: the cache is keyed on the full token.
-	got, ok := firewall.CacheImgs.Load(token)
+	// The hashed challenge answer is memoised under the encrypted token itself,
+	// like stage 2's.
+	cached, ok := firewall.CacheIps.Load(token)
 	if !ok {
-		t.Fatalf("CacheImgs has no entry for the full token %q after generating a captcha", mwTrunc(token, 16))
+		t.Fatalf("CacheIps has no entry for the stage-3 token")
 	}
-	pair, ok := got.([2]string)
-	if !ok {
-		t.Fatalf("CacheImgs entry has type %T, want [2]string", got)
+	if cached.(string) != hashed {
+		t.Errorf("cached hash = %q, want %q", cached, hashed)
 	}
-	if pair[0] == "" || pair[1] == "" {
-		t.Errorf("cached captcha/mask pair is incomplete: %q / %q", mwTrunc(pair[0], 16), mwTrunc(pair[1], 16))
-	}
-	if env.mwBackendHits() != 0 {
-		t.Error("backend was reached during a stage-3 challenge")
-	}
-}
-
-// mwStage3InjectToken pre-seeds the encryption cache with a chosen stage-3
-// token so the captcha's secret/public split is controlled by the test instead
-// of by blake3. Middleware takes the cache-hit branch and uses this value
-// verbatim as `encryptedIP`.
-func mwStage3InjectToken(token string) {
-	// FLIPPED BY WAVE 5: the cache key is the access key itself, which now
-	// carries the suspicion level, instead of accessKey+StageToString(susLv).
-	firewall.CacheIps.Store(mwAccessKey(3), token)
-}
-
-// mwCountOpaqueGreen counts the pixels of a base64 PNG that are exactly the
-// colour utils.AddLabel is given for the captcha ANSWER: RGBA{61,140,64,255}.
-// The other two labels on the captcha are drawn at alpha 20 and alpha 100, and
-// neither WarpImg nor DrawTriangle invents a colour - they only copy, clear or
-// displace existing pixels - so this colour appears if and only if the answer
-// label was drawn with non-blank glyphs.
-func mwCountOpaqueGreen(t *testing.T, b64 string) int {
-	t.Helper()
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		t.Fatalf("decode base64 png: %v", err)
-	}
-	img, err := png.Decode(bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("decode png: %v", err)
-	}
-	n := 0
-	b := img.Bounds()
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			r, g, bl, a := img.At(x, y).RGBA()
-			if r>>8 == 61 && g>>8 == 140 && bl>>8 == 64 && a>>8 == 255 {
-				n++
-			}
-		}
-	}
-	return n
-}
-
-// mwExtractPNG pulls the base64 payload the captcha page assigns to
-// captcha_image.src / mask_image.src.
-//
-// WAVE 9 W2: the page is rendered by html/template, whose JS-string escaper
-// rewrites the base64 alphabet's '+' and '/' to \u002b and \/ (same strings
-// once the browser parses the JavaScript, different bytes on the wire). Undo
-// exactly those two before base64-decoding; the payload alphabet contains no
-// other character the escaper maps.
-func mwExtractPNG(t *testing.T, body, jsVar string) string {
-	t.Helper()
-	marker := jsVar + `.src="data:image/png;base64,`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		t.Fatalf("captcha page has no %s payload", jsVar)
-	}
-	rest := body[i+len(marker):]
-	j := strings.Index(rest, `"`)
-	if j < 0 {
-		t.Fatalf("unterminated %s payload", jsVar)
-	}
-	return strings.NewReplacer(`\/`, `/`, `\u002b`, `+`).Replace(rest[:j])
-}
-
-// The stage-3 answer the proxy checks is encryptedIP[:6]; the string drawn in
-// solid green is what the user is told to type. Those must be the same string.
-// Swapping in any other same-typed piece of the token - publicPart[:6], say -
-// makes every stage-3 captcha unsolvable, which hard-blocks all human traffic
-// the moment the proxy escalates to stage 3.
-//
-// The captcha is generated with the global math/rand, so positions, warp and
-// triangles are not reproducible. The test therefore controls the token
-// instead: with a blank secret half there is no ink to draw in the answer
-// colour, so ANY other string rendered there shows up as opaque-green pixels.
-func TestMiddlewareStage3CaptchaDrawsTheSecretHalf(t *testing.T) {
-	t.Run("a blank secret half leaves no answer-coloured ink", func(t *testing.T) {
-		env := mwNewEnv(t)
-		env.mwSetStage(3)
-		// secretPart = "      ", publicPart[:6] = "WWWWWW" (very inky),
-		// publicPart[6:] = "MMMMMM".
-		mwStage3InjectToken("      " + "WWWWWW" + "MMMMMM")
-
-		rec := mwDo(mwRequest("/"))
-		mwAssertStatus(t, rec, http.StatusOK)
-		body := rec.Body.String()
-
-		got := mwCountOpaqueGreen(t, mwExtractPNG(t, body, "captcha_image")) +
-			mwCountOpaqueGreen(t, mwExtractPNG(t, body, "mask_image"))
-		if got != 0 {
-			t.Errorf("captcha carries %d pixels in the answer colour, want 0: the answer label must render encryptedIP[:6], which is blank here", got)
-		}
-		if env.mwBackendHits() != 0 {
-			t.Error("backend was reached during a stage-3 challenge")
-		}
-	})
-
-	// Control: the same measurement finds plenty of ink when the secret half
-	// is not blank, so the assertion above is not vacuously true.
-	t.Run("an inky secret half does leave answer-coloured ink", func(t *testing.T) {
-		env := mwNewEnv(t)
-		env.mwSetStage(3)
-		mwStage3InjectToken("WWWWWW" + "      " + "MMMMMM")
-
-		rec := mwDo(mwRequest("/"))
-		mwAssertStatus(t, rec, http.StatusOK)
-		body := rec.Body.String()
-
-		got := mwCountOpaqueGreen(t, mwExtractPNG(t, body, "captcha_image")) +
-			mwCountOpaqueGreen(t, mwExtractPNG(t, body, "mask_image"))
-		if got == 0 {
-			t.Error("captcha carries no pixels in the answer colour even though the secret half is inky; the measurement is broken")
-		}
-		if env.mwBackendHits() != 0 {
-			t.Error("backend was reached during a stage-3 challenge")
-		}
-	})
 }
 
 func TestMiddlewareStage3SolvedCookiePasses(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(3)
 
-	// The client sends "_3__bProxy_v=<answer><publicPart>", which for a correct
-	// answer is the whole token.
-	// WAVE 9: FLIPPED. The name used to be "<ip>_3__bProxy_v"; wave 6 moved the
-	// ip out of the name (IPv6 carries ':' and browsers reject that) and wave 5
-	// already binds the token VALUE to the ip, domain, fingerprint, UA and hour
-	// — so the bare name carries no security weight.
+	// The client sends "_3__bProxy_v=<solution><publicSalt>", which for a
+	// correct solution is the whole token.
 	rec := mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie()+"="+mwCaptchaToken())))
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
-	// The correct answer bound to ANOTHER client's identity does not clear this
-	// client: the binding lives in the token value now, so a foreign ip inside
-	// the token is what must be rejected, not a foreign cookie name.
+	// The correct solution bound to ANOTHER client's identity does not clear
+	// this client: the binding lives in the token value now, so a foreign ip
+	// inside the token is what must be rejected, not a foreign cookie name.
+	// WAVE 11 (CRYPTO-03): the re-challenge page is the shared PoW page; pin
+	// its difficulty marker instead of the removed slider markup.
 	before := env.mwBackendHits()
 	foreignToken := utils.Encrypt(mwAccessKeyFor(mwDomain, "198.51.100.9", mwFP, mwUA, mwHourStr, 3), mwCaptchaOTP)
 	rec = mwDo(mwRequest("/", mwWithCookie(mwStage3Cookie()+"="+foreignToken)))
 	mwAssertStatus(t, rec, http.StatusOK)
-	mwAssertBodyContains(t, rec, "Drag the <b>slider</b>")
+	mwAssertBodyContains(t, rec, `new BalooPow("`)
 	if env.mwBackendHits() != before {
 		t.Errorf("backend hits = %d, want %d", env.mwBackendHits(), before)
 	}
@@ -1692,7 +1553,9 @@ func TestMiddlewareCustomRules(t *testing.T) {
 			rules:      [][2]string{{`http.path eq "/captcha"`, "3"}},
 			path:       "/captcha",
 			wantStatus: http.StatusOK,
-			wantBody:   "Drag the <b>slider</b>",
+			// WAVE 11 (CRYPTO-03): the captcha tier is a harder proof-of-work
+			// page now - the same solver marker stage 2's case pins below.
+			wantBody: `new BalooPow("`,
 		},
 		{
 			name:       "static action raises to js challenge",
@@ -1707,7 +1570,7 @@ func TestMiddlewareCustomRules(t *testing.T) {
 			path:       "/",
 			method:     http.MethodDelete,
 			wantStatus: http.StatusOK,
-			wantBody:   "Drag the <b>slider</b>", // stage 1 + 2 = 3
+			wantBody:   `new BalooPow("`, // stage 1 + 2 = 3, now the PoW tier
 		},
 		{
 			name:       "relative action can lower the stage to whitelist",

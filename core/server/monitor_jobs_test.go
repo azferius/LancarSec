@@ -106,21 +106,16 @@ func TestAddDomainHookDefaultsToNil(t *testing.T) {
 // Alloc/Sys heuristic (AUDIT.md:4822): a cache over its cap is dumped, one
 // under its cap is left alone.
 func TestEvictCachesCountGate(t *testing.T) {
-	oldIps, oldImgs := maxIpsCacheEntries, maxImgsCacheEntries
-	maxIpsCacheEntries, maxImgsCacheEntries = 0, 10_000
-	t.Cleanup(func() { maxIpsCacheEntries, maxImgsCacheEntries = oldIps, oldImgs })
+	oldIps := maxIpsCacheEntries
+	maxIpsCacheEntries = 0
+	t.Cleanup(func() { maxIpsCacheEntries = oldIps })
 
 	firewall.CacheIps = sync.Map{}
-	firewall.CacheImgs = sync.Map{}
 	firewall.CacheIps.Store("over-cap", "v")
-	firewall.CacheImgs.Store("under-cap", [2]string{"a", "b"})
 
 	evictCaches()
 
 	if _, ok := firewall.CacheIps.Load("over-cap"); ok {
 		t.Fatal("CacheIps over its cap was not evicted")
-	}
-	if _, ok := firewall.CacheImgs.Load("under-cap"); !ok {
-		t.Fatal("CacheImgs under its cap was evicted")
 	}
 }

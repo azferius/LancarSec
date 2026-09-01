@@ -16,20 +16,11 @@ package server
 
 import (
 	"bytes"
-	"encoding/base64"
 	"html/template"
-	"image"
-	"image/color"
-	"image/draw"
-	"image/png"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/azferius/lancarsec/core/firewall"
-	"github.com/azferius/lancarsec/core/utils"
 )
 
 // proxyCookieSuffix is the shared suffix of every challenge cookie the proxy
@@ -178,14 +169,16 @@ func serveStage1Challenge(writer http.ResponseWriter, request *http.Request, buf
 	http.Redirect(writer, request, request.URL.RequestURI(), http.StatusFound)
 }
 
-// stage2PageData carries every value the stage-2 proof-of-work page
+// stage2PageData carries every value a proof-of-work challenge page
 // interpolates. All strings are server-derived: PublicSalt and Challenge are
-// blake3 hex, the paths are this file's own consts. Difficulty is rendered as
-// a bare JS numeric literal: html/template's JS-value escaper pads numbers
-// with spaces (" 5 "), which would change the page byte-for-byte, so the call
-// site passes strconv.Itoa's output as template.JS - verbatim, and safe
-// because it can only ever be decimal digits.
+// blake3 hex, CookieName comes from challengeCookieName, the paths are this
+// file's own consts. Difficulty is rendered as a bare JS numeric literal:
+// html/template's JS-value escaper pads numbers with spaces (" 5 "), which
+// would change the page byte-for-byte, so the call site passes strconv.Itoa's
+// output as template.JS - verbatim, and safe because it can only ever be
+// decimal digits.
 type stage2PageData struct {
+	CookieName   string
 	PublicSalt   string
 	Challenge    string
 	Difficulty   template.JS
@@ -201,14 +194,22 @@ type stage2PageData struct {
 // WAVE 9: both scripts are vendored (global/pow) and served first-party via
 // BalooPowPath/CryptoJSPath; they used to be mutable CDN references with no
 // SRI that neutered stage 2 when the CDN was unavailable.
-var stage2Page = template.Must(template.New("stage2").Parse(`<!doctypehtml><html lang=en><meta charset=UTF-8><meta content="width=device-width,initial-scale=1"name=viewport><title>Completing challenge ...</title><style>body,html{height:100%;width:100%;margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background-color:#f0f0f0;font-family:Arial,sans-serif}.loader{display:flex;justify-content:space-around;align-items:center;width:100px;height:100px}.loader div{width:20px;height:20px;background-color:#333;border-radius:50%;animation:bounce .6s infinite alternate}.loader div:nth-child(2){animation-delay:.2s}.loader div:nth-child(3){animation-delay:.4s}@keyframes bounce{to{transform:translateY(-30px)}}.message{text-align:center;margin-top:20px;color:#333}.subtext{text-align:center;color:#666;font-size:.9em;margin-top:5px}.placeholder-container{width:25%;text-align:center;margin:10px 0}.placeholder-label{font-weight:700;margin-bottom:5px}.placeholder{background-color:#e0e0e0;padding:10px;border-radius:5px;word-break:break-all;font-family:monospace;cursor:pointer;}</style><div class=loader><div></div><div></div><div></div></div><div class=message><p>Completing challenge ...<div class=subtext>The process is automatic and shouldn't take too long. Please be patient.</div></div><div class=placeholder-container><div class=placeholder-label>publicSalt:</div><div class=placeholder id=publicSalt onclick='ctc("publicSalt")'><span>{{.PublicSalt}}</span></div></div><div class=placeholder-container><div class=placeholder-label>challenge:</div><div class=placeholder id=challenge onclick='ctc("challenge")'><span>{{.Challenge}}</span></div></div><script>function ctc(t){navigator.clipboard.writeText(document.getElementById(t).innerText)}</script><script src="{{.BalooPowPath}}"></script><script src="{{.CryptoJSPath}}"></script><script>function solved(e){document.cookie="_2__bProxy_v={{.PublicSalt}}"+e.solution+"; SameSite=Lax; path=/; Secure",location.href=location.href}new BalooPow("{{.PublicSalt}}",{{.Difficulty}},"{{.Challenge}}",!1).Solve().then(e=>{if(e.match == ""){solved(e)}else alert("Navigator Missmatch ("+e.match+"). Please contact @ddosmitigation")});</script>`))
+var stage2Page = template.Must(template.New("stage2").Parse(`<!doctypehtml><html lang=en><meta charset=UTF-8><meta content="width=device-width,initial-scale=1"name=viewport><title>Completing challenge ...</title><style>body,html{height:100%;width:100%;margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background-color:#f0f0f0;font-family:Arial,sans-serif}.loader{display:flex;justify-content:space-around;align-items:center;width:100px;height:100px}.loader div{width:20px;height:20px;background-color:#333;border-radius:50%;animation:bounce .6s infinite alternate}.loader div:nth-child(2){animation-delay:.2s}.loader div:nth-child(3){animation-delay:.4s}@keyframes bounce{to{transform:translateY(-30px)}}.message{text-align:center;margin-top:20px;color:#333}.subtext{text-align:center;color:#666;font-size:.9em;margin-top:5px}.placeholder-container{width:25%;text-align:center;margin:10px 0}.placeholder-label{font-weight:700;margin-bottom:5px}.placeholder{background-color:#e0e0e0;padding:10px;border-radius:5px;word-break:break-all;font-family:monospace;cursor:pointer;}</style><div class=loader><div></div><div></div><div></div></div><div class=message><p>Completing challenge ...<div class=subtext>The process is automatic and shouldn't take too long. Please be patient.</div></div><div class=placeholder-container><div class=placeholder-label>publicSalt:</div><div class=placeholder id=publicSalt onclick='ctc("publicSalt")'><span>{{.PublicSalt}}</span></div></div><div class=placeholder-container><div class=placeholder-label>challenge:</div><div class=placeholder id=challenge onclick='ctc("challenge")'><span>{{.Challenge}}</span></div></div><script>function ctc(t){navigator.clipboard.writeText(document.getElementById(t).innerText)}</script><script src="{{.BalooPowPath}}"></script><script src="{{.CryptoJSPath}}"></script><script>function solved(e){document.cookie="{{.CookieName}}={{.PublicSalt}}"+e.solution+"; SameSite=Lax; path=/; Secure",location.href=location.href}new BalooPow("{{.PublicSalt}}",{{.Difficulty}},"{{.Challenge}}",!1).Solve().then(e=>{if(e.match == ""){solved(e)}else alert("Navigator Missmatch ("+e.match+"). Please contact @ddosmitigation")});</script>`))
 
 // serveStage2Challenge presents the stage-2 proof-of-work page.
 func serveStage2Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, publicSalt, hashedEncryptedIP string, difficulty int) {
+	renderPowChallenge(writer, buffer, challengeCookieName(2), publicSalt, hashedEncryptedIP, difficulty)
+}
+
+// renderPowChallenge renders the shared proof-of-work page for the given
+// challenge cookie name. Stage 2 and stage 3 run the exact same solver; the
+// stage-3 call site passes a difficulty one higher and its own cookie name.
+func renderPowChallenge(writer http.ResponseWriter, buffer *bytes.Buffer, cookieName, publicSalt, hashedEncryptedIP string, difficulty int) {
 	writer.Header().Set("Content-Type", "text/html")
 	writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0") // Prevent special(ed) browsers from caching the challenge
 	setProxyPageHeaders(writer)
 	err := stage2Page.Execute(buffer, stage2PageData{
+		CookieName:   cookieName,
 		PublicSalt:   publicSalt,
 		Challenge:    hashedEncryptedIP,
 		Difficulty:   template.JS(strconv.Itoa(difficulty)),
@@ -219,7 +220,7 @@ func serveStage2Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, publ
 		// Unreachable with these value types, but a half-rendered page must
 		// never leave as 200.
 		buffer.Reset()
-		log.Printf("BalooProxy: failed to render stage-2 challenge page: %v", err)
+		log.Printf("BalooProxy: failed to render proof-of-work challenge page: %v", err)
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
 		return
@@ -227,118 +228,18 @@ func serveStage2Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, publ
 	writer.Write(buffer.Bytes())
 }
 
-// serveStage3Challenge presents the stage-3 captcha. It draws, encodes and
-// caches the captcha/mask pair on a cache miss and renders the page.
-func serveStage3Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, encryptedIP string) {
-	secretPart := encryptedIP[:6]
-	publicPart := encryptedIP[6:]
-
-	captchaData := ""
-	maskData := ""
-	// WAVE 11: the cache is keyed on the FULL token, not secretPart. Six hex
-	// chars are 24 bits - birthday collisions start around 4000 concurrent
-	// stage-3 clients, and a collision served client B the PNG carrying
-	// client A's complete token. The full token is blake3 hex of the access
-	// key, so it is collision-free as a key.
-	captchaCache, captchaExists := firewall.CacheImgs.Load(encryptedIP)
-
-	if !captchaExists {
-		randomShift := utils.RandomIntN(50) - 25
-		captchaImg := image.NewRGBA(image.Rect(0, 0, 100, 37))
-		randomColor := uint8(utils.RandomIntN(255))
-		utils.AddLabel(captchaImg, 0, 18, publicPart[6:], color.RGBA{61, 140, 64, 20})
-		utils.AddLabel(captchaImg, utils.RandomIntN(90), utils.RandomIntN(30), publicPart[:6], color.RGBA{255, randomColor, randomColor, 100})
-		utils.AddLabel(captchaImg, utils.RandomIntN(25), utils.RandomIntN(20)+10, secretPart, color.RGBA{61, 140, 64, 255})
-
-		amplitude := float64(utils.RandomIntN(10)+10) / 10.0
-		period := float64(37) / 5.0
-		displacement := func(x, y int) (int, int) {
-			dx := amplitude * math.Sin(float64(y)/period)
-			dy := amplitude * math.Sin(float64(x)/period)
-			return x + int(dx), y + int(dy)
-		}
-		captchaImg = utils.WarpImg(captchaImg, displacement)
-
-		maskImg := image.NewRGBA(captchaImg.Bounds())
-		draw.Draw(maskImg, maskImg.Bounds(), image.Transparent, image.Point{}, draw.Src)
-
-		numTriangles := utils.RandomIntN(20) + 10
-
-		blacklist := make(map[[2]int]bool) // We use this to keep track of already overwritten pixels.
-		// it's slightly more performant to not do this but can lead to unsolvable captchas
-
-		for range numTriangles {
-			size := utils.RandomIntN(5) + 10
-			x := utils.RandomIntN(captchaImg.Bounds().Dx() - size)
-			y := utils.RandomIntN(captchaImg.Bounds().Dy() - size)
-			blacklist = utils.DrawTriangle(blacklist, captchaImg, maskImg, x, y, size, randomShift)
-		}
-
-		var captchaBuf, maskBuf bytes.Buffer
-		if err := png.Encode(&captchaBuf, captchaImg); err != nil {
-			// WAVE 9: the internal error string used to be echoed to
-			// the client. The client gets a generic 500 with no
-			// internal detail; the cause goes to the log, consistent
-			// with the stdlib-log pattern used elsewhere in this tree.
-			log.Printf("BalooProxy: failed to encode stage-3 captcha image: %v", err)
-			writer.Header().Set("Content-Type", "text/plain")
-			SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
-			return
-		}
-		if err := png.Encode(&maskBuf, maskImg); err != nil {
-			log.Printf("BalooProxy: failed to encode stage-3 captcha mask: %v", err)
-			writer.Header().Set("Content-Type", "text/plain")
-			SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
-			return
-		}
-
-		captchaData = base64.StdEncoding.EncodeToString(captchaBuf.Bytes())
-		maskData = base64.StdEncoding.EncodeToString(maskBuf.Bytes())
-
-		firewall.CacheImgs.Store(encryptedIP, [2]string{captchaData, maskData})
-	} else {
-		captchaDataTmp := captchaCache.([2]string)
-		captchaData = captchaDataTmp[0]
-		maskData = captchaDataTmp[1]
-	}
-
-	writer.Header().Set("Content-Type", "text/html")
-	writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0") // Prevent special(ed) browsers from caching the challenge
-	setProxyPageHeaders(writer)
-	// WAVE 9: the stage-3 cookie NAME no longer embeds the client ip -
-	// ':' in an IPv6 name is rejected by browsers, which made stage 3
-	// unsolvable for IPv6 clients. The name is derived from
-	// challengeCookieName so the page's document.cookie and the
-	// server-side validation can never disagree; the token VALUE is
-	// still bound to the ip via the access key (wave 5).
-	stage3CookieName := challengeCookieName(3)
-	err := stage3Page.Execute(buffer, stage3PageData{
-		CookieName:  stage3CookieName,
-		PublicPart:  publicPart,
-		CaptchaData: captchaData,
-		MaskData:    maskData,
-	})
-	if err != nil {
-		buffer.Reset()
-		log.Printf("BalooProxy: failed to render stage-3 challenge page: %v", err)
-		writer.Header().Set("Content-Type", "text/plain")
-		SendResponseWithStatus(http.StatusInternalServerError, "500 Internal Server Error", buffer, writer)
-		return
-	}
-	writer.Write(buffer.Bytes())
+// serveStage3Challenge presents the stage-3 proof-of-work page.
+//
+// WAVE 11 (CRYPTO-03): stage 3 used to be a home-grown canvas captcha whose
+// answer was the secret 24 bits of the token, handed to the client inside the
+// PNG. That is not a secret: a solver reads the image, and the token's other
+// 40 hex chars were already public on the page. Stage 3 now reuses the exact
+// stage-2 proof-of-work machinery - same vendored solver, same page - with
+// the difficulty one higher, so escalation buys a strictly harder hash
+// puzzle instead of a picture. The cookie check in middleware is unchanged:
+// the page still sets the full token under challengeCookieName(3).
+func serveStage3Challenge(writer http.ResponseWriter, buffer *bytes.Buffer, encryptedIP, hashedEncryptedIP string, stage2Difficulty int) {
+	difficulty := stage2Difficulty + 1
+	publicSalt := encryptedIP[:len(encryptedIP)-difficulty]
+	renderPowChallenge(writer, buffer, challengeCookieName(3), publicSalt, hashedEncryptedIP, difficulty)
 }
-
-// stage3PageData carries every value the stage-3 captcha page interpolates.
-// CookieName is challengeCookieName(3); PublicPart is blake3 hex; the two PNG
-// payloads are std-base64 - html/template's JS-string escaper rewrites their
-// '+' and '/' (to \u002b and \/) and the browser decodes the very same
-// strings.
-type stage3PageData struct {
-	CookieName  string
-	PublicPart  string
-	CaptchaData string
-	MaskData    string
-}
-
-// stage3Page is the stage-3 captcha page; same escaping contract as stage2Page.
-var stage3Page = template.Must(template.New("stage3").Parse(`<style>body{background-color:#f5f5f5;font-family:Arial,sans-serif}.center{display:flex;align-items:center;justify-content:center;height:100vh}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px}canvas{display:block;margin:0 auto;max-width:100%;width:100%;height:auto}input[type=text]{width:100%;padding:12px 20px;margin:8px 0;box-sizing:border-box;border:2px solid #ccc;border-radius:4px}button{width:100%;background-color:#4caf50;color:#fff;padding:14px 20px;margin:8px 0;border:none;border-radius:4px;cursor:pointer}button:hover{background-color:#45a049}.box{background-color:#fff;border:1px solid #ddd;border-radius:4px;padding:20px;width:500px;transition:height .1s;position:block}.box *{transition:opacity .1s}.success{background-color:#dff0d8;border:1px solid #d6e9c6;border-radius:4px;color:#3c763d;padding:20px}.failure{background-color:#f0d8d8;border:1px solid #e9c6c6;border-radius:4px;color:#763c3c;padding:20px}.collapsible{background-color:#f5f5f5;color:#444;cursor:pointer;padding:18px;width:100%;border:none;text-align:left;outline:0;font-size:15px}.collapsible:after{content:'\002B';color:#777;font-weight:700;float:right;margin-left:5px}.collapsible.active:after{content:"\2212"}.collapsible:hover{background-color:#e5e5e5}.collapsible-content{padding:0 18px;max-height:0;overflow:hidden;transition:max-height .2s ease-out;background-color:#f5f5f5}.captcha-wrapper{position:relative;width:100%;height:200px}.captcha-wrapper canvas{position:absolute}input[type=range]{-webkit-appearance:none;width:100%;height:25px;background:#ddd;outline:0;opacity:.7;transition:opacity .2s;border-radius:4px;margin:8px 0}input[type=range]:hover{opacity:1}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}input[type=range]::-moz-range-thumb{width:25px;height:25px;background:#4caf50;cursor:pointer;border-radius:50%}</style><div class=center id=center><div class=box id=box><h1>Drag the <b>slider</b> and enter the <b>green</b> text you see in the picture</h1><div class=captcha-wrapper><canvas height=37 id=captcha width=100></canvas><canvas height=37 id=mask width=100></canvas></div><input id=captcha-slider max=50 min=-50 type=range><form onsubmit="return checkAnswer(event)"><input id=text type=text maxlength=6 placeholder=Solution required> <button type=submit>Submit</button></form><div class=success id=successMessage style=display:none>Success! Redirecting ...</div><div class=failure id=failMessage style=display:none>Failed! Please try again.</div><button class=collapsible>Why am I seeing this page?</button><div class=collapsible-content><p>The website you are trying to visit needs to make sure that you are not a bot. This is a common security measure to protect websites from automated spam and abuse. By entering the characters you see in the picture, you are helping to verify that you are a real person.</div></div></div><script>let captcha_canvas=document.getElementById("captcha"),captcha_ctx=captcha_canvas.getContext("2d"),mask_canvas=document.getElementById("mask"),mask_ctx=mask_canvas.getContext("2d"),slider=document.getElementById("captcha-slider"),demo_slider=!1,demo_val=1;var i,captcha_image=new Image,mask_image=new Image;function checkAnswer(e){e.preventDefault();var a=document.getElementById("text").value;document.cookie="{{.CookieName}}="+a+"{{.PublicPart}}; SameSite=Lax; path=/; Secure",fetch("https://"+location.hostname+"/_bProxy/verified").then(function(e){return e.text()}).then(function(e){"verified"===e?(document.getElementById("successMessage").style.display="block",setInterval(function(){var e=document.getElementById("box"),a=e.offsetHeight,t=setInterval(function(){a-=20,e.style.height=a+"px";for(var c=e.children,s=0;s<c.length;s++)c[s].style.opacity=0;a<=0&&(e.style.height="0",e.remove(),clearInterval(t),location.href=location.href)},20)},1e3)):(document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3))}).catch(function(e){document.getElementById("failMessage").style.display="block",setInterval(function(){location.href=location.href},1e3)})}captcha_image.onload=function(){captcha_ctx.drawImage(captcha_image,(captcha_canvas.width-captcha_image.width)/2,(captcha_canvas.height-captcha_image.height)/2)},captcha_image.src="data:image/png;base64,{{.CaptchaData}}",mask_image.onload=function(){mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2,(mask_canvas.height-mask_image.height)/2)},mask_image.src="data:image/png;base64,{{.MaskData}}";let demo_int=setInterval(()=>{if(!demo_slider){clearInterval(demo_int);return}slider.value<=-50&&(demo_val=1),slider.value>=50&&(demo_val=-1),slider.value=parseInt(slider.value)+demo_val,updateCaptcha()},50);function updateCaptcha(){let e=parseInt(slider.value);mask_ctx.clearRect(0,0,mask_canvas.width,mask_canvas.height),mask_ctx.drawImage(mask_image,(mask_canvas.width-mask_image.width)/2+e,0)}slider.oninput=function(){demo_slider=!1,updateCaptcha()};var coll=document.getElementsByClassName("collapsible");for(i=0;i<coll.length;i++)coll[i].addEventListener("click",function(){this.classList.toggle("active");var e=this.nextElementSibling;e.style.maxHeight?e.style.maxHeight=null:e.style.maxHeight=e.scrollHeight+"px"});</script>`))

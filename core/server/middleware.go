@@ -386,6 +386,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			firewall.CacheIps.Store(encryptedIP, hashedEncryptedIP)
 		case 3:
 			encryptedIP = utils.Encrypt(accessKey, otp.Captcha)
+			// WAVE 11 (CRYPTO-03): stage 3 is a proof-of-work tier now, so its
+			// page needs the same Challenge hash stage 2 publishes. Cached
+			// under the token exactly like stage 2's, for the same reason.
+			hashedEncryptedIP = utils.EncryptSha(encryptedIP, "")
+			firewall.CacheIps.Store(encryptedIP, hashedEncryptedIP)
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
 			// WAVE 9: a hard block answers 403, not a cacheable 200.
@@ -447,7 +452,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			serveStage2Challenge(writer, buffer, publicSalt, hashedEncryptedIP, domainData.Stage2Difficulty)
 			return
 		case 3:
-			serveStage3Challenge(writer, buffer, encryptedIP)
+			serveStage3Challenge(writer, buffer, encryptedIP, hashedEncryptedIP, domainData.Stage2Difficulty)
 			return
 		default:
 			writer.Header().Set("Content-Type", "text/plain")
