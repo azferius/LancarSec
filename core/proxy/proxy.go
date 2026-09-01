@@ -127,5 +127,10 @@ var (
 	// dedicated ticker goroutine rather than by the terminal renderer, so a
 	// blocked stdout can no longer freeze the ratelimit window.
 
-	Initialised = false
+	// Initialised flips to true once the first prefill pass of
+	// server.Monitor's evaluateRatelimit goroutine has published the window
+	// buckets. It is written on the monitor goroutine and polled from main
+	// before the listener starts, so it is an atomic.Bool (CONC-06) — a plain
+	// bool shared across goroutines is a data race under the Go memory model.
+	Initialised atomic.Bool
 )

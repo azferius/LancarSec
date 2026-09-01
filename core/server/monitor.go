@@ -594,7 +594,7 @@ func evaluateRatelimit() {
 			}
 		}
 		firewall.Mutex.Unlock()
-		proxy.Initialised = true
+		proxy.Initialised.Store(true) // CONC-06: atomic, polled cross-goroutine from main
 
 		//log.Printf("I Ran. I'm supposed to run every 5 seconds. If that didn't happen we're in deep shit")
 		time.Sleep(5 * time.Second)

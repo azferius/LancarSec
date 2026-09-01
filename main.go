@@ -61,7 +61,7 @@ func main() {
 	// Wait for everything to be initialised
 	fmt.Println("Initialising ...")
 	go server.Monitor()
-	for !proxy.Initialised {
+	for !proxy.Initialised.Load() { // CONC-06: atomic poll, no data race
 		time.Sleep(500 * time.Millisecond)
 	}
 

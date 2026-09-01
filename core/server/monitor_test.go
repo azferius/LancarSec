@@ -76,7 +76,9 @@ func rlSnapshotGlobals(t *testing.T) {
 	// test pins the clock explicitly via rlSetClock before it reads it.
 
 	oldWindow := proxy.RatelimitWindow
-	oldInitialised := proxy.Initialised
+	// WAVE 9 (CONC-06): Initialised is an atomic.Bool — lock value, cannot be
+	// copied for a snapshot. Tests that flip it restore it explicitly.
+	proxy.Initialised.Store(false)
 
 	t.Cleanup(func() {
 		firewall.WindowAccessIps = oldWindowAccessIps
@@ -87,7 +89,7 @@ func rlSnapshotGlobals(t *testing.T) {
 		firewall.UnkFps = oldUnkFps
 
 		proxy.RatelimitWindow = oldWindow
-		proxy.Initialised = oldInitialised
+		proxy.Initialised.Store(false)
 	})
 
 	firewall.WindowAccessIps = map[int]map[string]int{}
