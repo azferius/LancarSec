@@ -1,0 +1,10 @@
+LancarSec
+Copyright 2026 LancarSec contributors
+
+This product is based on BalooProxy
+Copyright 41Baloo and BalooProxy contributors
+https://github.com/41Baloo/balooProxy
+
+Upstream relicensed the project under the GNU General Public License
+version 3 (commit 9f2ad65, January 2023). This fork therefore carries
+the GPL-3 license. The full license text is in LICENSE.

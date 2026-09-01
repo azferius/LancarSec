@@ -1,3 +1,7 @@
+# **LancarSec**
+
+LancarSec is a lightweight staged-DDoS-mitigating reverse proxy, based on [BalooProxy](https://github.com/41Baloo/balooProxy) by 41Baloo (kept under GPL-3 in this fork).
+
 # **Features**
 
 ## **TLS-Fingerprinting**
@@ -8,7 +12,7 @@ On one hand you can use `tls fingerprinting` to `whitelist` specific fingerprint
 
 ## **Staged DDoS-Mitigation**
 
-balooProxy comes with `3 distinct challenges`, in order to defend against bots/ddos attacks effectively, whilst effecting an actual users experience as little as possible. In order to archive that, balooProxy starts with the "weakest" and least notable challenge and automatically changes them when it detects one of them is being bypassed
+LancarSec comes with `3 distinct challenges`, in order to defend against bots/ddos attacks effectively, whilst effecting an actual users experience as little as possible. In order to archive that, LancarSec starts with the "weakest" and least notable challenge and automatically changes them when it detects one of them is being bypassed
 
 ### **Cookie Challenge**
 
@@ -42,30 +46,30 @@ For more information on how to customise discord alerts refeer to
 
 ## **Lightweight**
 
-balooProxy tries to be as lightweight as possible, in order to run smoothly for everyone. Everything has its limits tho.
+LancarSec tries to be as lightweight as possible, in order to run smoothly for everyone. Everything has its limits tho.
 
 ## **Cloudflare Mode**
 
-Not everyone can afford expensive servers, aswell as a global cdn and this is fine. That's why balooProxy supports being used along with cloudflare, although this comes at the cost of a few features, like `tls fingerprinting`.
+Not everyone can afford expensive servers, aswell as a global cdn and this is fine. That's why LancarSec supports being used along with cloudflare, although this comes at the cost of a few features, like `tls fingerprinting`.
 
 # **Installation**
 
 ## **Server Setup**
 
-To start, download the [latest version of balooProxy](https://github.com/41Baloo/balooProxy/releases) balooProxy or compile it from source.
+To start, download the [latest version of LancarSec](https://github.com/azferius/LancarSec/releases) LancarSec or compile it from source.
 
-If you already have a `config.json` drag it in the same folder in your server as the `main` you downloaded/compiled. If you do not, simply start balooProxy by running `./main` and answer the questions the proxy asks you. After you answered those questions stop the proxy with `ctrl + c`.
+If you already have a `config.json` drag it in the same folder in your server as the `main` you downloaded/compiled. If you do not, simply start LancarSec by running `./main` and answer the questions the proxy asks you. After you answered those questions stop the proxy with `ctrl + c`.
 
 # **Running**
-You can run the proxy as a [service](https://abhinand05.medium.com/run-any-executable-as-systemd-service-in-linux-21298674f66f) or inside of a screen. To run the proxy inside a screen on ubuntu/debian first run `apt update`. After that is done install screen by running `apt install screen` and follow its installation process. To start running the proxy inside of a screen run `screen -S balooProxy`. This will put you inside a screen, making sure the proxy keeps running even when you log out of ssh. Now just start the proxy inside the screen by running `./main` (make sure the proxy isnt running anywhere else already) and quit the screen by pressing `ctrl + a + d`. You can always reopen the screen by running `screen -d -r`
+You can run the proxy as a [service](https://abhinand05.medium.com/run-any-executable-as-systemd-service-in-linux-21298674f66f) or inside of a screen. To run the proxy inside a screen on ubuntu/debian first run `apt update`. After that is done install screen by running `apt install screen` and follow its installation process. To start running the proxy inside of a screen run `screen -S LancarSec`. This will put you inside a screen, making sure the proxy keeps running even when you log out of ssh. Now just start the proxy inside the screen by running `./main` (make sure the proxy isnt running anywhere else already) and quit the screen by pressing `ctrl + a + d`. You can always reopen the screen by running `screen -d -r`
 
 # **Docker Setup**
-To use balooProxy with Docker, start by executing the `./main` file to generate a config.json. Next, build the Docker image by running `docker build -t baloo-proxy .` in the same folder as the main file. Once the build is complete, run the Docker image using `docker run -d -p 80:80 -p 443:443 -t baloo-proxy`. To access the terminal of the Docker image, use `docker attach CONTAINERID`.
-The container ID can be obtained by running `docker ps`. To detach from the terminal, press `Ctrl + p + q`. To stop the container, run `docker stop CONTAINERID`. To remove the container, use `docker rm CONTAINERID`, and to remove the image, run `docker rmi baloo-proxy`.
+To use LancarSec with Docker, start by executing the `./main` file to generate a config.json. Next, build the Docker image by running `docker build -t lancarsec .` in the same folder as the main file. Once the build is complete, run the Docker image using `docker run -d -p 80:80 -p 443:443 -t lancarsec`. To access the terminal of the Docker image, use `docker attach CONTAINERID`.
+The container ID can be obtained by running `docker ps`. To detach from the terminal, press `Ctrl + p + q`. To stop the container, run `docker stop CONTAINERID`. To remove the container, use `docker rm CONTAINERID`, and to remove the image, run `docker rmi lancarsec`.
 
 ## **DNS Setup**
 
-The proxy is now successfully running, however you still need to point your dns records to the proxy. To do so get the servers ip the proxy is currently running on. Go to your dns management and point the domain you want to proxy to the proxy ip via an `A` record, if the ip is an ipv4 or an `AAAA` record, if the ip is an ipv6. If you chose to use the proxy with Cloudflare, make sure the option "`Proxy status`" is set to "`Proxied`". If you chose not to use Cloudflare but are managing the dns via Cloudflare, make sure "`Proxy status`" is set to "`DNS only`". Also make sure no other records are pointing to your actual backend, since the proxy can otherwise be bypassed by attacking the backend directly, without first going through the proxy. After you did all of that wait ~10 minutes for the dns entry to register. You can check if your domain is successfully proxied by opening a new tab in the browser of your choice, opening dev tools, navigating to the network tab, opening your website, and searching for a "`baloo-proxy`" header in "Response Headers" of your request. If that exist, you successfully setup balooProxy
+The proxy is now successfully running, however you still need to point your dns records to the proxy. To do so get the servers ip the proxy is currently running on. Go to your dns management and point the domain you want to proxy to the proxy ip via an `A` record, if the ip is an ipv4 or an `AAAA` record, if the ip is an ipv6. If you chose to use the proxy with Cloudflare, make sure the option "`Proxy status`" is set to "`Proxied`". If you chose not to use Cloudflare but are managing the dns via Cloudflare, make sure "`Proxy status`" is set to "`DNS only`". Also make sure no other records are pointing to your actual backend, since the proxy can otherwise be bypassed by attacking the backend directly, without first going through the proxy. After you did all of that wait ~10 minutes for the dns entry to register. You can check if your domain is successfully proxied by opening a new tab in the browser of your choice, opening dev tools, navigating to the network tab, opening your website, and searching for a "`LancarSec-Proxy`" header in "Response Headers" of your request. If that exist, you successfully setup LancarSec. **Note**: the `LancarSec-Proxy` header is hidden by default; set `"hide_version_header": false` in the `proxy` section to expose it.
 
 ![DNS Example](https://cdn.discordapp.com/attachments/1007957829795201116/1094910870372483072/image.png)
 ![Network Tab](https://cdn.discordapp.com/attachments/1007957829795201116/1094912722174492672/image.png)
@@ -74,21 +78,25 @@ The proxy is now successfully running, however you still need to point your dns 
 ## **Configuration**
 ---
 
-The `config.json` allows you to change several features and values about balooProxy. There are three main fields, `proxy`, `domains` and `rules`.
+The `config.json` allows you to change several features and values about LancarSec. There are three main fields, `proxy`, `domains` and `rules`.
 
 ### **Proxy**
 ---
 
-This field specifically allows you to change general settings about balooProxy
+This field specifically allows you to change general settings about LancarSec
 
 ### `cloudflare` <sup>Bool</sup>
 
-If this field is set to true balooProxy will be in cloudflare mode. 
+If this field is set to true LancarSec will be in cloudflare mode. 
 (**NOTE**: `SSL/TLS encryption mode` in your cloudflare settings has to be set to "`Flexible`". Enabeling this mode without using cloudflare will also not work. Additionally, some features, such as `TLS-Fingerprinting` will not work and always return "`Cloudflare`")
 
 ### `maxLogLength` <sup>Int</sup>
 
 This field sets the amount of logs entires shown in the ssh terminal
+
+### `hide_version_header` <sup>Bool</sup>
+
+This field controls the `LancarSec-Proxy` response header. It is hidden by default (a mitigation product should not announce its version); set it to `false` to expose the header again.
 
 ### `secret` <sup>Map[String]String</sup>
 
@@ -117,7 +125,7 @@ The domains name (For example `example.com`)
 
 ### `scheme` <sup>String</sup>
 
-The scheme balooProxy should use to communicate with your backend (Can be `http` or `https`. Generally you should use `http` as it is faster and less cpu intensive)
+The scheme LancarSec should use to communicate with your backend (Can be `http` or `https`. Generally you should use `http` as it is faster and less cpu intensive)
 
 ### `backend` <sup>String</sup>
 
@@ -159,11 +167,11 @@ The main hud shows you different information about your proxy
 
 ### `cpu`
 
-Shows you the current cpu usage of the server balooProxy is running on in percent
+Shows you the current cpu usage of the server LancarSec is running on in percent
 
 ### `stage`
 
-Shows you the stage balooProxy is currently in
+Shows you the stage LancarSec is currently in
 
 ### `stage locked`
 
@@ -171,24 +179,24 @@ Shows `true` if the stage was manually set and locked by using the `stage` comma
 
 ### `total`
 
-Shows the number of all incoming requests per second to balooProxy
+Shows the number of all incoming requests per second to LancarSec
 
 ### `bypassed`
 
-Shows the number of requests per second that passed balooProxy and have been forwarded to the backend
+Shows the number of requests per second that passed LancarSec and have been forwarded to the backend
 
 ### `connections`
 
-Shows the current amount of open L4 connections to balooProxy
+Shows the current amount of open L4 connections to LancarSec
 
 ### `latest logs`
 
-Shows information about the last requests that passed balooProxy (The amount can be specified in `config.json`)
+Shows information about the last requests that passed LancarSec (The amount can be specified in `config.json`)
 
 ## **Commands**
 ---
 
-The terminal allows you to input commands which change the behaviour of balooProxy
+The terminal allows you to input commands which change the behaviour of LancarSec
 
 ### `help`
 
@@ -213,7 +221,7 @@ The command `reload` will cause the proxy to read the config.json again, aswell 
 
 # **Custom Firewall Rules**
 
-Thanks to [gofilter]("https://github.com/kor44/gofilter") balooProxy allows you to add your own firewall rules by using a ruleset engine based on [wireguards display filter expressions](https://www.wireshark.org/docs/wsug_html_chunked/ChWorkBuildDisplayFilterSection.html)
+Thanks to [gofilter]("https://github.com/kor44/gofilter") LancarSec allows you to add your own firewall rules by using a ruleset engine based on [wireguards display filter expressions](https://www.wireshark.org/docs/wsug_html_chunked/ChWorkBuildDisplayFilterSection.html)
 
 ## **Fields**
 ---
@@ -439,12 +447,12 @@ Every individual has to have the `expression` and `action` field.
 ---
 Rules are priorities from top to bottom in the `config.json`. A role has priority over every rule coming after it in the json.
 
-(**Note**: As will later be described, some rules will stop balooProxy from checking for other matching rules. This is why it is recommended to have rules with higher `action` values be higher in the json aswell.)
+(**Note**: As will later be described, some rules will stop LancarSec from checking for other matching rules. This is why it is recommended to have rules with higher `action` values be higher in the json aswell.)
 
 ## **Actions**
 ---
 
-The resulting action to a rule is decided based on the `"susLv"`, which is a scale from `0`-`3` how suspicious/malicious the request is. The `susLv` itself starts of at the current `stage` balooProxy is in. This is normally `1` but might change to `2` and `3` depending on how many bypassing requests balooProxy currently experiences.
+The resulting action to a rule is decided based on the `"susLv"`, which is a scale from `0`-`3` how suspicious/malicious the request is. The `susLv` itself starts of at the current `stage` LancarSec is in. This is normally `1` but might change to `2` and `3` depending on how many bypassing requests LancarSec currently experiences.
 
 Each number has its own reaction.
 
@@ -472,7 +480,7 @@ Every request with a susLv of 4 or higher will be blocked
 ---
 You can set a rules action to be a specific action by setting it's `action` to a specific number 
 
-(**Note**: If a rule matches a request and sets the `action` to a specific number balooProxy will not check for other matching rules. Hence you should usually give rules with a higher `action` value a lower `priority` value aswell).
+(**Note**: If a rule matches a request and sets the `action` to a specific number LancarSec will not check for other matching rules. Hence you should usually give rules with a higher `action` value a lower `priority` value aswell).
 
 ```
 {
@@ -484,9 +492,9 @@ You can set a rules action to be a specific action by setting it's `action` to a
 In this example, the rule checks whether or not the request is made by a socket and if so, challenges the request with a captcha.
 ***
 
-You can also set actions more dynamically by using a `+` in front of the `action` value. This will tell balooProxy that you want to increase the *current* susLv of the request by the amount specified after the `+`.
+You can also set actions more dynamically by using a `+` in front of the `action` value. This will tell LancarSec that you want to increase the *current* susLv of the request by the amount specified after the `+`.
 
-(**Note**: actions that use a `+` do not stop balooProxy from checking if further rules match, if the rule matches. This allows you to stack multiple checks ontop of each other and set reactions more dynamically and react less aggressively when not attacked)
+(**Note**: actions that use a `+` do not stop LancarSec from checking if further rules match, if the rule matches. This allows you to stack multiple checks ontop of each other and set reactions more dynamically and react less aggressively when not attacked)
 
 ```
 {
@@ -499,4 +507,10 @@ In this example, the rule checks whether or not the request is made by a known b
 
 # **API**
 
-A full documentation of BalooProxies 2.0 API can be found at https://app.swaggerhub.com/apis-docs/BalooProxy/BalooProxy/2.0.0#/
+## **v2**
+
+`GET/POST /_lancarsec/api/v2/:domain/:action` (or `/:action` for the aggregate view) with the `Proxy-Secret` header set to the configured `apisecret`. Also reachable as the legacy `/_bProxy/api/v2` spelling until the next release.
+
+## **v1**
+
+`POST /_lancarsec/api/v1` with the `Admin-Secret` header set to the configured `adminsecret` (plus `Proxy-Secret` for the api layer). The legacy secret-in-path spelling `/_bProxy/<secret>/api/v1` is dead: it is answered `404` and never proxied.
