@@ -34,21 +34,23 @@ func FormatLogs(log domains.DomainLog) string {
 
 // Only run in locked thread
 func ReadLogs(domainName string) {
-	firewall.Mutex.RLock()
+	// WAVE 9 (CONC-07): snapshot and trim under one write lock. The old
+	// RLock'd copy decided the trim after releasing it, so entries AddLogs
+	// appended in between were lost when the stale copy-back overwrote the
+	// map's newer slice header. The locked section is one map read plus an
+	// occasional re-slice; the terminal I/O loop below stays outside it.
+	firewall.Mutex.Lock()
 	domainData := domains.DomainsData[domainName]
-	firewall.Mutex.RUnlock()
 
 	//Calculate how close we are to overflowing
 	logOverflow := len(domainData.LastLogs) - proxy.MaxLogLength
 
 	if logOverflow > 0 {
-
 		// Remove overflown element(s)
 		domainData.LastLogs = domainData.LastLogs[logOverflow:]
-		firewall.Mutex.Lock()
 		domains.DomainsData[domainName] = domainData
-		firewall.Mutex.Unlock()
 	}
+	firewall.Mutex.Unlock()
 
 	for i, log := range domainData.LastLogs {
 		// Check if out log is too big to display fully
