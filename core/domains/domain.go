@@ -2,7 +2,9 @@ package domains
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/http/httputil"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,9 +209,59 @@ type JsonRule struct {
 	Action     string `json:"action"`
 }
 
+// RuleOp is what a matched firewall rule does to the suspicion level.
+type RuleOp uint8
+
+const (
+	// RuleSet replaces the suspicion level and stops evaluating further rules.
+	RuleSet RuleOp = iota
+	// RuleAdd raises it by Value and keeps going.
+	RuleAdd
+	// RuleSub lowers it by Value and keeps going.
+	RuleSub
+)
+
 type Rule struct {
 	Filter *gofilter.Filter
+
+	// Action is the expression exactly as configured ("3", "+2", "-1"). Kept
+	// for the API and the TUI, which show operators what they wrote.
 	Action string
+
+	// WAVE 13: Op and Value are Action, parsed once at config build.
+	// EvalFirewallRule used to re-derive them per matching rule per request
+	// with Action[:1] and fmt.Sscan - reflection and an allocation on the hot
+	// path, plus an unguarded slice of a string the type system does not
+	// promise is non-empty.
+	Op    RuleOp
+	Value int
+}
+
+// ParseAction parses a firewall rule action: "n" sets the suspicion level,
+// "+n" raises it, "-n" lowers it.
+//
+// It is the single definition of that syntax: the config pipeline validates
+// with it and builds with it, so a rule that loads is a rule the request path
+// can evaluate without parsing anything.
+func ParseAction(action string) (RuleOp, int, error) {
+	op, digits := RuleSet, action
+	if digits != "" {
+		switch digits[0] {
+		case '+':
+			op, digits = RuleAdd, digits[1:]
+		case '-':
+			op, digits = RuleSub, digits[1:]
+		}
+	}
+
+	// ParseUint, not ParseInt: the sign is the operator above, so "+-1" and a
+	// negative literal are both refused rather than quietly re-signed. 31 bits
+	// because the suspicion level is an int that is added to and compared.
+	value, err := strconv.ParseUint(digits, 10, 31)
+	if err != nil {
+		return RuleSet, 0, fmt.Errorf("action %q is not a suspicion expression; want \"n\", \"+n\" or \"-n\"", action)
+	}
+	return op, int(value), nil
 }
 
 type RequestLog struct {

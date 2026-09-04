@@ -142,6 +142,17 @@ func (n *nodeEq) applyOne(v interface{}) bool {
 		if x, ok := v.(string); ok {
 			return x == n.value.(string)
 		}
+
+	// LancarSec deviation 5: upstream has no bool case here, so every
+	// comparison against an FT_BOOL field fell through to the `return false`
+	// below - `field eq true` never matched even when the value WAS true, and
+	// because `ne` is parsed as not(eq), `field ne anything` always matched.
+	// FT_BOOL is registered upstream and the parser parses the operand with
+	// strconv.ParseBool, so this is a missing case, not a design choice.
+	case bool:
+		if x, ok := v.(bool); ok {
+			return x == n.value.(bool)
+		}
 	}
 
 	return false // было v == n.value

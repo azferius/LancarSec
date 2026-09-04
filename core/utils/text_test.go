@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -378,6 +379,102 @@ func TestAddLogsAppendsInOrder(t *testing.T) {
 	}
 	if got[0].Path != "/first" || got[1].Path != "/second" {
 		t.Errorf("LastLogs = %+v, want /first then /second", got)
+	}
+}
+
+// WAVE 13 (PERF-03): AddLogs used to append without any bound, and the only
+// trim was in ReadLogs — which the TUI calls for proxy.WatchedDomain alone. So
+// every other domain grew for the life of the process, five strings per
+// request, on the same write lock the hot path takes.
+//
+// The cap is enforced at append time now. What is pinned here is the bound and
+// the direction of the drop: it is the OLDEST entries that go, because a log
+// nobody has read yet is worth less than the one that just arrived.
+func TestAddLogsCapsTheLogAtMaxDomainLogs(t *testing.T) {
+	saveDomainsData(t)
+	const domain = "capped.example"
+	domains.DomainsData[domain] = domains.DomainData{Name: domain}
+
+	const overshoot = 3 * MaxDomainLogs
+	for i := range overshoot {
+		AddLogs(domains.DomainLog{Path: "/" + strconv.Itoa(i)}, domain)
+	}
+
+	got := domains.DomainsData[domain].LastLogs
+	if len(got) > MaxDomainLogs {
+		t.Fatalf("LastLogs = %d entries after %d appends, want at most %d", len(got), overshoot, MaxDomainLogs)
+	}
+	if len(got) == 0 {
+		t.Fatal("LastLogs is empty: the trim dropped everything, not just the oldest")
+	}
+	// The most recent request must always still be there.
+	if want := "/" + strconv.Itoa(overshoot-1); got[len(got)-1].Path != want {
+		t.Errorf("newest entry = %q, want %q", got[len(got)-1].Path, want)
+	}
+	// And what survived must be a contiguous run of the newest entries.
+	first, err := strconv.Atoi(strings.TrimPrefix(got[0].Path, "/"))
+	if err != nil {
+		t.Fatalf("unexpected log path %q", got[0].Path)
+	}
+	for i, entry := range got {
+		if want := "/" + strconv.Itoa(first+i); entry.Path != want {
+			t.Fatalf("entry %d = %q, want %q: the survivors are not the newest contiguous run", i, entry.Path, want)
+		}
+	}
+
+	// The backing array must settle too — a cap that trims the length but lets
+	// capacity grow forever has not fixed the leak.
+	if c := cap(got); c > 4*MaxDomainLogs {
+		t.Errorf("cap(LastLogs) = %d after %d appends, want it to settle near %d", c, overshoot, MaxDomainLogs)
+	}
+}
+
+// The trim must leave a USABLE log behind at every moment, not merely at the
+// arbitrary point a test stops appending.
+//
+// Checking only the end state cannot tell a half-drop from emptying the slice
+// completely: with either policy the length at request N is whatever the cycle
+// happens to leave, and after enough requests both look identical. This walks
+// every step past the cap instead, so a trim that keeps nothing is caught the
+// first time it fires — which matters because the TUI and GET_LOGS read this
+// slice, and a log that is empty most of the time is not a log.
+func TestAddLogsNeverTrimsBelowHalfTheCap(t *testing.T) {
+	saveDomainsData(t)
+	const domain = "floor.example"
+	domains.DomainsData[domain] = domains.DomainData{Name: domain}
+
+	const floor = MaxDomainLogs / 2
+	for i := range 3 * MaxDomainLogs {
+		AddLogs(domains.DomainLog{Path: "/" + strconv.Itoa(i)}, domain)
+
+		n := len(domains.DomainsData[domain].LastLogs)
+		if n > MaxDomainLogs {
+			t.Fatalf("after %d appends LastLogs = %d entries, over the %d cap", i+1, n, MaxDomainLogs)
+		}
+		// Below the cap nothing has been dropped yet, so the floor only
+		// applies once the trim has had a chance to run.
+		if i+1 > MaxDomainLogs && n < floor {
+			t.Fatalf("after %d appends LastLogs = %d entries, below the %d floor: the trim is discarding more than the oldest half", i+1, n, floor)
+		}
+	}
+}
+
+// A domain under the cap keeps every entry: the trim must not fire early.
+func TestAddLogsKeepsEverythingBelowTheCap(t *testing.T) {
+	saveDomainsData(t)
+	const domain = "under-cap.example"
+	domains.DomainsData[domain] = domains.DomainData{Name: domain}
+
+	for i := range MaxDomainLogs {
+		AddLogs(domains.DomainLog{Path: "/" + strconv.Itoa(i)}, domain)
+	}
+
+	got := domains.DomainsData[domain].LastLogs
+	if len(got) != MaxDomainLogs {
+		t.Fatalf("LastLogs = %d entries, want all %d kept", len(got), MaxDomainLogs)
+	}
+	if got[0].Path != "/0" {
+		t.Errorf("oldest entry = %q, want /0 — nothing may be dropped below the cap", got[0].Path)
 	}
 }
 

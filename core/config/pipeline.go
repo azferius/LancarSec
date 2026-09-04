@@ -31,7 +31,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -408,15 +407,11 @@ func validateBodySize(what string, size int64) error {
 // previously accepted at load and then either logged to stdout on every single
 // matching request ("+abc") or panicked the request handler the first time the
 // rule matched ("", which slices Action[:1] out of range).
+// WAVE 13: the syntax lives in domains.ParseAction, which build also uses, so
+// validate cannot accept a form build then parses differently.
 func validateAction(action string) error {
-	digits := action
-	if digits != "" && (digits[0] == '+' || digits[0] == '-') {
-		digits = digits[1:]
-	}
-	if _, err := strconv.ParseUint(digits, 10, 31); err != nil {
-		return fmt.Errorf("action %q is not a suspicion expression; want \"n\", \"+n\" or \"-n\"", action)
-	}
-	return nil
+	_, _, err := domains.ParseAction(action)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -440,9 +435,18 @@ func build(cfg *domains.Configuration) (*staged, error) {
 			if err != nil {
 				return nil, fmt.Errorf("domain %q firewall rule %d: %w", domain.Name, index, err)
 			}
+			// validate has already accepted this, but build parses rather than
+			// assuming: it is the value the request path will use, and the
+			// only alternative is re-deriving it per request.
+			op, value, err := domains.ParseAction(fwRule.Action)
+			if err != nil {
+				return nil, fmt.Errorf("domain %q firewall rule %d: %w", domain.Name, index, err)
+			}
 			firewallRules = append(firewallRules, domains.Rule{
 				Filter: filter,
 				Action: fwRule.Action,
+				Op:     op,
+				Value:  value,
 			})
 		}
 

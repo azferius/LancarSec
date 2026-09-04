@@ -12,6 +12,14 @@ var idToFieldTypeMap map[fieldId]ftenum
 
 type ftenum int
 
+// FieldType is an exported alias for the unexported field-type enum, so a
+// caller can hold the FT_* constants in a typed collection - LancarSec's
+// core/firewall/filter.go keeps one map of name -> type as the DSL's single
+// source of truth, which is not expressible without a name for this type.
+// An alias, so it is the same type: nothing about RegisterField changes.
+// (LancarSec deviation 4; see README.md in this directory.)
+type FieldType = ftenum
+
 // Lis of available field types
 const (
 	_ = iota

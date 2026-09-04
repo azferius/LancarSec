@@ -27,6 +27,7 @@ Last updated: 2026-09-04 · HEAD when written: see `git log -1`
 | 10 | Wire-visible rebrand + legal notices (atomic, one commit) | **DONE** — cutover `335ffd2`, fixes `de088a0`, docs `e7a7a58`/`e2c7982`, straggler `75e38f5` |
 | 11 | Cf-Ja3-Hash passthrough, stage-3 captcha redesign, Go 1.26 | **DONE** — `edd8fc7`, `9c8b1cd`, `ff0a8fe`, `79b2ac9`, `ba82695` |
 | 12 | Keyed-state sharding: firewall.Mutex off the request path | **DONE** — see below |
+| 13 | Log cap, DSL rules that lie, graceful shutdown, headless spin | **DONE** — see below |
 
 ---
 
@@ -461,6 +462,112 @@ is `fmt.Fprint` (verbatim). The page still 200s, echoes `r.Host`, and brands "ba
 
 ---
 
+## Wave 13 outcome (2026-09-05) — the log that never stopped growing, the rules that lied, and no way to stop the process
+
+Five items, all of them defects an operator meets rather than internals.
+
+### 1. The per-domain access log was unbounded (PERF-03)
+
+`utils.AddLogs` appended on every bypassed request and the **only** trim was in `ReadLogs`, which
+the TUI calls for `proxy.WatchedDomain` alone. Every other domain grew for the life of the
+process — five strings per request — and headless (no TTY, so no TUI loop) so did the watched one.
+It is also the last unbounded structure on the request path, and it grows under the write lock the
+hot path takes.
+
+Capped at append time at `utils.MaxDomainLogs` = 1000, dropping the oldest **half** when it
+overflows: dropping one per request past the cap would memmove the whole slice on every request.
+Capacity settles at the cap, and the dropped entries are zeroed so their strings can be collected.
+
+### 2. Five DSL fields were registered and never supplied — rules that silently did nothing
+
+`ip.country`, `ip.asn`, `ip.requests`, `http.headers` and `http.body` were registered with the rule
+parser but never written into the message the middleware builds. gofilter answers false for a
+missing key, so:
+
+    (ip.country eq "CN")  action 5     compiled, listed in GET_FIREWALL_RULES, never fired
+    (ip.country ne "ID")  action 0     matched EVERY request on earth — the natural way to write
+                                       "only allow Indonesia" whitelisted the entire internet
+
+The five names are gone from the registry, so such a rule is now refused **at config load** with
+the field named. `core/firewall/filter.go` holds one `Fields` map as the single source of truth,
+and three guards keep it honest in both directions:
+`TestFieldsIsTheDocumentedVocabulary` (a literal list — removing a field is as much a break as
+adding one), `TestRegisteredFieldsCompile`, and
+`TestMiddlewareEveryRegisteredRuleFieldIsSupplied`, which drives a real request through
+`Middleware` for every registered name.
+
+**Breaking:** a `config.json` whose rules name one of the five stops loading. That is the point —
+it was doing nothing before — but it means the proxy refuses to start until the rule is removed.
+
+### 3. Bool rules were broken in the vendored parser (gofilter deviation 5)
+
+Found while writing the guard above. `nodeEq.applyOne` has a case for every registered type except
+`bool`, so every comparison against an `FT_BOOL` field fell through to `return false`:
+
+    proxy.attack eq true     never matched, even under attack
+    proxy.attack ne true     ALWAYS matched, since `ne` is parsed as not(eq)
+
+All four bool fields LancarSec supplies were unusable in both directions. Fixed with a three-line
+`case bool` in `core/gofilter/nodes.go`, pinned by `core/gofilter/bool_test.go`, recorded as
+deviation 5 in that package's README. A bare field name stays a **presence** test (Wireshark
+semantics) and is pinned as such.
+
+`FieldType`, an exported alias for the unexported `ftenum`, is deviation 4 — one line, needed
+because a caller cannot otherwise declare a map of field types, which is what makes `Fields` a
+single source of truth.
+
+**Breaking, quietly:** a rule using `ne` on a bool field used to match everything and now behaves.
+Anyone who tuned around the broken behaviour sees a change.
+
+### 4. Rule actions are parsed once, at config build
+
+`EvalFirewallRule` re-derived the action per matching rule per request: `rule.Action[:1]` for the
+operator and `fmt.Sscan` for the number — reflection and an allocation on the one path an attacker
+drives as fast as they like — and printed a diagnostic to stdout on failure, which under a flood is
+a log amplifier and, when stdout blocks, back-pressure into the request path.
+
+`domains.ParseAction` is now the single definition of the syntax, used by both `validate` and
+`build`; `domains.Rule` carries `Op`/`Value`; the eval switches on them. The unguarded
+`Action[:1]` — which panicked the request goroutine the first time an empty-action rule MATCHED —
+no longer exists. `" 7"` silently meaning something different from `"+7"` (Sscan skips whitespace)
+is gone with it.
+
+### 5. There was no way to stop the process cleanly
+
+No `signal.Notify`, no `Shutdown`, no context: `main` blocked on a bare `select{}` and every
+listener error path panicked. Every restart, redeploy and `docker stop` killed the proxy
+mid-request — responses truncated, keep-alives reset, and a visitor part-way through the challenge
+sent back to stage 1.
+
+`server.Shutdown(ctx)` now drains every tracked listener in parallel; `main` waits for SIGINT or
+SIGTERM and gives in-flight requests `shutdownGrace` = 20s, under systemd's and Docker's own 30s
+before SIGKILL, exiting non-zero if the drain does not finish. `listenFatal` is what keeps
+`http.ErrServerClosed` from turning a clean stop into a panic.
+
+### 6. The TUI command loop spun a core when there was no terminal (CONC-10)
+
+`commands()` was `for { if scanner.Scan() {...} }` with no else branch. With nothing on stdin —
+systemd, `docker run` without `-i`, nohup, a closed pipe — `Scan` returns false immediately and
+forever, so the goroutine burned a full core for the life of the process, in exactly the
+deployments where nobody is watching a terminal to notice. On a mitigation proxy that is a core
+taken from the request path. It returns on EOF now; the TUI's render loop is a different goroutine
+and keeps printing stats.
+
+### Also
+
+README fixes: the removed fields are documented as removed, bool comparison is documented (it had
+never worked, so it had never been documented correctly), the `matches` example used a
+non-existent field name `http.header` with a PCRE lookahead RE2 cannot compile, and one example
+said `http.engine` for `ip.engine`.
+
+**Mutation-tested:** 13 mutations, 13 killed. The first pass killed 10 — the two survivors were
+both holes in the new tests, not in the code: a log trim that keeps *nothing* passed a test that
+only inspected the end state, and *removing* a field from the registry passed every guard that
+iterates over the registry. Both are closed by tests that check the invariant rather than a
+snapshot.
+
+---
+
 ## Wave 12 outcome (2026-09-04) — keyed state off `firewall.Mutex`
 
 This is PERF-01 / CONC-09 / CONC-04, the largest remaining item from the re-audit: the one global
@@ -619,6 +726,10 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
   invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
   happens once, atomically, after the security work.
 - **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
+- **The firewall DSL's vocabulary is `firewall.Fields`, and it is load-bearing** (wave 13). Adding
+  a name there without supplying it in the middleware's message brings back the fail-open the wave
+  removed; removing one breaks every config.json using it. Three tests guard both directions —
+  read the failure message, it says what to do.
 - **`firewall.Mutex` no longer guards the keyed state** (wave 12). Ratelimit counters, sliding
   windows and per-connection fingerprints are on 16-way shards in `core/firewall/shard.go`; the
   per-domain request totals are lock-free atomics in `core/domains/counters.go`. Do not add a

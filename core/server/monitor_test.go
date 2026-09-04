@@ -1434,3 +1434,44 @@ func rlWebhookCooldownExpiryCase(t *testing.T) {
 		t.Errorf("the cooldown-expiry webhook carries the attack-start field %q:\n%s", rlStartOnlyField, body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// commands() — the interactive TUI reader
+// ---------------------------------------------------------------------------
+
+// WAVE 13 (CONC-10): with nothing on stdin — systemd, `docker run` without -i,
+// nohup, a closed pipe — bufio.Scanner.Scan returns false immediately and
+// forever. The loop had no else branch, so it spun a full core for the life of
+// the process, in exactly the deployments where nobody is watching a terminal
+// to notice.
+//
+// The test gives commands() a pipe that is already at EOF and requires it to
+// return. If it ever regresses this does not just fail: the goroutine it leaks
+// keeps a core busy for the rest of the test binary, which is the defect
+// itself, made loud.
+func TestCommandsStopsReadingWhenStdinIsClosed(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	w.Close() // every read is an immediate EOF
+
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = old
+		r.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		commands()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("commands() did not return on stdin EOF: it is spinning on Scan, burning a core for the life of the process")
+	}
+}

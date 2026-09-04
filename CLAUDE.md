@@ -97,6 +97,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 9 | ~~Challenge rendering, XSS, middleware decomposition~~ **DONE 2026-09-01** | Four slices W1-W4; `html/template`, config correctness, concurrency hardening. |
 | 10 | ~~Wire-visible rebrand + legal notices~~ **DONE 2026-09-01** | Landed atomically at `335ffd2`. Legacy `/_bProxy/` and `__bProxy_v` are routed for one release as a grace window. |
 | 11 | ~~Cf-Ja3-Hash passthrough, stage-3 captcha, Go 1.26~~ **DONE 2026-09-01** | Spec-accurate JA4 was dropped: the owner deploys behind Cloudflare, so the origin never sees the real ClientHello. |
+| 13 | ~~Access-log cap, DSL fields that never matched, graceful shutdown~~ **DONE 2026-09-05** | PERF-03, the five unsupplied rule fields, gofilter bool equality, rule actions parsed at load, SIGTERM drain, headless CPU spin. See [`PROGRESS.md`](PROGRESS.md). |
 | 12 | ~~Keyed-state sharding~~ **DONE 2026-09-04** | PERF-01/CONC-09/CONC-04. Ratelimit state on 16-way shards, domain totals on atomics. Parallel decision path -50%; distinct-key 5.8x. See [`PROGRESS.md`](PROGRESS.md). |
 
 ### Wave 1 outcome (2026-08-30)
@@ -258,36 +259,20 @@ approach the design phase had rejected. Reconciling took three rebases and a han
 `git merge-base` against HEAD before trusting a worktree agent's assumptions about the tree.**
 
 
-### Quick wins — safe to land immediately
+### Quick wins — ALL LANDED
 
-- Add `Stage2Difficulty: domain.Stage2Difficulty` + the `== 0 { = 5 }` default to
-  `core/server/monitor.go:507-526`. One line; until it lands, any `reload` disables stage 2.
-- `r.URL.Path + r.URL.RawQuery` → `r.URL.RequestURI()` at `core/server/serve.go:99`. Today every
-  query-bearing request is 301-redirected (and browser-cached) to a mangled URL — `/search?q=x`
-  becomes `/searchq=x`.
-- `Header.Add` → `Header.Set` for the four backend identity headers at `core/server/middleware.go:358-361`,
-  with a `Del` of inbound `X-Real-Ip`/`X-Forwarded-For` first.
-- Give every `httputil.ReverseProxy` a shared `BufferPool` (`core/config/init.go:126-130`,
-  `core/server/monitor.go:467-471`). Five lines, removes a 32 KiB alloc per proxied response.
-- Delete `case "FILL_IP_CACHE"` (`core/api/api.go:101-109`). One authenticated request freezes the
-  entire proxy for ~1.76M `math/rand` calls under the global write lock.
-- `term.IsTerminal` guard on `commands()` (`core/server/monitor.go:290-296`). Under systemd/docker/nohup
-  that loop spins a full core at 100% forever.
-- `MinVersion: tls.VersionTLS12` at `core/server/serve.go:71-75`. The `:443` listener currently
-  negotiates TLS 1.0/1.1.
+The seven one-liners that used to be listed here are done, the last of them (the `commands()` spin
+under systemd/docker) in wave 13. Do not re-derive them from this file; check `PROGRESS.md`.
 
 ## Rebrand map
 
+**DONE — wave 10 landed the whole table below atomically at `335ffd2` (2026-09-01).** Kept here
+because it is the record of what changed on the wire and what that broke; the legacy `/_bProxy/`
+path and `__bProxy_v` cookie are still routed as a one-release grace window, so removing them is a
+second, separate break.
+
 **Decided 2026-08-31 by the owner, do not relitigate:** the product is **LancarSec**, one brand.
-Not LancarProxy, not two names. The user's word "lancarProxy" was resolved to LancarSec for
-consistency with the module path, the repo and every document. And the rebrand **stays in wave 10**
-rather than being pulled forward, because renaming the cookie invalidates every clearance cookie in
-flight and should happen once, after the security fixes, as a single atomic commit.
-
-126 `baloo` markers remain in Go source outside the vendored `core/gofilter`: 49 `_bProxy`,
-30 `__bProxy_v`, 16 `BalooProxy`, 9 `41Baloo`, 8 `balooProxy`, 7 `baloo-Proxy`, 7 `balooPow`.
-
-Wave 10, atomic. Everything below is protocol-visible; the module-path rename in wave 2 is not.
+Not LancarProxy, not two names.
 
 | Upstream | LancarSec | Breaks |
 | --- | --- | --- |
@@ -298,17 +283,10 @@ Wave 10, atomic. Everything below is protocol-visible; the module-path rename in
 | admin secret in URL path | `Admin-Secret` header on a fixed route | every admin bookmark and script |
 | `BalooProxy` in 8 block/error pages | `LancarSec` | cosmetic |
 
-Four sites reach Baloo infrastructure at runtime and must be cut — they are an availability and
-supply-chain problem, not just branding:
-
-- `core/config/init.go:104-106` fetches the fingerprint tables from `raw.githubusercontent.com/41Baloo`
-  every startup, **discarding the error**. `global/fingerprints/*.json` already exist in the tree —
-  `//go:embed` them.
-- `core/config/init.go:224-226` version-checks against the same host and **panics on failure**. The
-  proxy refuses to boot without outbound internet.
-- `core/server/middleware.go:232` loads the balooPow JS from `cdn.jsdelivr.net/gh/41Baloo` — a mutable
-  ref, and it leaks every challenged client's IP to a third party. Vendor and `//go:embed` it.
-- `oryxBuildBinary` embeds `/workspaces/balooProxy` paths and the full pre-rebrand token set.
+**All four runtime calls to Baloo infrastructure are cut.** The fingerprint fetch and the
+version check went in wave 4 (both `//go:embed`ed / deleted), the CDN-hosted proof-of-work JS in
+wave 9 W1 (first-party immutable embeds), and `oryxBuildBinary` in wave 1's history purge. There is
+no outbound call to a Baloo-owned host left; keep it that way.
 
 ### GPL v2 — what must stay
 
@@ -356,13 +334,15 @@ Not bugs to fix — things that will waste your time if you don't know them. The
   `ErrInvalid` rather than panicking — and the decode error is discarded.
 - **`crash.log` is opened twice**, and `log.SetOutput(io.Discard)` at `main.go:32` means recovered
   handler panics are invisible.
-- **Five firewall DSL fields are registered but never supplied** (`core/firewall/filter.go`). Geo/ASN/body
-  rules silently fail open, and negated ones match every request. Three README rule examples reference
-  fields that don't exist — copying any of them panics the proxy at startup.
+- **~~Five firewall DSL fields are registered but never supplied.~~ FIXED IN WAVE 13.** The five
+  names are gone from the registry, so a rule using one is refused at config load with the field
+  named. `core/firewall/filter.go`'s `Fields` map is the single source of truth and three tests
+  guard it in both directions. The broken README examples were corrected in the same wave.
 - **~79% of generated captchas are unsolvable by a human.** `core/utils/image.go:48-49` erases answer
   pixels that were never written into the mask.
-- **There is no graceful shutdown.** No `signal.Notify`, no `Shutdown`, no context; `main()` blocks on
-  a bare `select{}` and every listener error path panics.
+- **~~There is no graceful shutdown.~~ FIXED IN WAVE 13.** `main` waits for SIGINT/SIGTERM and
+  drains every listener through `server.Shutdown(ctx)` with a 20s grace period, exiting non-zero if
+  the drain does not finish.
 
 ## Toolchain
 

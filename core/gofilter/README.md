@@ -31,8 +31,10 @@ it, and do not relicense the files in this directory. The top-level `LICENSE`
 
 ## What was changed from upstream
 
-Three things. The first two are cosmetic; the third is a deliberate behaviour
-change and is the only place this package diverges from upstream semantics.
+Five things. The first two are cosmetic, the third and fifth are deliberate
+behaviour changes — both of them upstream bugs reachable from a plain
+config.json — and the fourth is a pure addition that changes nothing that
+already existed.
 
 1. **Line endings normalised to LF.** Upstream ships `filter_info.go`, `lexer.rl`,
    `parser.y` and `README.md` with CRLF; the rest with LF. This repo is LF-only
@@ -82,6 +84,50 @@ record the change in the numbered list above so the provenance stays auditable.
 Recorded here because it is the reason this package needed to be patchable
 in-tree, and because the fix is the one intentional semantic deviation in the
 list above.
+
+4. **`FieldType`, an exported alias for `ftenum` (wave 13).** One added line in
+   `filter_info.go`:
+
+   ```go
+   type FieldType = ftenum
+   ```
+
+   Upstream's field-type enum is unexported while the `FT_*` constants it types
+   are exported, so a caller can pass `FT_STRING` to `RegisterField` but cannot
+   declare a `map[string]<that type>`. LancarSec's `core/firewall/filter.go`
+   keeps exactly one such map as the DSL's single source of truth — five fields
+   were registered there and never populated by the request path, which made
+   every rule naming them silently never match. It is an **alias**, not a new
+   type, so `RegisterField`'s signature and every existing call are unchanged.
+
+5. **`nodeEq` compares bools (wave 13).** Upstream's `nodeEq.applyOne`
+   (`nodes.go`) has a case for every registered type except `bool`, so a
+   comparison against an `FT_BOOL` field fell through to the terminal
+   `return false`. `FT_BOOL` is upstream's own constant and upstream's parser
+   parses the operand with `strconv.ParseBool`, so this is a missing case
+   rather than a design choice. The effect on a rule engine:
+
+   ```
+   proxy.attack eq true     never matched, even while under attack
+   proxy.attack ne true     ALWAYS matched, since `ne` is parsed as not(eq)
+   ```
+
+   LancarSec supplies four `FT_BOOL` fields to every request evaluation, so all
+   four were unusable in both directions: the rule an operator writes to act
+   during an attack was inert, and its negation fired on every request. Fixed
+   by adding
+
+   ```go
+   case bool:
+       if x, ok := v.(bool); ok {
+           return x == n.value.(bool)
+       }
+   ```
+
+   alongside the existing cases. `bool_test.go` pins both directions, the
+   missing-field answer, and the fact that a BARE field name stays a presence
+   test (Wireshark semantics), not a truth test. Ordering comparisons (`gt`,
+   `le`, …) on bools are still unsupported, which is correct.
 
 `parser.go` used to compile a `matches` operand with
 `regexp.Compile(val.(string))`, an unchecked type assertion. Any `matches` rule

@@ -1,8 +1,6 @@
 package firewall
 
 import (
-	"io"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,11 +22,26 @@ func mustFilter(t *testing.T, expr string) *gofilter.Filter {
 }
 
 // rule is a tiny constructor so the tables below stay readable.
+// WAVE 13: a Rule now carries the action already parsed, exactly as the config
+// pipeline builds it. Constructing one here without parsing would test a state
+// the pipeline cannot produce.
 func rule(t *testing.T, expr, action string) domains.Rule {
 	t.Helper()
-	return domains.Rule{Filter: mustFilter(t, expr), Action: action}
+	op, value, err := domains.ParseAction(action)
+	if err != nil {
+		t.Fatalf("domains.ParseAction(%q): %v", action, err)
+	}
+	return domains.Rule{Filter: mustFilter(t, expr), Action: action, Op: op, Value: value}
 }
 
+// WAVE 13: FLIPPED, and the table shrank. It used to include "+abc", "-abc",
+// "block", "+" and " 7" as cases EvalFirewallRule tolerated by logging to
+// stdout and carrying on — a typo'd rule failed OPEN, and " 7" silently meant
+// something different from "+7" because fmt.Sscan skips leading whitespace.
+// Those forms are refused by domains.ParseAction at config load now, so they
+// cannot reach this function; TestParseActionRejectsMalformedActions is where
+// they live.
+//
 // TestEvalFirewallRuleActions pins the arithmetic EvalFirewallRule performs for
 // every action form reachable from a config file today.
 func TestEvalFirewallRuleActions(t *testing.T) {
@@ -93,53 +106,6 @@ func TestEvalFirewallRuleActions(t *testing.T) {
 			action: "0",
 			susLv:  9,
 			want:   0,
-		},
-		{
-			// BUG (wave 4/7 may flip this): a bad action is logged to stdout and
-			// then silently ignored, so a typo'd rule fails OPEN. A rule the
-			// operator wrote as "+ 3" or "+three" contributes nothing and the
-			// proxy keeps serving. If a later wave rejects bad actions at config
-			// load, this case stops being reachable at all.
-			name:   "non-numeric increment is ignored, susLv unchanged",
-			expr:   matchAll,
-			action: "+abc",
-			susLv:  4,
-			want:   4,
-		},
-		{
-			name:   "non-numeric decrement is ignored, susLv unchanged",
-			expr:   matchAll,
-			action: "-abc",
-			susLv:  4,
-			want:   4,
-		},
-		{
-			name:   "non-numeric bare action is ignored, susLv unchanged",
-			expr:   matchAll,
-			action: "block",
-			susLv:  4,
-			want:   4,
-		},
-		{
-			// "+" alone leaves an empty operand for Sscan, which errors out.
-			name:   "lone plus sign is ignored, susLv unchanged",
-			expr:   matchAll,
-			action: "+",
-			susLv:  1,
-			want:   1,
-		},
-		{
-			// BUG (a later wave may flip this): an action that merely STARTS with
-			// a space takes the `default` branch, and fmt.Sscan happily skips
-			// leading whitespace. So " 7" is an ABSOLUTE set, while "+7" is an
-			// increment -- an invisible whitespace character changes the meaning
-			// of the rule. If action strings are ever trimmed/validated, this
-			// must be changed to expect 2 (rejected) or 9 (increment).
-			name:   "leading space makes the action absolute, not additive",
-			expr:   matchAll,
-			action: " 7",
-			susLv:  2,
-			want:   7,
 		},
 		{
 			// BUG (a later wave may flip this): the '-' branch is checked before
@@ -277,21 +243,6 @@ func TestEvalFirewallRuleOrdering(t *testing.T) {
 			want:  3,
 		},
 		{
-			// BUG (a later wave may flip this): the short-circuit only happens
-			// when Sscan SUCCEEDS. A malformed absolute action falls out of the
-			// switch and the loop continues, so "+100" below still applies. The
-			// blast radius of a typo therefore depends on rules the operator did
-			// not touch.
-			name: "a malformed absolute action does NOT short-circuit",
-			rules: []domains.Rule{
-				rule(t, match, "+3"),
-				rule(t, match, "drop"),
-				rule(t, match, "+100"),
-			},
-			susLv: 0,
-			want:  103,
-		},
-		{
 			name: "non-matching rules are skipped, matching ones still apply",
 			rules: []domains.Rule{
 				rule(t, noMatch, "9"),
@@ -320,142 +271,75 @@ func TestEvalFirewallRuleOrdering(t *testing.T) {
 	}
 }
 
-// captureStdout redirects os.Stdout to a temp file for the duration of fn and
-// returns what was written. EvalFirewallRule reports malformed actions with
-// fmt.Printf, which resolves os.Stdout at call time, so swapping the variable is
-// enough. A temp file (rather than an os.Pipe) means there is no reader
-// goroutine and no way to deadlock on a full pipe buffer.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-
-	f, err := os.CreateTemp(t.TempDir(), "stdout-*.txt")
-	if err != nil {
-		t.Fatalf("os.CreateTemp: %v", err)
-	}
-	saved := os.Stdout
-	t.Cleanup(func() {
-		os.Stdout = saved
-		_ = f.Close()
-	})
-
-	os.Stdout = f
-	fn()
-	os.Stdout = saved
-
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		t.Fatalf("Seek: %v", err)
-	}
-	out, err := io.ReadAll(f)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	return string(out)
-}
-
-// TestEvalFirewallRuleReportsRuleIndexInOrder pins the second observable
-// consequence of the loop order: the diagnostic EvalFirewallRule prints for a
-// malformed action carries the rule's INDEX, and the messages come out in
-// config order.
+// WAVE 13: two tests and the captureStdout helper were deleted here.
 //
-// This is the only signal an operator gets that a rule is broken -- there is no
-// validation at config load (see TestEvalFirewallRuleActions) -- so the index
-// has to point at the line they actually wrote. It is also a second, independent
-// tripwire on iteration order: a wave that reverses, sorts, or partitions the
-// rule slice reorders these lines even when the arithmetic happens to be
-// commutative and TestEvalFirewallRuleOrdering stays green.
-func TestEvalFirewallRuleReportsRuleIndexInOrder(t *testing.T) {
-	const match = `http.path eq "/admin"`
-	vars := gofilter.Message{"http.path": "/admin"}
+// TestEvalFirewallRuleReportsRuleIndexInOrder pinned the diagnostic
+// EvalFirewallRule printed to stdout for a malformed action, including the
+// rule index, because that print was "the only signal an operator gets that a
+// rule is broken -- there is no validation at config load". There is now:
+// domains.ParseAction runs in validate AND in build, so a malformed action
+// never becomes a Rule and the per-request print is gone (it was also a log
+// amplifier under a flood, and back-pressure into the request path whenever
+// stdout blocked). Its second job, an independent tripwire on iteration order,
+// is covered by TestEvalFirewallRuleOrdering's "first absolute action wins"
+// case: two set actions in sequence give different answers front-to-back than
+// back-to-front.
+//
+// TestEvalFirewallRuleEmptyActionPanics and its NonMatchingIsSafe counterpart
+// pinned the traffic-triggered crash from rule.Action[:1] on an empty string.
+// The switch is on a parsed operator now, so there is no slice to overrun; the
+// refusal itself is TestParseActionRejectsMalformedActions below.
 
-	currDomain := domains.DomainSettings{
-		Name: "example.com",
-		CustomRules: []domains.Rule{
-			rule(t, match, "+bad-increment"), // index 0, '+' branch
-			rule(t, match, "-bad-decrement"), // index 1, '-' branch
-			rule(t, match, "bad-absolute"),   // index 2, default branch
-		},
-	}
-
-	var got int
-	out := captureStdout(t, func() {
-		got = EvalFirewallRule(currDomain, vars, 4)
-	})
-
-	// All three actions are unparseable, so susLv is returned untouched.
-	if got != 4 {
-		t.Errorf("EvalFirewallRule = %d, want 4 (every action failed to parse)", got)
-	}
-
-	// Every branch must report, and each must name its own index.
-	positions := make([]int, 3)
-	for i := range positions {
-		needle := "Rule " + strconv.Itoa(i) + " :"
-		pos := strings.Index(out, needle)
-		if pos < 0 {
-			t.Fatalf("rule %d did not report a parse error; got output:\n%s", i, out)
-		}
-		positions[i] = pos
-	}
-
-	if !(positions[0] < positions[1] && positions[1] < positions[2]) {
-		t.Errorf("rules were reported out of config order (offsets %v); "+
-			"EvalFirewallRule must evaluate CustomRules front to back, because the "+
-			"first matching absolute rule short-circuits every rule after it.\noutput:\n%s",
-			positions, out)
+// TestParseActionRejectsMalformedActions is where every action form that used
+// to reach the request path and misbehave now ends: at config load.
+func TestParseActionRejectsMalformedActions(t *testing.T) {
+	for _, action := range []string{
+		"",                     // panicked the request goroutine on match
+		"+",                    // empty operand
+		"-",                    //
+		"+abc",                 // logged per request and silently ignored
+		"-abc",                 //
+		"block",                //
+		" 7",                   // Sscan skipped the space: " 7" != "+7", invisibly
+		"7 ",                   //
+		"+7x",                  //
+		"1.5",                  // not an integer suspicion level
+		"++1",                  //
+		"+-1",                  // sign is the operator; no re-signing
+		"99999999999999999999", // past the 31-bit ceiling
+	} {
+		t.Run("action="+strconv.Quote(action), func(t *testing.T) {
+			if op, value, err := domains.ParseAction(action); err == nil {
+				t.Errorf("ParseAction(%q) = (%v, %d, nil), want an error", action, op, value)
+			}
+		})
 	}
 }
 
-// TestEvalFirewallRuleEmptyActionPanics pins the current contract for an empty
-// Action string.
-//
-// BUG (wave 4 flips this): `rule.Action[:1]` slices an empty string and panics
-// with "slice bounds out of range". A config containing
-//
-//	{"expression": "http.path eq \"/x\"", "action": ""}
-//
-// therefore takes the whole proxy down the first time that rule MATCHES -- not
-// at config load, so it is a latent, traffic-triggered crash. `net/http`
-// recovers the handler panic, but core/firewall/general.go's bare Lock()/Unlock()
-// pairs on the hot path mean the recovered panic can leave the global mutex held.
-//
-// When wave 4 validates actions at config load (or wave 7 guards the slice),
-// this test must be changed from "asserts it panics" to whatever the new
-// contract is -- most likely "the rule is rejected at load and never reaches
-// EvalFirewallRule".
-func TestEvalFirewallRuleEmptyActionPanics(t *testing.T) {
-	currDomain := domains.DomainSettings{
-		Name:        "example.com",
-		CustomRules: []domains.Rule{rule(t, `http.path eq "/admin"`, "")},
+// The forms an operator may actually write, and what they parse to.
+func TestParseActionAcceptsEveryDocumentedForm(t *testing.T) {
+	tests := []struct {
+		action string
+		op     domains.RuleOp
+		value  int
+	}{
+		{"0", domains.RuleSet, 0},
+		{"3", domains.RuleSet, 3},
+		{"+2", domains.RuleAdd, 2},
+		{"-5", domains.RuleSub, 5},
+		{"+0", domains.RuleAdd, 0},
+		{"-0", domains.RuleSub, 0},
 	}
-	vars := gofilter.Message{"http.path": "/admin"}
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("EvalFirewallRule with an empty Action did not panic; " +
-				"if a wave fixed this, update this test to the new contract")
-		}
-		// Do not assert the exact runtime message; only that it panicked.
-		t.Logf("pinned panic: %v", r)
-	}()
-
-	_ = EvalFirewallRule(currDomain, vars, 0)
-	t.Fatal("unreachable: EvalFirewallRule returned instead of panicking")
-}
-
-// TestEvalFirewallRuleEmptyActionNonMatchingIsSafe documents the flip side: the
-// empty-action panic is guarded by rule.Filter.Apply, so a never-matching rule
-// with an empty action is harmless. That is precisely why the defect survives
-// review -- it does not reproduce until the right request arrives.
-func TestEvalFirewallRuleEmptyActionNonMatchingIsSafe(t *testing.T) {
-	currDomain := domains.DomainSettings{
-		Name:        "example.com",
-		CustomRules: []domains.Rule{rule(t, `http.path eq "/never"`, "")},
-	}
-	vars := gofilter.Message{"http.path": "/admin"}
-
-	if got := EvalFirewallRule(currDomain, vars, 2); got != 2 {
-		t.Errorf("EvalFirewallRule = %d, want 2", got)
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			op, value, err := domains.ParseAction(tt.action)
+			if err != nil {
+				t.Fatalf("ParseAction(%q): %v", tt.action, err)
+			}
+			if op != tt.op || value != tt.value {
+				t.Errorf("ParseAction(%q) = (%v, %d), want (%v, %d)", tt.action, op, value, tt.op, tt.value)
+			}
+		})
 	}
 }
 
@@ -464,7 +348,7 @@ func TestEvalFirewallRuleEmptyActionNonMatchingIsSafe(t *testing.T) {
 func TestEvalFirewallRuleIntField(t *testing.T) {
 	currDomain := domains.DomainSettings{
 		Name:        "example.com",
-		CustomRules: []domains.Rule{rule(t, `ip.requests > 100`, "+2")},
+		CustomRules: []domains.Rule{rule(t, `ip.http_requests > 100`, "+2")},
 	}
 
 	tests := []struct {
@@ -479,41 +363,62 @@ func TestEvalFirewallRuleIntField(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vars := gofilter.Message{"ip.requests": tt.requests}
+			vars := gofilter.Message{"ip.http_requests": tt.requests}
 			if got := EvalFirewallRule(currDomain, vars, 0); got != tt.want {
-				t.Errorf("EvalFirewallRule(ip.requests=%d) = %d, want %d",
+				t.Errorf("EvalFirewallRule(ip.http_requests=%d) = %d, want %d",
 					tt.requests, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestEvalFirewallRuleMissingField pins what happens when a rule references a
-// registered field that the middleware never actually puts into the Message.
+// WAVE 13: FLIPPED. This used to pin the fail-open: five DSL fields
+// (ip.country, ip.asn, ip.requests, http.headers, http.body) were registered in
+// core/firewall/filter.go but never supplied by the middleware, so a positive
+// rule on one of them silently never fired and its NEGATION fired on every
+// request on earth. Both halves were asserted here as current behaviour.
 //
-// BUG (documented in docs/ARCHITECTURE.md; a later wave flips this): five DSL
-// fields -- ip.country, ip.asn, http.body among them -- are registered in
-// core/firewall/filter.go but never supplied by the middleware. A positive rule
-// on such a field silently never fires (fails OPEN), and its NEGATION fires on
-// EVERY request (fails CLOSED, blocking everyone). Both halves are pinned here.
-func TestEvalFirewallRuleMissingField(t *testing.T) {
-	// Deliberately does NOT contain "ip.country".
-	vars := gofilter.Message{"http.path": "/admin"}
+// The five names are gone from the registry, so such a rule no longer compiles
+// and no longer reaches EvalFirewallRule at all: it is refused at config load,
+// naming the field. What is pinned now is that refusal.
+func TestUnsuppliedFieldsAreNotRegistered(t *testing.T) {
+	for _, expr := range []string{
+		`ip.country eq "CN"`,
+		`ip.country ne "US"`,
+		`ip.asn eq 13335`,
+		`ip.requests > 100`,
+		`http.headers contains "x-forwarded-for"`,
+		`http.body contains "select"`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			f, err := gofilter.NewFilter(expr)
+			if err == nil {
+				t.Fatalf("gofilter.NewFilter(%q) compiled; a field the request path never supplies must be refused at load, not fail open at runtime (filter=%v)", expr, f != nil)
+			}
+			if !strings.Contains(err.Error(), "does not exists") {
+				t.Errorf("error = %q, want it to name the unknown field", err)
+			}
+		})
+	}
+}
 
-	positive := domains.DomainSettings{
-		Name:        "example.com",
-		CustomRules: []domains.Rule{rule(t, `ip.country eq "CN"`, "+5")},
+// The counterpart: every name the registry DOES carry must compile. Without
+// this, "fix" the fail-open by deleting the whole registry and the test above
+// still passes.
+func TestRegisteredFieldsCompile(t *testing.T) {
+	operand := map[gofilter.FieldType]string{
+		gofilter.FT_STRING: `eq "x"`,
+		gofilter.FT_IP:     `eq 1.2.3.4`,
+		gofilter.FT_INT:    `eq 1`,
+		gofilter.FT_BOOL:   `eq true`,
 	}
-	if got := EvalFirewallRule(positive, vars, 0); got != 0 {
-		t.Errorf("positive geo rule: EvalFirewallRule = %d, want 0 (rule fails open today)", got)
-	}
-
-	negative := domains.DomainSettings{
-		Name:        "example.com",
-		CustomRules: []domains.Rule{rule(t, `ip.country ne "US"`, "+5")},
-	}
-	if got := EvalFirewallRule(negative, vars, 0); got != 5 {
-		t.Errorf("negated geo rule: EvalFirewallRule = %d, want 5 "+
-			"(rule matches every request today, because the field is absent)", got)
+	for name, kind := range Fields {
+		rhs, ok := operand[kind]
+		if !ok {
+			t.Fatalf("field %q has type %v, which this test does not know how to write an operand for", name, kind)
+		}
+		if _, err := gofilter.NewFilter(name + " " + rhs); err != nil {
+			t.Errorf("registered field %q does not compile: %v", name, err)
+		}
 	}
 }

@@ -278,10 +278,6 @@ Represents the user-agent sent by the client (**Important**: will always be lowe
 
 Represents the cookie string sent by the client
 
-### `http.headers` <sup>Map[String]String</sup>
-
-Represents the headers send by the client (**Do not use!**. Not production ready)
-
 ### `proxy.stage` <sup>Int</sup>
 
 Represents the stage the reverse proxy is currently in
@@ -309,6 +305,36 @@ Represents the number of currently incoming requests per second
 ### `proxy.rps_allowed` <sup>Int</sup>
 
 Represents the number of currently incoming requests per second forwarded to the backend
+
+### A note on the fields you will not find here
+
+The list above is the complete vocabulary: it is generated from the same map the
+proxy registers with the rule parser (`core/firewall/filter.go`), and a test
+drives a real request through the proxy for every entry to prove the value is
+actually there.
+
+Upstream also registered `ip.country`, `ip.asn`, `ip.requests`, `http.headers`
+and `http.body`, and never populated any of them. A rule naming one compiled,
+showed up in `GET_FIREWALL_RULES`, and silently never matched — and its negation
+matched every request instead, so `(ip.country ne "ID")` with `action: "0"`, the
+natural way to write "only allow Indonesia", whitelisted the entire internet.
+They are no longer registered: a rule using one is now **refused at config load**
+with the field named, rather than quietly doing nothing in production.
+
+### Comparing a `Bool` field
+
+```
+(proxy.attack eq true)
+(proxy.stage_locked eq false)
+```
+
+Write bool fields with an explicit `eq true` / `eq false`. A bare field name is
+a **presence** test, as in Wireshark display filters — `(proxy.attack)` is true
+whenever the field exists, which is every request, not only during an attack.
+
+(Both forms of the comparison were broken in upstream's rule engine: `eq` never
+matched a bool and `ne` always did. Fixed in LancarSec — see
+`core/gofilter/README.md`, deviation 5.)
 
 ## **Comparison Operatos**
 ---
@@ -420,7 +446,7 @@ Returns true if field matches a regex expression
 
 `matches`
 ```
-(http.header matches "(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*\W)")
+(http.user_agent matches "^mozilla/5\.0 .*(bot|crawler|spider)")
 ```
 
 ## **Structure**
@@ -498,7 +524,7 @@ You can also set actions more dynamically by using a `+` in front of the `action
 
 ```
 {
-    "expression": "(http.engine eq \"\")",
+    "expression": "(ip.engine eq \"\")",
     "action": "+1"
 }
 ```

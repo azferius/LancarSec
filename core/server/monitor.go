@@ -343,6 +343,7 @@ func commands() {
 	defer pnc.PanicHndl()
 
 	scanner := bufio.NewScanner(os.Stdin)
+
 	for {
 		if scanner.Scan() {
 
@@ -458,6 +459,21 @@ func commands() {
 				fmt.Print("[ " + utils.PrimaryColor("Command") + " ]: \033[s")
 			}
 			PrintMutex.Unlock()
+		} else {
+			// WAVE 13 (CONC-10): stdin gave EOF or a read error. This loop used
+			// to have no else branch, so with nothing to read - systemd,
+			// `docker run` without -i, nohup, a closed pipe - Scan returned
+			// false immediately and forever and the goroutine spun a full core
+			// for the life of the process. On a mitigation proxy that is a core
+			// taken from the request path, permanently, in exactly the
+			// deployments where nobody is watching a terminal to notice.
+			//
+			// Neither EOF nor a read error on stdin ever becomes readable
+			// again, so the only correct answer is to stop reading. The TUI's
+			// own render loop is a different goroutine and keeps running: a
+			// headless proxy still prints its stats, it just stops pretending
+			// somebody can type at it.
+			return
 		}
 	}
 }

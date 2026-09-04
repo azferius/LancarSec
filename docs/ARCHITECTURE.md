@@ -550,3 +550,46 @@ Two behaviour notes that are easy to get wrong when reading the new code:
   rather than the only thing between a lagging monitor and a permanently wedged proxy. The tests
   that asserted the nil-map panic as current behaviour are flipped
   (`TestRatelimitMissingBucketWriteIsSafe`, `TestRatelimitWriteBeyondPrefillHorizonIsSafe`).
+
+
+---
+
+## Wave 13 delta — the log cap, the DSL vocabulary, and a shutdown path
+
+Four corrections to what is written above.
+
+**The per-domain access log is bounded.** The document describes `utils.AddLogs` appending and
+`ReadLogs` trimming; the trim only ever ran for `proxy.WatchedDomain`, from the TUI, so every other
+domain grew without limit and a headless proxy trimmed nothing at all. `AddLogs` now caps at
+`utils.MaxDomainLogs` (1000) at append time, dropping the oldest half so the copy is amortised
+rather than per-request. `ReadLogs` still trims to the terminal height for display.
+
+**The five never-populated DSL fields are gone from the registry.** Where this document says
+`ip.country`, `ip.asn`, `ip.requests`, `http.headers` and `http.body` are "registered but never
+populated by the middleware", and that such a rule "parses cleanly and silently never matches" —
+they are no longer registered, so the parser refuses them at config load with the field named.
+`core/firewall/filter.go` is now one `Fields` map (name -> type) that `init` ranges over, and it is
+the single source of truth: `TestFieldsIsTheDocumentedVocabulary` pins the name set as a literal
+list, and `TestMiddlewareEveryRegisteredRuleFieldIsSupplied` drives a real request through
+`Middleware` for each name to prove the value is actually in the message.
+
+Related, and not previously recorded anywhere: **`FT_BOOL` comparison never worked**.
+`nodeEq.applyOne` in the vendored gofilter had no `bool` case, so `proxy.attack eq true` never
+matched and `ne` (parsed as `not(eq)`) always did — all four bool fields the middleware supplies
+were unusable in both directions. Fixed in `core/gofilter/nodes.go`; deviations 4 and 5 in that
+package's README.
+
+**Rule actions are parsed at config build, not per request.** `EvalFirewallRule` no longer does
+`rule.Action[:1]` + `fmt.Sscan` per matching rule (reflection, an allocation, and a stdout print on
+failure, all on the hot path). `domains.ParseAction` is the one definition of the syntax, used by
+`validate` and `build`; `domains.Rule` carries `Op` and `Value`. The empty-action panic this
+document lists as a latent traffic-triggered crash cannot be constructed any more.
+
+**There is a shutdown path.** Where the document says "no `signal.Notify`, no `Shutdown`, no
+context; `main()` blocks on a bare `select{}`": `Serve` registers each `*http.Server` it starts
+with `track`, `server.Shutdown(ctx)` drains them all in parallel, and `main` waits for
+SIGINT/SIGTERM and gives in-flight requests 20 seconds before exiting non-zero. `listenFatal`
+excludes `http.ErrServerClosed` so a clean drain does not panic the listener goroutines. In the
+same family: `commands()` returns on stdin EOF instead of spinning a core forever under
+systemd/docker/nohup.
+

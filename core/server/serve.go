@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,6 +23,61 @@ var bufferPool = sync.Pool{
 	New: func() any {
 		return &bytes.Buffer{}
 	},
+}
+
+// WAVE 13: the listeners Serve started, so Shutdown can reach them.
+//
+// There was no shutdown path at all: main blocked on a bare `select{}`, nothing
+// handled SIGINT or SIGTERM, and every listener error path panicked. A restart
+// or a `docker stop` therefore killed the process mid-request — every in-flight
+// response truncated, every keep-alive connection reset — which for a proxy
+// means the outage is the operator's own deploy, not the attack.
+var (
+	servingMu sync.Mutex
+	serving   []*http.Server
+)
+
+func track(s *http.Server) {
+	servingMu.Lock()
+	serving = append(serving, s)
+	servingMu.Unlock()
+}
+
+// Shutdown stops every listener Serve started and waits for in-flight requests
+// to finish, giving up when ctx expires. It is safe to call when nothing was
+// ever started.
+//
+// The servers are forgotten as they are shut down, so a second call is a no-op
+// rather than an error: http.Server.Shutdown on an already-shut-down server
+// returns immediately, but not tracking that would leak the slice across the
+// restarts the tests do.
+func Shutdown(ctx context.Context) error {
+	servingMu.Lock()
+	pending := serving
+	serving = nil
+	servingMu.Unlock()
+
+	// Shut the listeners down in parallel: they drain independently, and doing
+	// it in sequence would spend the whole grace period on the first one.
+	errs := make(chan error, len(pending))
+	for _, s := range pending {
+		go func() { errs <- s.Shutdown(ctx) }()
+	}
+
+	var err error
+	for range pending {
+		if e := <-errs; e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// listenFatal reports whether a listener error should take the process down.
+// http.ErrServerClosed is what every ListenAndServe returns after Shutdown, so
+// panicking on it would turn a clean drain into a crash.
+func listenFatal(err error) bool {
+	return err != nil && !errors.Is(err, http.ErrServerClosed)
 }
 
 func Serve() {
@@ -45,7 +102,8 @@ func Serve() {
 		service.SetKeepAlivesEnabled(true)
 		service.Handler = http.HandlerFunc(Middleware)
 
-		if err := service.ListenAndServe(); err != nil {
+		track(service)
+		if err := service.ListenAndServe(); listenFatal(err) {
 			panic(err)
 		}
 	} else {
@@ -83,14 +141,17 @@ func Serve() {
 		service.SetKeepAlivesEnabled(true)
 		serviceH.Handler = http.HandlerFunc(Middleware)
 
+		track(service)
+		track(serviceH)
+
 		go func() {
 			defer pnc.PanicHndl()
-			if err := serviceH.ListenAndServeTLS("", ""); err != nil {
+			if err := serviceH.ListenAndServeTLS("", ""); listenFatal(err) {
 				panic(err)
 			}
 		}()
 
-		if err := service.ListenAndServe(); err != nil {
+		if err := service.ListenAndServe(); listenFatal(err) {
 			panic(err)
 		}
 	}

@@ -13,10 +13,42 @@ import (
 
 var ColorsString = "0;31"
 
+// MaxDomainLogs bounds the access log kept per domain in memory.
+//
+// WAVE 13 (PERF-03): this used to be unbounded. AddLogs appends on every
+// bypassed request and the ONLY trim was in ReadLogs, which the TUI calls for
+// proxy.WatchedDomain alone - so every other domain's slice grew for the life
+// of the process, and headless (no TUI loop) so did the watched one. A busy
+// proxy holds five strings per request forever; that is a leak with the
+// request rate as its slope, on the same write lock the hot path takes.
+//
+// The number is a display and API buffer, not a record: ReadLogs shows the
+// last proxy.MaxLogLength (terminal height) and GET_LOGS returns what is here.
+// 1000 is comfortably above any terminal and small enough that a thousand
+// domains cost megabytes, not gigabytes.
+//
+// ponytail: fixed cap, in memory. If an operator ever needs real retention,
+// that is a log SINK (file, syslog, a shipper) and not a bigger slice.
+const MaxDomainLogs = 1000
+
 // Only run in locked thread
 func AddLogs(entry domains.DomainLog, domainName string) {
 	domainData := domains.DomainsData[domainName]
 	domainData.LastLogs = append(domainData.LastLogs, entry)
+
+	// Drop the oldest HALF rather than the oldest one: dropping one per request
+	// past the cap would memmove the whole slice on every request, on the hot
+	// path, under the write lock. This way the copy runs once per
+	// MaxDomainLogs/2 requests and the capacity settles at MaxDomainLogs.
+	if len(domainData.LastLogs) > MaxDomainLogs {
+		keep := MaxDomainLogs / 2
+		n := copy(domainData.LastLogs, domainData.LastLogs[len(domainData.LastLogs)-keep:])
+		// The dropped entries are still reachable through the backing array,
+		// and each one pins five strings. Zero them so they can be collected.
+		clear(domainData.LastLogs[n:])
+		domainData.LastLogs = domainData.LastLogs[:n]
+	}
+
 	domains.DomainsData[domainName] = domainData
 }
 

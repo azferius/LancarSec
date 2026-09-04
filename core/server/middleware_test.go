@@ -343,7 +343,9 @@ func (e *mwEnv) storeSettings(rules []domains.Rule, rt http.RoundTripper) {
 	})
 }
 
-// mwSetRules compiles expression/action pairs the way config.Load does.
+// mwSetRules compiles expression/action pairs the way config.Load does —
+// including WAVE 13's action parse, so a rule reaching Middleware from a test
+// is shaped exactly like one the pipeline built.
 func (e *mwEnv) mwSetRules(pairs ...[2]string) {
 	e.tb.Helper()
 	rules := make([]domains.Rule, 0, len(pairs))
@@ -352,7 +354,11 @@ func (e *mwEnv) mwSetRules(pairs ...[2]string) {
 		if err != nil {
 			e.tb.Fatalf("compile rule %q: %v", p[0], err)
 		}
-		rules = append(rules, domains.Rule{Filter: f, Action: p[1]})
+		op, value, err := domains.ParseAction(p[1])
+		if err != nil {
+			e.tb.Fatalf("parse action of rule %q: %v", p[0], err)
+		}
+		rules = append(rules, domains.Rule{Filter: f, Action: p[1], Op: op, Value: value})
 	}
 	e.storeSettings(rules, nil)
 }
@@ -1683,23 +1689,97 @@ func TestMiddlewareCustomRules(t *testing.T) {
 	}
 }
 
-// BUG (wave 5 flips this): firewall.EvalFirewallRule slices rule.Action[:1]
-// without a length check, so a config rule with an empty action panics the
-// request goroutine. Reachable from a plain config.json.
-func TestMiddlewareEmptyRuleActionPanics(t *testing.T) {
+// WAVE 13: the regression guard for the fail-open the audit found — five DSL
+// fields were registered in core/firewall/filter.go and never written into the
+// gofilter.Message the middleware builds, so every rule naming one of them
+// compiled and silently never matched (and its negation matched everything).
+//
+// Deleting the five names fixes today. This is what keeps it fixed: it walks
+// firewall.Fields — the registry itself — and drives a REAL request through
+// Middleware for each name, with a rule that can only match if the request path
+// populated that field. A field added to the registry without being supplied
+// fails here, and so does a field that is quietly dropped from the Message.
+//
+// The probe expressions are presence probes, not value assertions: `matches
+// ".*"` is true for any string that is there and false for one that is not,
+// and `>= 0` does the same for the counters. Only ip.src pins a value, because
+// there is no type-generic way to write "any address".
+func TestMiddlewareEveryRegisteredRuleFieldIsSupplied(t *testing.T) {
+	probes := map[string]string{
+		"ip.src":                `ip.src eq ` + mwIP,
+		"ip.engine":             `ip.engine matches ".*"`,
+		"ip.bot":                `ip.bot matches ".*"`,
+		"ip.fingerprint":        `ip.fingerprint matches ".*"`,
+		"ip.http_requests":      `ip.http_requests >= 0`,
+		"ip.challenge_requests": `ip.challenge_requests >= 0`,
+
+		"http.host":       `http.host matches ".*"`,
+		"http.version":    `http.version matches ".*"`,
+		"http.method":     `http.method matches ".*"`,
+		"http.url":        `http.url matches ".*"`,
+		"http.query":      `http.query matches ".*"`,
+		"http.path":       `http.path matches ".*"`,
+		"http.user_agent": `http.user_agent matches ".*"`,
+		"http.cookie":     `http.cookie matches ".*"`,
+
+		"proxy.stage":         `proxy.stage >= 0`,
+		"proxy.cloudflare":    `proxy.cloudflare eq false`,
+		"proxy.stage_locked":  `proxy.stage_locked eq false`,
+		"proxy.attack":        `proxy.attack eq false`,
+		"proxy.bypass_attack": `proxy.bypass_attack eq false`,
+		"proxy.rps":           `proxy.rps >= 0`,
+		"proxy.rps_allowed":   `proxy.rps_allowed >= 0`,
+	}
+
+	for field := range firewall.Fields {
+		expr, ok := probes[field]
+		if !ok {
+			t.Errorf("firewall.Fields registers %q but this test has no probe for it: either the request path supplies it (add a probe) or it must not be registered", field)
+			continue
+		}
+
+		t.Run(field, func(t *testing.T) {
+			env := mwNewEnv(t)
+			// Stage 1 challenges everything, so reaching the backend is only
+			// possible if the rule matched and whitelisted the request.
+			env.mwSetStage(1)
+			env.mwSetRules([2]string{expr, "0"})
+
+			mwDo(mwRequest("/"))
+
+			if env.mwBackendHits() == 0 {
+				t.Errorf("rule %q did not match, so the middleware does not populate %q — a rule naming it would fail open in production", expr, field)
+			}
+		})
+	}
+}
+
+// WAVE 13: FLIPPED. firewall.EvalFirewallRule used to slice rule.Action[:1]
+// with no length check, so a config rule with an empty action panicked the
+// request goroutine the first time that rule MATCHED — latent until the right
+// request arrived. The action is parsed once at config build now and the eval
+// switches on the parsed operator, so there is no slice left to overrun and no
+// way to construct the rule in the first place.
+//
+// The empty action is refused by the parser; what is asserted here is that a
+// request carrying the shape that used to be fatal is served normally.
+func TestMiddlewareEmptyRuleActionIsRefusedAtLoadNotAtRuntime(t *testing.T) {
+	if _, _, err := domains.ParseAction(""); err == nil {
+		t.Fatal("domains.ParseAction(\"\") accepted an empty action; it must be refused at config load")
+	}
+
+	// The same rule with a valid action still evaluates, so the refusal above
+	// is about the action and not about the expression.
 	env := mwNewEnv(t)
-	env.mwSetRules([2]string{`http.method eq "GET"`, ""})
+	env.mwSetStage(1)
+	env.mwSetRules([2]string{`http.method eq "GET"`, "0"})
 
 	rec := httptest.NewRecorder()
-	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
-	if got == nil {
-		t.Fatal("expected a panic from an empty rule action, got none")
+	if got := mwRecover(func() { Middleware(rec, mwRequest("/")) }); got != nil {
+		t.Fatalf("Middleware panicked: %v", got)
 	}
-	if !strings.Contains(mwPanicString(got), "out of range") {
-		t.Errorf("panic = %v, want a slice bounds out of range panic", got)
-	}
-	if env.mwBackendHits() != 0 {
-		t.Error("backend was reached")
+	if env.mwBackendHits() != 1 {
+		t.Errorf("backend hits = %d, want 1: the whitelist rule did not take effect", env.mwBackendHits())
 	}
 }
 
@@ -2670,10 +2750,6 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(0) // whitelisted: every request is counted AND bypassed
 
-	// AddLogs appends without bound; ReadLogs (the TUI) is what trims. Raise
-	// the cap so nothing in this test depends on log trimming.
-	proxy.MaxLogLength = total + 1
-
 	var wg sync.WaitGroup
 	for w := range workers {
 		wg.Add(1)
@@ -2702,8 +2778,14 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 	if got := domains.DomainBypassed(mwDomain); got != total {
 		t.Errorf("BypassedRequests = %d, want %d: %d increments were lost", got, total, total-got)
 	}
-	if len(d.LastLogs) != total {
-		t.Errorf("LastLogs = %d entries, want %d: appends to the shared log slice were lost", len(d.LastLogs), total)
+	// WAVE 13 (PERF-03): FLIPPED. The access log is capped at append time now,
+	// so 6400 concurrent requests cannot leave 6400 entries. "No append was
+	// lost" is still asserted — by the two atomic counters above, which are
+	// incremented on the same path and are not capped. What is left to check
+	// here is that the cap holds under concurrency and that the slice is not
+	// left empty by racing trims.
+	if n := len(d.LastLogs); n > utils.MaxDomainLogs || n == 0 {
+		t.Errorf("LastLogs = %d entries after %d concurrent requests, want 1..%d", n, total, utils.MaxDomainLogs)
 	}
 
 	access := firewall.IPs.WindowCount(mwTimestamp, mwIP)

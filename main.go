@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/azferius/lancarsec/core/config"
@@ -70,6 +73,42 @@ func main() {
 
 	go server.Serve()
 
-	//Keep server running
-	select {}
+	// WAVE 13: shut down on a signal instead of blocking on a bare `select{}`.
+	//
+	// Nothing handled SIGINT or SIGTERM before, so every restart, redeploy and
+	// `docker stop` killed the process mid-request: in-flight responses
+	// truncated, keep-alive connections reset, and — because a challenged
+	// client's clearance is issued and verified over separate requests — a
+	// visitor part-way through the challenge sent back to stage 1. For a
+	// mitigation proxy that is a self-inflicted outage during exactly the
+	// operation an operator performs while under load.
+	//
+	// SIGTERM is what an init system and a container runtime send first, and
+	// what they follow with SIGKILL after their own grace period; Windows never
+	// delivers it, which is harmless — Interrupt covers Ctrl-C there.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	sig := <-stop
+
+	fmt.Println("\n[ * ] [ " + sig.String() + " received - draining, up to " + shutdownGrace.String() + " ]")
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		// The deadline passed with requests still running. Say so and exit
+		// non-zero: the supervisor's own timer is what kills us next, and an
+		// operator reading the exit code should know the drain did not finish.
+		fmt.Println("[ ! ] [ Shutdown did not finish: " + err.Error() + " ]")
+		logFile.Close()
+		os.Exit(1)
+	}
+
+	fmt.Println("[ * ] [ Stopped cleanly ]")
 }
+
+// shutdownGrace is how long in-flight requests get to finish once a signal
+// arrives. It sits under the 30s that systemd and Docker default to before
+// SIGKILL, so the drain either completes or reports failure while we still
+// control the exit.
+const shutdownGrace = 20 * time.Second
