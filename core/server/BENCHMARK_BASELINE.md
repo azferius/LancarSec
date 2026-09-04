@@ -267,3 +267,97 @@ same way. Measured in `core/utils/encryption_bench_test.go`:
 | RandomString(24) | 206 | 72 | 2 |
 
 If a later wave simplifies the pool away, `BenchmarkEncrypt` is where it shows.
+
+
+---
+
+# Wave 12 (keyed-state sharding)
+
+Appended by wave 12. **Every number above is untouched.**
+
+## Read this before comparing with the wave 3/5 tables
+
+The absolute ns/op figures in this section are NOT comparable with the wave-3 and wave-5 tables,
+and the difference is not the middleware. `BenchmarkMiddlewareHarnessBaseline` — which measures the
+per-iteration harness cost and nothing else — moved from **31.6 ns / 0 B / 0 allocs** at wave 3 to
+**93.1 ns / 16 B / 1 alloc** here. The harness gained an allocation (wave 5's cookie reset) and the
+toolchain moved 1.25 -> 1.26. Whatever else changed, the measuring stick did.
+
+So wave 12 is reported as a **same-machine, same-session A/B** against its own parent commit
+(`9fdb563`), benchmarked from a clean `git worktree`. That is the only comparison here that means
+anything.
+
+## Machine
+
+| | |
+| --- | --- |
+| Date | 2026-09-04 |
+| Baseline side | `9fdb563` (wave 11 head) in a clean worktree |
+| Test side | wave-12 working tree |
+| Go | go1.26.7 windows/amd64, GOAMD64=v1 |
+| CPU | AMD Ryzen 7 5700X, 8 cores / 16 threads |
+| Command | `go test ./core/server/ -run '^$' -bench BenchmarkMiddleware -benchmem -count 5 -cpu 1,4,16` |
+
+## A/B medians (n=5)
+
+| Benchmark | cpu | `9fdb563` | wave 12 | delta |
+| --- | ---: | ---: | ---: | ---: |
+| DecisionPath | 1 | 1127 ns | 1373 ns | +21.8% |
+| DecisionPath | 4 | 1007 ns | 1729 ns | +71.7% |
+| DecisionPath | 16 | 885.6 ns | 1191 ns | +34.5% |
+| **DecisionPathParallel** | 1 | 1168 ns | 1351 ns | +15.7% |
+| **DecisionPathParallel** | 4 | 1597 ns | **862.2 ns** | **-46.0%** |
+| **DecisionPathParallel** | 16 | 1582 ns | **795.0 ns** | **-49.7%** |
+| HarnessBaseline | 1 | 97.1 ns | 93.1 ns | -4.1% |
+| HarnessBaseline | 16 | 89.6 ns | 81.6 ns | -8.9% |
+
+`144 B/op, 9 allocs/op` on the decision path on BOTH sides: this wave moved locks, not allocations.
+
+### The serial "regression" is noise — measured, not assumed
+
+The DecisionPath serial row above looks like a 22-72% regression, and the spread across `-cpu`
+values (+21.8 / +71.7 / +34.5 on a benchmark that ignores GOMAXPROCS) is the tell. Re-measured on
+its own, `-count 12 -cpu 1`, both trees back to back:
+
+| | n | median | min | max |
+| --- | ---: | ---: | ---: | ---: |
+| `9fdb563` | 12 | 1128 ns | 929.5 ns | 1235 ns |
+| wave 12 | 12 | 1148 ns | 938.9 ns | 1280 ns |
+
+**+1.8% median, +1.0% min** — inside the run-to-run spread this document has warned about since
+wave 3. Do not cite the n=5 table as a serial regression; it is an interactive desktop, not a bench
+box.
+
+## The number this wave exists for
+
+The audit's framing was that the proxy gets *slower* as cores are added. On the parent commit it
+still did — DecisionPathParallel 1168 -> 1597 -> 1582 ns going 1 -> 4 -> 16 cores. Wave 12 inverts
+that even on the **shared-key** benchmark (1351 -> 862 -> 795), which is the case sharding cannot
+help: every goroutine there uses one client address, so they all queue on one shard exactly as they
+used to queue on the global lock.
+
+The realistic case is the new `BenchmarkMiddlewareDecisionPathParallelDistinctKeys`, where each
+goroutine owns a distinct address — a flood from many sources, which is what this product is for:
+
+| Benchmark | cpu 1 | cpu 4 | cpu 16 |
+| --- | ---: | ---: | ---: |
+| DecisionPathParallel (one key, all goroutines) | 1351 ns | 862.2 ns | 795.0 ns |
+| **DecisionPathParallelDistinctKeys** | 1021 ns | **392.8 ns** | **272.6 ns** |
+| `9fdb563` DecisionPathParallel (for scale) | 1168 ns | 1597 ns | 1582 ns |
+
+**1582 ns -> 272.6 ns at 16 cores: 5.8x.** And it scales down with cores (1021 -> 393 -> 273)
+instead of up, which is the inversion the audit opened with, closed.
+
+## Full wave-12 run (medians, n=5)
+
+| Benchmark | -cpu 1 | -cpu 4 | -cpu 16 | B/op | allocs/op |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MiddlewareHotPath | 10523 ns | 9363 ns | 10671 ns | 35096 | 33 |
+| MiddlewareHotPathParallel | 13331 ns | 9490 ns | 7964 ns | 35248 | 33 |
+| MiddlewareDecisionPath | 1373 ns | 1729 ns | 1191 ns | 144 | 9 |
+| MiddlewareDecisionPathParallel | 1351 ns | 862.2 ns | 795.0 ns | 144 | 9 |
+| **MiddlewareDecisionPathParallelDistinctKeys** | 1021 ns | 392.8 ns | **272.6 ns** | 144 | 9 |
+| MiddlewareChallengeStage1 | 1969 ns | 1735 ns | 1993 ns | 512 | 12 |
+| MiddlewareChallengeStage1Parallel | 1927 ns | 1334 ns | 1384 ns | 512 | 12 |
+| MiddlewareHarnessBaseline | 93.1 ns | 86.0 ns | 81.6 ns | 16 | 1 |
+

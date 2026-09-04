@@ -58,12 +58,15 @@ The eight critical ones, since they shape every decision below:
 2. **~~`Cf-Connecting-Ip` is trusted from any peer.~~ FIXED IN WAVE 6.** `realClientIP` now honours
    forwarding headers only from a peer inside the `core/trusted` allowlist. Optional
    `cloudflare_enforce_origin` additionally refuses any connection from outside it.
-3. **One global `RWMutex` is taken 3–4× per request** (`core/firewall/general.go:10`), twice for
-   writing. The proxy gets *slower* with more cores — measured 43.7 ns/op at GOMAXPROCS=1 degrading
-   to 90.9 ns/op at 16. That is the opposite of what a mitigation front end needs.
-4. **The hot path has bare `Lock()`/`Unlock()` with no `defer`**, and `middleware.go:96` can panic on
-   a nil map. `net/http` recovers the handler panic, the lock is never released, and the whole proxy
-   deadlocks permanently.
+3. **~~One global `RWMutex` is taken 3–4× per request.~~ FIXED IN WAVE 12.** The keyed state moved
+   to 16-way sharded locks (`core/firewall/shard.go`) and the per-domain totals to lock-free atomics
+   (`core/domains/counters.go`). `firewall.Mutex` keeps only what is not per-client. The inversion is
+   closed: the parallel decision path went from 1582 ns at 16 cores to 795 ns shared-key and 273 ns
+   with distinct keys, and it now gets *faster* with more cores.
+4. **~~The hot path has bare `Lock()`/`Unlock()` with no `defer`~~ FIXED (wave 9 W4, hardened in
+   wave 12).** Bucket creation is lazy inside `counterSet.IncrWindow`, under its shard lock with a
+   deferred unlock, so a lagging monitor can no longer panic the request path into a permanently
+   wedged mutex.
 5. **Ratelimits read a snapshot refreshed every 5 s** (`core/server/monitor.go:576-636`), so there is
    a 5-second unmetered burst window on every threshold.
 6. **`reload` disables the JS proof-of-work.** `ReloadConfig` rebuilds `DomainData` without
@@ -89,11 +92,12 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 4 | ~~Config load unification~~ **DONE 2026-08-31** | See "Wave 4 outcome" below. |
 | 5 | ~~Secrets, token derivation, admin auth~~ **DONE 2026-08-31** | Details in [`PROGRESS.md`](PROGRESS.md). Deploying it re-challenges every visitor once. |
 | 6 | ~~Client identity: trusted-proxy + IPv6~~ **DONE 2026-08-31** | Details in [`PROGRESS.md`](PROGRESS.md). Closes the `Cf-Connecting-Ip` spoofing hole. |
-| 7 | Hot-path concurrency rewrite | Largest and riskiest. Needs the toolchain (2), the tests and benchmark baseline (3), and the corrected keys (6). |
-| 8 | Upstream transport and response path | Independent of 7; sequenced after so throughput measurements aren't confounded. |
-| 9 | Challenge rendering, XSS, middleware decomposition | Splits the 335-line `Middleware` once, after the hot path is stable. |
-| 10 | Wire-visible rebrand + legal notices | **One commit, one deploy, atomic.** Every token here is protocol-visible and two break live sessions. |
-| 11 | Deferred hard problems | Spec-accurate JA4 from raw ClientHello; stage-3 captcha redesign. Both change detection behaviour rather than fix a defect. |
+| 7 | ~~Hot-path concurrency rewrite~~ **DONE 2026-08-31** | Clock and TUI gauges to atomics. The lock work itself landed in waves 9 W4 and 12. |
+| 8 | ~~Upstream transport and response path~~ **DONE 2026-08-31** | Breaking: backends TLS-verified by default; real 5xx passthrough. See [`PROGRESS.md`](PROGRESS.md). |
+| 9 | ~~Challenge rendering, XSS, middleware decomposition~~ **DONE 2026-09-01** | Four slices W1-W4; `html/template`, config correctness, concurrency hardening. |
+| 10 | ~~Wire-visible rebrand + legal notices~~ **DONE 2026-09-01** | Landed atomically at `335ffd2`. Legacy `/_bProxy/` and `__bProxy_v` are routed for one release as a grace window. |
+| 11 | ~~Cf-Ja3-Hash passthrough, stage-3 captcha, Go 1.26~~ **DONE 2026-09-01** | Spec-accurate JA4 was dropped: the owner deploys behind Cloudflare, so the origin never sees the real ClientHello. |
+| 12 | ~~Keyed-state sharding~~ **DONE 2026-09-04** | PERF-01/CONC-09/CONC-04. Ratelimit state on 16-way shards, domain totals on atomics. Parallel decision path -50%; distinct-key 5.8x. See [`PROGRESS.md`](PROGRESS.md). |
 
 ### Wave 1 outcome (2026-08-30)
 

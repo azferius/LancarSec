@@ -505,3 +505,48 @@ and 404s WITHOUT proxying. V2 lives at `/_lancarsec/api/v2/:domain/:action` with
 pipeline in `core/config/pipeline.go` (replacing the direct-global writes of
 `core/config/init.go` described above); the header tri-state test is
 `TestNormaliseResolvesHideVersionHeaderTriState` in `core/config/pipeline_test.go`.
+
+
+---
+
+## Wave 12 delta — keyed state off `firewall.Mutex`
+
+Everything above that describes `firewall.Mutex` as the one lock guarding "all mutable shared
+state" is now wrong in its most important half. The **keyed** state moved to sharded locks in the
+new `core/firewall/shard.go`; the global mutex keeps only the state that is not per-client.
+
+| Was (general.go) | Is now | Lock |
+| --- | --- | --- |
+| `AccessIps` + `WindowAccessIps` | `firewall.IPs` (`*counterSet`) | 16 shards, key-hashed (FNV-1a) |
+| `AccessIpsCookie` + `WindowAccessIpsCookie` | `firewall.IPsCookie` | 16 shards |
+| `UnkFps` + `WindowUnkFps` | `firewall.UnkFps` | 16 shards |
+| `Connections map[string]string` | `firewall.Connections` (`*connSet`) | 16 shards, addr-hashed |
+| `DomainData.TotalRequests` / `.BypassedRequests` | `domains.AddDomainTotal` / `AddDomainBypassed` (`core/domains/counters.go`) | none — `atomic.Int64` in a `sync.Map` |
+
+`firewall.Mutex` still guards `domains.DomainsData` (including `LastLogs` and the access-log
+append), the fingerprint classification tables, and the config publish. Those are read-mostly per
+request or written once per second by the monitor.
+
+Request-path consequences, against the "LOCK #1..#5" walk earlier in this document:
+
+- The two counter reads and the window increment take **one shard lock each**, not the global one.
+  A request never holds two shard locks at once, so no lock cycle is possible.
+- The `TotalRequests++` read-modify-write-back of the whole `DomainData` value under the global
+  **write** lock is gone; it is one atomic add. Same for `BypassedRequests` on the logged path.
+- `evaluateRatelimit`'s prefill + rebuild + expiry is `counterSet.Sweep` per family, taking each
+  shard in index order and releasing it before the next. It no longer holds one global write lock
+  across all three families for the duration of the walk.
+- `Fingerprint` writes and `OnStateChange` deletes the per-connection fingerprint under that
+  address's shard, not the global lock.
+
+Two behaviour notes that are easy to get wrong when reading the new code:
+
+- **CONC-04's cap is enforced per shard**, as `windowShardKeyCap = windowKeyCap / shardCount`.
+  Testing each shard against the whole `windowKeyCap` would have multiplied the memory bound by
+  16. The set-wide bound is therefore `windowKeyCap` exactly, and a key space skewed onto one
+  shard starts dropping earlier — the safe direction.
+- **CONC-01 is fixed, not pinned.** `counterSet.IncrWindow` creates a missing bucket lazily under
+  its shard lock with a deferred unlock, so the monitor's prefill horizon is an optimisation
+  rather than the only thing between a lagging monitor and a permanently wedged proxy. The tests
+  that asserted the nil-map panic as current behaviour are flipped
+  (`TestRatelimitMissingBucketWriteIsSafe`, `TestRatelimitWriteBeyondPrefillHorizonIsSafe`).

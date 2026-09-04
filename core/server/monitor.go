@@ -145,11 +145,19 @@ func checkAttack(domainName string, domainData domains.DomainData) {
 		return
 	}
 
-	domainData.RequestsPerSecond = domainData.TotalRequests - domainData.PrevRequests
-	domainData.RequestsBypassedPerSecond = domainData.BypassedRequests - domainData.PrevBypassed
+	// WAVE 12: the live totals are the lock-free atomics the request path
+	// increments (domains/counters.go); this is where they are folded into the
+	// DomainsData struct - the only writer of TotalRequests/PrevRequests now -
+	// so the per-second rates, peaks and stage escalation below keep reading
+	// the struct exactly as before.
+	totalRequests := int(domains.DomainTotal(domainName))
+	totalBypassed := int(domains.DomainBypassed(domainName))
 
-	domainData.PrevRequests = domainData.TotalRequests
-	domainData.PrevBypassed = domainData.BypassedRequests
+	domainData.RequestsPerSecond = totalRequests - domainData.PrevRequests
+	domainData.RequestsBypassedPerSecond = totalBypassed - domainData.PrevBypassed
+
+	domainData.PrevRequests = totalRequests
+	domainData.PrevBypassed = totalBypassed
 
 	if !domainData.StageManuallySet || (domainData.BufferCooldown > 0) {
 
@@ -529,58 +537,15 @@ func evaluateRatelimit() {
 		now := int(proxy.LastSecondTimestamp())
 		last10 := int(proxy.Last10SecondTimestamp())
 
-		firewall.Mutex.Lock()
-		//Initialise Maps before they're ever written, as to save if statements during potential attack
-		for i := last10; i < last10+120; i = i + 10 {
-			if firewall.WindowAccessIps[i] == nil {
-				//log.Printf("Set AccessIPs Windows For %d", i)
-				firewall.WindowAccessIps[i] = map[string]int{}
-			}
-			if firewall.WindowAccessIpsCookie[i] == nil {
-				//log.Printf("Set AccessIPsCookie Windows For %d", i)
-				firewall.WindowAccessIpsCookie[i] = map[string]int{}
-			}
-			if firewall.WindowUnkFps[i] == nil {
-				//log.Printf("Set AccessUnkFps Windows For %d", i)
-				firewall.WindowUnkFps[i] = map[string]int{}
-			}
-		}
-
-		// Delete outdated records & calculate requests for every ip
-		firewall.AccessIps = map[string]int{}
-		for windowTime, accessIPs := range firewall.WindowAccessIps {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-				//log.Printf("Deleting AccessIPs Windows For %d", windowTime)
-				delete(firewall.WindowAccessIps, windowTime)
-			} else {
-				for IP, requests := range accessIPs {
-					firewall.AccessIps[IP] += requests
-				}
-			}
-		}
-		firewall.AccessIpsCookie = map[string]int{}
-		for windowTime, accessIPsCookie := range firewall.WindowAccessIpsCookie {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-				//log.Printf("Deleting AccessIPsCookie Windows For %d", windowTime)
-				delete(firewall.WindowAccessIpsCookie, windowTime)
-			} else {
-				for IP, requests := range accessIPsCookie {
-					firewall.AccessIpsCookie[IP] += requests
-				}
-			}
-		}
-		firewall.UnkFps = map[string]int{}
-		for windowTime, unkFps := range firewall.WindowUnkFps {
-			if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-				//log.Printf("Deleting AccessUnkFps Windows For %d", windowTime)
-				delete(firewall.WindowUnkFps, windowTime)
-			} else {
-				for IP, requests := range unkFps {
-					firewall.UnkFps[IP] += requests
-				}
-			}
-		}
-		firewall.Mutex.Unlock()
+		// WAVE 12: the prefill + rebuild + expiry moved into the shard sets
+		// (firewall/shard.go counterSet.Sweep). It used to hold ONE global
+		// write lock across all three families, so every request's window
+		// increment queued behind this once-per-five-seconds map walk; each
+		// family now sweeps under its own shards, and the request path only
+		// queues behind the shard its key lives on.
+		firewall.IPs.Sweep(now, last10, proxy.RatelimitWindow)
+		firewall.IPsCookie.Sweep(now, last10, proxy.RatelimitWindow)
+		firewall.UnkFps.Sweep(now, last10, proxy.RatelimitWindow)
 		proxy.Initialised.Store(true) // CONC-06: atomic, polled cross-goroutine from main
 
 		//log.Printf("I Ran. I'm supposed to run every 5 seconds. If that didn't happen we're in deep shit")

@@ -29,7 +29,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/azferius/lancarsec/core/domains"
@@ -199,7 +201,7 @@ func BenchmarkMiddlewareHotPathParallel(b *testing.B) {
 func BenchmarkMiddlewareDecisionPath(b *testing.B) {
 	env := mwNewBenchEnv(b)
 	env.mwSetStage(1)
-	firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+	firewall.IPs.Set(mwIP, proxy.IPRatelimit+1)
 
 	req := mwRequest("/")
 	w := mwNewNullWriter()
@@ -218,13 +220,55 @@ func BenchmarkMiddlewareDecisionPath(b *testing.B) {
 func BenchmarkMiddlewareDecisionPathParallel(b *testing.B) {
 	env := mwNewBenchEnv(b)
 	env.mwSetStage(1)
-	firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+	firewall.IPs.Set(mwIP, proxy.IPRatelimit+1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		w := mwNewNullWriter()
 		req := mwRequest("/")
+		for pb.Next() {
+			Middleware(w, req)
+		}
+	})
+}
+
+// BenchmarkMiddlewareDecisionPathParallelDistinctKeys is the benchmark wave 12
+// exists for.
+//
+// Its twin above runs every goroutine on ONE client address, which since wave
+// 12 means one shard: the requests serialise on that shard's lock exactly as
+// they used to serialise on the global one, so it measures the case sharding
+// cannot help (and must not regress). Real load is the opposite - a flood
+// arrives from many addresses - and that is what this measures: each goroutine
+// owns a distinct address, so its window increment takes a different shard lock
+// and touches different map memory.
+//
+// The pair (this vs the shared-key twin) is the sharding signal. Comparing
+// either against the wave-3 baseline alone is not, because the baseline had one
+// lock for both cases.
+func BenchmarkMiddlewareDecisionPathParallelDistinctKeys(b *testing.B) {
+	env := mwNewBenchEnv(b)
+	env.mwSetStage(1)
+
+	// 256 pre-ratelimited addresses; a goroutine claims one by index. More
+	// addresses than GOMAXPROCS ever is, so no two goroutines share a key.
+	const keys = 256
+	addrs := make([]string, keys)
+	for i := range addrs {
+		ip := "203.0.113." + strconv.Itoa(i)
+		addrs[i] = ip + ":51000"
+		firewall.IPs.Set(ip, proxy.IPRatelimit+1)
+	}
+
+	var next atomic.Int64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := mwNewNullWriter()
+		req := mwRequest("/")
+		req.RemoteAddr = addrs[int(next.Add(1)-1)%keys]
 		for pb.Next() {
 			Middleware(w, req)
 		}

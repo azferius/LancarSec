@@ -164,38 +164,37 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		botFp = ""
 		fpCount = 0
 
-		firewall.Mutex.RLock()
-		ipCount = firewall.AccessIps[rateKey]
-		ipCountCookie = firewall.AccessIpsCookie[rateKey]
-		firewall.Mutex.RUnlock()
+		// WAVE 12: the keyed counters moved to sharded locks (firewall/shard.go).
+		// Count takes its own shard RLock; different clients no longer contend.
+		ipCount = firewall.IPs.Count(rateKey)
+		ipCountCookie = firewall.IPsCookie.Count(rateKey)
 	} else {
 		//Retrieve information about the client. firewall.Connections is keyed
 		//on the raw socket address, not on the subject IP: it is populated by
 		//the TLS handshake for this exact connection, so it is the one lookup
 		//that must NOT use realClientIP.
-		firewall.Mutex.RLock()
-		tlsFp = firewall.Connections[request.RemoteAddr]
-		fpCount = firewall.UnkFps[tlsFp]
-		ipCount = firewall.AccessIps[rateKey]
-		ipCountCookie = firewall.AccessIpsCookie[rateKey]
-		firewall.Mutex.RUnlock()
+		// WAVE 12: each family reads under its own shard lock; a request never
+		// holds two shard locks at once.
+		tlsFp, _ = firewall.Connections.Get(request.RemoteAddr)
+		fpCount = firewall.UnkFps.Count(tlsFp)
+		ipCount = firewall.IPs.Count(rateKey)
+		ipCountCookie = firewall.IPsCookie.Count(rateKey)
 
 		//Read-Only IMPORTANT: Must be put in mutex if you add the ability to change indexed fingerprints while program is running
 		browser = firewall.KnownFingerprints[tlsFp]
 		botFp = firewall.BotFingerprints[tlsFp]
 	}
 
-	firewall.Mutex.Lock()
-	// CONC-01: bucket creation is lazy inside firewall.IncrWindow. The monitor
-	// prefill is advisory; if it lags past the 120 s horizon this must not
-	// panic on a nil inner map while holding the write lock (the lock would
-	// never be released, freezing the whole proxy). CONC-04: new keys are
+	// CONC-01: bucket creation is lazy inside counterSet.IncrWindow. The
+	// monitor prefill is advisory; if it lags past the 120 s horizon this must
+	// not panic on a nil inner map while holding a lock. CONC-04: new keys are
 	// dropped once a bucket hits firewall.windowKeyCap.
-	firewall.IncrWindow(firewall.WindowAccessIps, int(proxy.Last10SecondTimestamp()), rateKey)
-	domainData = domains.DomainsData[domainName]
-	domainData.TotalRequests++
-	domains.DomainsData[domainName] = domainData
-	firewall.Mutex.Unlock()
+	// WAVE 12: the window increment takes its key's shard lock (1/16th
+	// contention), and the total moved to a lock-free atomic counter
+	// (domains/counters.go) - the old struct read-modify-write-back copied the
+	// whole DomainData behind the global write lock once per request.
+	firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), rateKey)
+	domains.AddDomainTotal(domainName)
 
 	// WAVE 10 (BRAND): the version header is hidden by default - a mitigation
 	// product should not announce its exact build to the attacker probing it.
@@ -317,10 +316,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 
-			firewall.Mutex.Lock()
 			// CONC-01/CONC-04: lazy creation + distinct-key cap, see IncrWindow.
-			firewall.IncrWindow(firewall.WindowUnkFps, int(proxy.Last10SecondTimestamp()), tlsFp)
-			firewall.Mutex.Unlock()
+			// WAVE 12: shard lock, not the global mutex.
+			firewall.UnkFps.IncrWindow(int(proxy.Last10SecondTimestamp()), tlsFp)
 		}
 	}
 
@@ -434,10 +432,9 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// moment it exceeded FailChallengeRatelimit (40 requests per window by
 		// default), which is the precise opposite of what `action: 0` means.
 		if susLv > 0 {
-			firewall.Mutex.Lock()
 			// CONC-01/CONC-04: lazy creation + distinct-key cap, see IncrWindow.
-			firewall.IncrWindow(firewall.WindowAccessIpsCookie, int(proxy.Last10SecondTimestamp()), rateKey)
-			firewall.Mutex.Unlock()
+			// WAVE 12: shard lock, not the global mutex.
+			firewall.IPsCookie.IncrWindow(int(proxy.Last10SecondTimestamp()), rateKey)
 		}
 
 		//Respond with verification challenge if client didnt provide correct result/none
@@ -478,6 +475,10 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		loggedURI = strings.ReplaceAll(loggedURI, apiSecret, "[redacted]")
 	}
 
+	// WAVE 12: the log append stays behind firewall.Mutex (a per-domain slice
+	// append has to serialise per domain anyway, and its critical section is a
+	// couple of slice writes) - but the bypassed count moved to a lock-free
+	// atomic, so the old struct copy in and back out of DomainsData is gone.
 	firewall.Mutex.Lock()
 	utils.AddLogs(domains.DomainLog{
 		Time:      proxy.LastSecondTimeFormatted(),
@@ -488,11 +489,8 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		Useragent: reqUa,
 		Path:      loggedURI,
 	}, domainName)
-
-	domainData = domains.DomainsData[domainName]
-	domainData.BypassedRequests++
-	domains.DomainsData[domainName] = domainData
 	firewall.Mutex.Unlock()
+	domains.AddDomainBypassed(domainName)
 
 	//Reserved proxy-paths
 
@@ -513,7 +511,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writer.Header().Set("Content-Type", "text/plain")
-		SendResponse("Stage: "+utils.StageToString(domainData.Stage)+"\nTotal Requests: "+strconv.Itoa(domainData.TotalRequests)+"\nBypassed Requests: "+strconv.Itoa(domainData.BypassedRequests)+"\nTotal R/s: "+strconv.Itoa(domainData.RequestsPerSecond)+"\nBypassed R/s: "+strconv.Itoa(domainData.RequestsBypassedPerSecond)+"\nProxy Fingerprint: "+proxy.Fingerprint, buffer, writer)
+		SendResponse("Stage: "+utils.StageToString(domainData.Stage)+"\nTotal Requests: "+strconv.FormatInt(domains.DomainTotal(domainName), 10)+"\nBypassed Requests: "+strconv.FormatInt(domains.DomainBypassed(domainName), 10)+"\nTotal R/s: "+strconv.Itoa(domainData.RequestsPerSecond)+"\nBypassed R/s: "+strconv.Itoa(domainData.RequestsBypassedPerSecond)+"\nProxy Fingerprint: "+proxy.Fingerprint, buffer, writer)
 		return
 	case "/_lancarsec/fingerprint", "/_bProxy/fingerprint":
 		if !authorisedProxyEndpoint(request) {

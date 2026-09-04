@@ -122,12 +122,9 @@ func mwSaveGlobals(tb testing.TB) {
 	oldDomainsData := domains.DomainsData
 
 	oldMutex := firewall.Mutex
-	oldAccessIps := firewall.AccessIps
-	oldAccessIpsCookie := firewall.AccessIpsCookie
+	oldIPs := firewall.IPs
+	oldIPsCookie := firewall.IPsCookie
 	oldUnkFps := firewall.UnkFps
-	oldWindowAccessIps := firewall.WindowAccessIps
-	oldWindowAccessIpsCookie := firewall.WindowAccessIpsCookie
-	oldWindowUnkFps := firewall.WindowUnkFps
 	oldConnections := firewall.Connections
 	oldKnown := firewall.KnownFingerprints
 	oldBot := firewall.BotFingerprints
@@ -149,19 +146,23 @@ func mwSaveGlobals(tb testing.TB) {
 	oldCPU := proxy.CpuUsage()
 	oldRAM := proxy.RamUsage()
 
+	// WAVE 12: the per-domain request counters are a package-global atomic map
+	// keyed on the domain name, so unlike the DomainsData row they survive
+	// every other reset here. Tests share mwDomain, so they must start and end
+	// from zero.
+	domains.ResetCounters()
+
 	tb.Cleanup(func() {
+		domains.ResetCounters()
 		domains.Publish(oldConfig)
 		domains.Domains = oldDomainList
 		domains.DomainsData = oldDomainsData
 		domains.DomainsMap = sync.Map{}
 
 		firewall.Mutex = oldMutex
-		firewall.AccessIps = oldAccessIps
-		firewall.AccessIpsCookie = oldAccessIpsCookie
+		firewall.IPs = oldIPs
+		firewall.IPsCookie = oldIPsCookie
 		firewall.UnkFps = oldUnkFps
-		firewall.WindowAccessIps = oldWindowAccessIps
-		firewall.WindowAccessIpsCookie = oldWindowAccessIpsCookie
-		firewall.WindowUnkFps = oldWindowUnkFps
 		firewall.Connections = oldConnections
 		firewall.KnownFingerprints = oldKnown
 		firewall.BotFingerprints = oldBot
@@ -229,13 +230,11 @@ func mwNewEnv(tb testing.TB) *mwEnv {
 
 	// --- firewall state (as evaluateRatelimit() would leave it) ---
 	firewall.Mutex = &sync.RWMutex{}
-	firewall.AccessIps = map[string]int{}
-	firewall.AccessIpsCookie = map[string]int{}
-	firewall.UnkFps = map[string]int{}
-	firewall.WindowAccessIps = map[int]map[string]int{mwTimestamp: {}}
-	firewall.WindowAccessIpsCookie = map[int]map[string]int{mwTimestamp: {}}
-	firewall.WindowUnkFps = map[int]map[string]int{mwTimestamp: {}}
-	firewall.Connections = map[string]string{mwRemoteAddr: mwFP}
+	firewall.IPs = firewall.NewCounterSet()
+	firewall.IPsCookie = firewall.NewCounterSet()
+	firewall.UnkFps = firewall.NewCounterSet()
+	firewall.Connections = firewall.NewConnSet()
+	firewall.Connections.Set(mwRemoteAddr, mwFP)
 	// Fresh (empty) fingerprint tables so tests control browser/bot/forbidden
 	// classification instead of depending on the bundled upstream tables.
 	firewall.KnownFingerprints = map[string]string{}
@@ -510,7 +509,7 @@ func TestMiddlewareUnknownDomain(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := env.mwDomainData().TotalRequests
+			before := domains.DomainTotal(mwDomain)
 			rec := mwDo(mwRequest("/", mwWithHost(tc.host)))
 
 			// WAVE 9: FLIPPED. The "not found" path used to answer 200 OK with a
@@ -533,7 +532,7 @@ func TestMiddlewareUnknownDomain(t *testing.T) {
 			if env.mwBackendHits() != 0 {
 				t.Errorf("backend was reached on the unknown-domain path")
 			}
-			if after := env.mwDomainData().TotalRequests; after != before {
+			if after := domains.DomainTotal(mwDomain); after != before {
 				t.Errorf("TotalRequests changed (%d -> %d) for an unknown domain", before, after)
 			}
 		})
@@ -553,18 +552,16 @@ func TestMiddlewareCountersAndWindows(t *testing.T) {
 	mwAssertStatus(t, rec, http.StatusFound)
 
 	d := env.mwDomainData()
-	if d.TotalRequests != 1 {
-		t.Errorf("TotalRequests = %d, want 1", d.TotalRequests)
+	if got := domains.DomainTotal(mwDomain); got != 1 {
+		t.Errorf("TotalRequests = %d, want 1", got)
 	}
-	if d.BypassedRequests != 0 {
-		t.Errorf("BypassedRequests = %d, want 0 (request was challenged)", d.BypassedRequests)
+	if got := domains.DomainBypassed(mwDomain); got != 0 {
+		t.Errorf("BypassedRequests = %d, want 0 (request was challenged)", got)
 	}
 
-	firewall.Mutex.RLock()
-	accessCount := firewall.WindowAccessIps[mwTimestamp][mwIP]
-	cookieCount := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
-	unkFpCount := firewall.WindowUnkFps[mwTimestamp][mwFP]
-	firewall.Mutex.RUnlock()
+	accessCount := firewall.IPs.WindowCount(mwTimestamp, mwIP)
+	cookieCount := firewall.IPsCookie.WindowCount(mwTimestamp, mwIP)
+	unkFpCount := firewall.UnkFps.WindowCount(mwTimestamp, mwFP)
 
 	if accessCount != 1 {
 		t.Errorf("WindowAccessIps[%d][%s] = %d, want 1", mwTimestamp, mwIP, accessCount)
@@ -587,11 +584,11 @@ func TestMiddlewareCountersAndWindows(t *testing.T) {
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
 	d = env.mwDomainData()
-	if d.TotalRequests != 2 {
-		t.Errorf("TotalRequests = %d, want 2", d.TotalRequests)
+	if got := domains.DomainTotal(mwDomain); got != 2 {
+		t.Errorf("TotalRequests = %d, want 2", got)
 	}
-	if d.BypassedRequests != 1 {
-		t.Errorf("BypassedRequests = %d, want 1", d.BypassedRequests)
+	if got := domains.DomainBypassed(mwDomain); got != 1 {
+		t.Errorf("BypassedRequests = %d, want 1", got)
 	}
 	if len(d.LastLogs) != 1 {
 		t.Fatalf("LastLogs = %d entries, want 1 (only bypassed requests are logged)", len(d.LastLogs))
@@ -600,9 +597,7 @@ func TestMiddlewareCountersAndWindows(t *testing.T) {
 		t.Errorf("log entry = %+v, want ip/fp/ua of the test client", d.LastLogs[0])
 	}
 
-	firewall.Mutex.RLock()
-	cookieCount = firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
-	firewall.Mutex.RUnlock()
+	cookieCount = firewall.IPsCookie.WindowCount(mwTimestamp, mwIP)
 	if cookieCount != 1 {
 		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 1 (a passing request must not count as a challenge failure)", mwTimestamp, mwIP, cookieCount)
 	}
@@ -628,10 +623,8 @@ func TestMiddlewareWhitelistIsNotCountedAsAChallengeFailure(t *testing.T) {
 		mwAssertBodyContains(t, rec, mwBackendBody)
 	}
 
-	firewall.Mutex.RLock()
-	cookieCount := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
-	accessCount := firewall.WindowAccessIps[mwTimestamp][mwIP]
-	firewall.Mutex.RUnlock()
+	cookieCount := firewall.IPsCookie.WindowCount(mwTimestamp, mwIP)
+	accessCount := firewall.IPs.WindowCount(mwTimestamp, mwIP)
 
 	if cookieCount != 0 {
 		t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 0 (a whitelisted request was never challenged, so it cannot have failed a challenge)", mwTimestamp, mwIP, cookieCount)
@@ -665,9 +658,7 @@ func TestMiddlewareMissingWindowBucketIsCreatedLazily(t *testing.T) {
 	// that a missing bucket degrades counting, not serving.
 	env.mwSetStage(0)
 
-	firewall.Mutex.Lock()
-	delete(firewall.WindowAccessIps, mwTimestamp)
-	firewall.Mutex.Unlock()
+	firewall.IPs.DropWindow(mwTimestamp)
 
 	rec := httptest.NewRecorder()
 	got := mwRecover(func() { Middleware(rec, mwRequest("/")) })
@@ -677,10 +668,7 @@ func TestMiddlewareMissingWindowBucketIsCreatedLazily(t *testing.T) {
 	mwAssertStatus(t, rec, http.StatusOK)
 	mwAssertBodyContains(t, rec, mwBackendBody)
 
-	firewall.Mutex.RLock()
-	_, present := firewall.WindowAccessIps[mwTimestamp][mwIP]
-	firewall.Mutex.RUnlock()
-	if !present {
+	if firewall.IPs.WindowCount(mwTimestamp, mwIP) != 1 {
 		t.Fatalf("WindowAccessIps[%d][%s] was not created by the request; lazy creation missing", mwTimestamp, mwIP)
 	}
 
@@ -741,7 +729,7 @@ func TestMiddlewareDomainsMapMissingReturns404(t *testing.T) {
 	if v := rec.Result().Header.Get("LancarSec-Proxy"); v != "1.5" {
 		t.Errorf("LancarSec-Proxy = %q, want 1.5", v)
 	}
-	if got := env.mwDomainData().TotalRequests; got != 1 {
+	if got := domains.DomainTotal(mwDomain); got != 1 {
 		t.Errorf("TotalRequests = %d, want 1", got)
 	}
 	if !firewall.Mutex.TryLock() {
@@ -801,38 +789,38 @@ func TestMiddlewareRatelimits(t *testing.T) {
 		{
 			name: "R1 repeated challenge failures",
 			setup: func(t *testing.T, env *mwEnv) {
-				firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1
+				firewall.IPsCookie.Set(mwIP, proxy.FailChallengeRatelimit+1)
 			},
 			wantBody: "You have been ratelimited. (R1)",
 		},
 		{
 			name: "R2 request flood from one ip",
 			setup: func(t *testing.T, env *mwEnv) {
-				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
+				firewall.IPs.Set(mwIP, proxy.IPRatelimit+1)
 			},
 			wantBody: "You have been ratelimited. (R2)",
 		},
 		{
 			name: "R3 unknown fingerprint flood",
 			setup: func(t *testing.T, env *mwEnv) {
-				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+				firewall.UnkFps.Set(mwFP, proxy.FPRatelimit+1)
 			},
 			wantBody: "You have been ratelimited. (R3)",
 		},
 		{
 			name: "R1 wins over R2 and R3",
 			setup: func(t *testing.T, env *mwEnv) {
-				firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1
-				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
-				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+				firewall.IPsCookie.Set(mwIP, proxy.FailChallengeRatelimit+1)
+				firewall.IPs.Set(mwIP, proxy.IPRatelimit+1)
+				firewall.UnkFps.Set(mwFP, proxy.FPRatelimit+1)
 			},
 			wantBody: "You have been ratelimited. (R1)",
 		},
 		{
 			name: "R2 wins over R3",
 			setup: func(t *testing.T, env *mwEnv) {
-				firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1
-				firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1
+				firewall.IPs.Set(mwIP, proxy.IPRatelimit+1)
+				firewall.UnkFps.Set(mwFP, proxy.FPRatelimit+1)
 			},
 			wantBody: "You have been ratelimited. (R2)",
 		},
@@ -871,7 +859,7 @@ func TestMiddlewareRatelimits(t *testing.T) {
 				t.Error("backend was reached despite the ratelimit")
 			}
 			// Ratelimited requests still count towards TotalRequests.
-			if got := env.mwDomainData().TotalRequests; got != 1 {
+			if got := domains.DomainTotal(mwDomain); got != 1 {
 				t.Errorf("TotalRequests = %d, want 1", got)
 			}
 
@@ -896,14 +884,12 @@ func TestMiddlewareRatelimits(t *testing.T) {
 				t.Errorf("Set-Cookie = %q, want empty: a ratelimited request must not be handed a challenge token", sc)
 			}
 
-			firewall.Mutex.RLock()
-			cookieWindow := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
-			firewall.Mutex.RUnlock()
+			cookieWindow := firewall.IPsCookie.WindowCount(mwTimestamp, mwIP)
 			if cookieWindow != 0 {
 				t.Errorf("WindowAccessIpsCookie[%d][%s] = %d, want 0: a ratelimited request must return before the cookie check", mwTimestamp, mwIP, cookieWindow)
 			}
-			if d := env.mwDomainData(); d.BypassedRequests != 0 || len(d.LastLogs) != 0 {
-				t.Errorf("BypassedRequests = %d, LastLogs = %d entries; want 0/0 for a ratelimited request", d.BypassedRequests, len(d.LastLogs))
+			if bypassed := domains.DomainBypassed(mwDomain); bypassed != 0 || len(env.mwDomainData().LastLogs) != 0 {
+				t.Errorf("BypassedRequests = %d, LastLogs = %d entries; want 0/0 for a ratelimited request", bypassed, len(env.mwDomainData().LastLogs))
 			}
 		})
 	}
@@ -924,12 +910,12 @@ func TestMiddlewareRatelimitBoundaries(t *testing.T) {
 		set     func()
 		blocked bool
 	}{
-		{name: "ip count equals limit", set: func() { firewall.AccessIps[mwIP] = 500 }, blocked: false},
-		{name: "ip count one over limit", set: func() { firewall.AccessIps[mwIP] = 501 }, blocked: true},
-		{name: "cookie count equals limit", set: func() { firewall.AccessIpsCookie[mwIP] = 40 }, blocked: false},
-		{name: "cookie count one over limit", set: func() { firewall.AccessIpsCookie[mwIP] = 41 }, blocked: true},
-		{name: "unknown fp equals limit", set: func() { firewall.UnkFps[mwFP] = 150 }, blocked: false},
-		{name: "unknown fp one over limit", set: func() { firewall.UnkFps[mwFP] = 151 }, blocked: true},
+		{name: "ip count equals limit", set: func() { firewall.IPs.Set(mwIP, 500) }, blocked: false},
+		{name: "ip count one over limit", set: func() { firewall.IPs.Set(mwIP, 501) }, blocked: true},
+		{name: "cookie count equals limit", set: func() { firewall.IPsCookie.Set(mwIP, 40) }, blocked: false},
+		{name: "cookie count one over limit", set: func() { firewall.IPsCookie.Set(mwIP, 41) }, blocked: true},
+		{name: "unknown fp equals limit", set: func() { firewall.UnkFps.Set(mwFP, 150) }, blocked: false},
+		{name: "unknown fp one over limit", set: func() { firewall.UnkFps.Set(mwFP, 151) }, blocked: true},
 	}
 
 	for _, tc := range cases {
@@ -979,9 +965,9 @@ func TestMiddlewareWhitelistRuleBeatsTheRatelimits(t *testing.T) {
 	env.mwSetRules([2]string{`http.path eq "/health"`, "0"})
 
 	// Every one of the three limiters is over its threshold for this client.
-	firewall.AccessIps[mwIP] = proxy.IPRatelimit + 1000
-	firewall.AccessIpsCookie[mwIP] = proxy.FailChallengeRatelimit + 1000
-	firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1000
+	firewall.IPs.Set(mwIP, proxy.IPRatelimit+1000)
+	firewall.IPsCookie.Set(mwIP, proxy.FailChallengeRatelimit+1000)
+	firewall.UnkFps.Set(mwFP, proxy.FPRatelimit+1000)
 
 	rec := mwDo(mwRequest("/health"))
 	mwAssertStatus(t, rec, http.StatusOK)
@@ -1005,15 +991,13 @@ func TestMiddlewareKnownBrowserSkipsFingerprintRatelimit(t *testing.T) {
 	env := mwNewEnv(t)
 	env.mwSetStage(0)
 	firewall.KnownFingerprints[mwFP] = "Chromium"
-	firewall.UnkFps[mwFP] = proxy.FPRatelimit + 1000
+	firewall.UnkFps.Set(mwFP, proxy.FPRatelimit+1000)
 
 	rec := mwDo(mwRequest("/"))
 	mwAssertBodyContains(t, rec, mwBackendBody)
 	mwAssertBodyNotContains(t, rec, "(R3)")
 
-	firewall.Mutex.RLock()
-	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
-	firewall.Mutex.RUnlock()
+	unk := firewall.UnkFps.WindowCount(mwTimestamp, mwFP)
 	if unk != 0 {
 		t.Errorf("WindowUnkFps[%d][%s] = %d, want 0 for a known browser", mwTimestamp, mwFP, unk)
 	}
@@ -1054,9 +1038,7 @@ func TestMiddlewareForbiddenFingerprint(t *testing.T) {
 	// TLS fingerprint, which is shared by every client running the same browser
 	// build. Counting whitelisted traffic there let an operator's own
 	// high-volume, single-fingerprint monitoring drive R3 against strangers.
-	firewall.Mutex.RLock()
-	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
-	firewall.Mutex.RUnlock()
+	unk := firewall.UnkFps.WindowCount(mwTimestamp, mwFP)
 	if unk != 0 {
 		t.Errorf("WindowUnkFps[%d][%s] = %d, want 0 for a whitelisted request", mwTimestamp, mwFP, unk)
 	}
@@ -1092,9 +1074,7 @@ func TestMiddlewareUnknownFingerprintWindowIsCountedWhenChallenged(t *testing.T)
 
 	mwDo(mwRequest("/"))
 
-	firewall.Mutex.RLock()
-	unk := firewall.WindowUnkFps[mwTimestamp][mwFP]
-	firewall.Mutex.RUnlock()
+	unk := firewall.UnkFps.WindowCount(mwTimestamp, mwFP)
 	if unk != 1 {
 		t.Errorf("WindowUnkFps[%d][%s] = %d, want 1", mwTimestamp, mwFP, unk)
 	}
@@ -1755,8 +1735,8 @@ func TestMiddlewareReservedPaths(t *testing.T) {
 	t.Run("fingerprint", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(0)
-		firewall.AccessIps[mwIP] = 7
-		firewall.AccessIpsCookie[mwIP] = 3
+		firewall.IPs.Set(mwIP, 7)
+		firewall.IPsCookie.Set(mwIP, 3)
 		firewall.KnownFingerprints[mwFP] = "Chromium"
 		firewall.BotFingerprints[mwFP] = "-bot"
 
@@ -1923,8 +1903,8 @@ func TestMiddlewareStatsReportsTotalAndBypassedSeparately(t *testing.T) {
 	mwAssertBodyContains(t, rec, "Total Requests: 5")
 	mwAssertBodyContains(t, rec, "Bypassed Requests: 2")
 
-	if d := env.mwDomainData(); d.TotalRequests != 5 || d.BypassedRequests != 2 {
-		t.Fatalf("fixture drifted: TotalRequests = %d (want 5), BypassedRequests = %d (want 2)", d.TotalRequests, d.BypassedRequests)
+	if got, want := domains.DomainTotal(mwDomain), int64(5); got != want {
+		t.Fatalf("fixture drifted: TotalRequests = %d (want %d), BypassedRequests = %d (want 2)", got, want, domains.DomainBypassed(mwDomain))
 	}
 	if env.mwBackendHits() != 1 {
 		t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
@@ -2351,10 +2331,8 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		mwAssertBodyContains(t, rec, "Fingerprint: Cloudflare")
 		mwAssertBodyContains(t, rec, "Browser: Cloudflare")
 
-		firewall.Mutex.RLock()
-		unk := len(firewall.WindowUnkFps[mwTimestamp])
-		access := firewall.WindowAccessIps[mwTimestamp]["198.51.100.44"]
-		firewall.Mutex.RUnlock()
+		unk := firewall.UnkFps.WindowKeyCount(mwTimestamp)
+		access := firewall.IPs.WindowCount(mwTimestamp, "198.51.100.44")
 		if unk != 0 {
 			t.Errorf("WindowUnkFps has %d entries, want 0 in cloudflare mode", unk)
 		}
@@ -2380,7 +2358,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		domains.Current().Proxy.Cloudflare = true
 		proxy.Cloudflare = true
 		env.mwSetStage(1)
-		firewall.AccessIps["192.0.2.99"] = proxy.IPRatelimit + 1 // the real peer is ratelimited
+		firewall.IPs.Set("192.0.2.99", proxy.IPRatelimit+1) // the real peer is ratelimited
 
 		rec := mwDo(mwRequest("/",
 			mwWithRemoteAddr("192.0.2.99:1234"),
@@ -2433,9 +2411,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		// it, and R3 must stay off behind Cloudflare.
 		mwAssertBodyContains(t, rec, "Browser: Cloudflare")
 
-		firewall.Mutex.RLock()
-		unk := len(firewall.WindowUnkFps[mwTimestamp])
-		firewall.Mutex.RUnlock()
+		unk := firewall.UnkFps.WindowKeyCount(mwTimestamp)
 		if unk != 0 {
 			t.Errorf("WindowUnkFps has %d entries, want 0 in cloudflare mode", unk)
 		}
@@ -2469,7 +2445,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			// no longer subject to the ratelimits at all, so a stage-0 setup
 			// would prove nothing about which counter R1 reads.
 			env.mwSetStage(1)
-			firewall.AccessIpsCookie[cfIP] = proxy.FailChallengeRatelimit + 1
+			firewall.IPsCookie.Set(cfIP, proxy.FailChallengeRatelimit+1)
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
@@ -2487,7 +2463,7 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			proxy.Cloudflare = true
 			mwTrustPeers(t, mwIP+"/32")
 			env.mwSetStage(1) // FLIPPED BY WAVE 6, as above
-			firewall.AccessIps[cfIP] = proxy.IPRatelimit + 1
+			firewall.IPs.Set(cfIP, proxy.IPRatelimit+1)
 
 			rec := mwDo(mwRequest("/", mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
@@ -2505,8 +2481,8 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 			proxy.Cloudflare = true
 			mwTrustPeers(t, mwIP+"/32")
 			env.mwSetStage(0)
-			firewall.AccessIps[cfIP] = 7
-			firewall.AccessIpsCookie[cfIP] = 3
+			firewall.IPs.Set(cfIP, 7)
+			firewall.IPsCookie.Set(cfIP, 3)
 
 			rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret(), mwWithHeader("Cf-Connecting-Ip", cfIP)))
 
@@ -2533,10 +2509,8 @@ func TestMiddlewareCloudflareMode(t *testing.T) {
 		rec := mwDo(mwRequest("/_lancarsec/fingerprint", mwWithAPISecret()))
 		mwAssertBodyContains(t, rec, "IP: "+mwIP+"\n")
 
-		firewall.Mutex.RLock()
-		empty := firewall.WindowAccessIps[mwTimestamp][""]
-		peer := firewall.WindowAccessIps[mwTimestamp][mwIP]
-		firewall.Mutex.RUnlock()
+		empty := firewall.IPs.WindowCount(mwTimestamp, "")
+		peer := firewall.IPs.WindowCount(mwTimestamp, mwIP)
 		if empty != 0 {
 			t.Errorf(`WindowAccessIps[%d][""] = %d, want 0: nothing may be counted under the empty key`, mwTimestamp, empty)
 		}
@@ -2585,12 +2559,10 @@ func TestMiddlewareIPv6IsParsedAndKeyedOnTheSlash64(t *testing.T) {
 		mwAssertBodyContains(t, rec, "Ratelimit Key: "+tc.wantKey+"\n")
 	}
 
-	firewall.Mutex.RLock()
-	sameSlash64 := firewall.WindowAccessIps[mwTimestamp]["2001:db8:1:2::/64"]
-	otherSlash64 := firewall.WindowAccessIps[mwTimestamp]["2001:db8:1:3::/64"]
-	v4 := firewall.WindowAccessIps[mwTimestamp]["198.51.100.9"]
-	mangled := firewall.WindowAccessIps[mwTimestamp]["[2001"]
-	firewall.Mutex.RUnlock()
+	sameSlash64 := firewall.IPs.WindowCount(mwTimestamp, "2001:db8:1:2::/64")
+	otherSlash64 := firewall.IPs.WindowCount(mwTimestamp, "2001:db8:1:3::/64")
+	v4 := firewall.IPs.WindowCount(mwTimestamp, "198.51.100.9")
+	mangled := firewall.IPs.WindowCount(mwTimestamp, "[2001")
 
 	if sameSlash64 != 2 {
 		t.Errorf(`WindowAccessIps[%d]["2001:db8:1:2::/64"] = %d, want 2 (both addresses in one allocation count together)`, mwTimestamp, sameSlash64)
@@ -2724,20 +2696,18 @@ func TestMiddlewareConcurrentCountersAreExact(t *testing.T) {
 	wg.Wait()
 
 	d := env.mwDomainData()
-	if d.TotalRequests != total {
-		t.Errorf("TotalRequests = %d, want %d: %d increments were lost, so the counter bump is not a read-modify-write against current shared state", d.TotalRequests, total, total-d.TotalRequests)
+	if got := domains.DomainTotal(mwDomain); got != total {
+		t.Errorf("TotalRequests = %d, want %d: %d increments were lost, so the counter bump is not atomic", got, total, total-got)
 	}
-	if d.BypassedRequests != total {
-		t.Errorf("BypassedRequests = %d, want %d: %d increments were lost", d.BypassedRequests, total, total-d.BypassedRequests)
+	if got := domains.DomainBypassed(mwDomain); got != total {
+		t.Errorf("BypassedRequests = %d, want %d: %d increments were lost", got, total, total-got)
 	}
 	if len(d.LastLogs) != total {
 		t.Errorf("LastLogs = %d entries, want %d: appends to the shared log slice were lost", len(d.LastLogs), total)
 	}
 
-	firewall.Mutex.RLock()
-	access := firewall.WindowAccessIps[mwTimestamp][mwIP]
-	cookie := firewall.WindowAccessIpsCookie[mwTimestamp][mwIP]
-	firewall.Mutex.RUnlock()
+	access := firewall.IPs.WindowCount(mwTimestamp, mwIP)
+	cookie := firewall.IPsCookie.WindowCount(mwTimestamp, mwIP)
 	if access != total {
 		t.Errorf("WindowAccessIps[%d][%s] = %d, want %d", mwTimestamp, mwIP, access, total)
 	}
@@ -3261,12 +3231,10 @@ func TestMiddlewareRejectsConnect(t *testing.T) {
 
 	// The guard sits above ALL bookkeeping: a refused CONNECT must not move a
 	// counter, take the window lock or issue a token.
-	if got := env.mwDomainData().TotalRequests; got != 0 {
+	if got := domains.DomainTotal(mwDomain); got != 0 {
 		t.Errorf("TotalRequests = %d, want 0: CONNECT was counted before it was refused", got)
 	}
-	firewall.Mutex.RLock()
-	access := len(firewall.WindowAccessIps[mwTimestamp])
-	firewall.Mutex.RUnlock()
+	access := firewall.IPs.WindowKeyCount(mwTimestamp)
 	if access != 0 {
 		t.Errorf("WindowAccessIps has %d entries, want 0", access)
 	}

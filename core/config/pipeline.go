@@ -633,6 +633,7 @@ func publish(s *staged, m mode) {
 			continue
 		}
 		delete(domains.DomainsData, name)
+		domains.DeleteDomainCounters(name) // WAVE 12: atomics outlive the struct; forget them here so re-adding starts from zero
 		domains.DomainsMap.Delete(name)
 		converged = true
 	}

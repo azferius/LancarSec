@@ -122,9 +122,7 @@ func Fingerprint(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	}
 
 	//Remember what connection has what fingerprint for later use
-	Mutex.Lock()
-	Connections[remoteAddr] = fingerprint.String()
-	Mutex.Unlock()
+	Connections.Set(remoteAddr, fingerprint.String())
 
 	return nil, nil
 }

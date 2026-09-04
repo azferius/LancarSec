@@ -58,19 +58,34 @@ func apiEnv(t *testing.T) {
 	})
 	domains.DomainsData[apiDomain] = domains.DomainData{
 		Name:                      apiDomain,
-		TotalRequests:             41,
-		BypassedRequests:          17,
 		RequestsPerSecond:         7,
 		RequestsBypassedPerSecond: 3,
 		LastLogs:                  []domains.DomainLog{{IP: apiClientIP, Path: "/login"}},
 	}
 
-	firewall.Mutex.Lock()
-	oldAccess, oldCookie, oldFps := firewall.AccessIps, firewall.AccessIpsCookie, firewall.UnkFps
-	firewall.AccessIps = map[string]int{apiClientIP: 12, "198.51.100.9": 5}
-	firewall.AccessIpsCookie = map[string]int{apiClientIP: 4}
-	firewall.UnkFps = map[string]int{"unknown-fingerprint": 9}
-	firewall.Mutex.Unlock()
+	// WAVE 12: the totals the API answers with are the lock-free atomics the
+	// request path increments, not DomainData fields, so the fixture counts 41
+	// real requests (17 of them bypassing) through the shipped counters. The
+	// map is package-global, so it is cleared on both sides of the test.
+	domains.ResetCounters()
+	t.Cleanup(domains.ResetCounters)
+	for range 41 {
+		domains.AddDomainTotal(apiDomain)
+	}
+	for range 17 {
+		domains.AddDomainBypassed(apiDomain)
+	}
+
+	// WAVE 12: the counter maps are shard sets now; swap whole sets and seed
+	// them through the set API instead of poking maps under the global lock.
+	oldIPs, oldCookie, oldFps := firewall.IPs, firewall.IPsCookie, firewall.UnkFps
+	firewall.IPs = firewall.NewCounterSet()
+	firewall.IPs.Set(apiClientIP, 12)
+	firewall.IPs.Set("198.51.100.9", 5)
+	firewall.IPsCookie = firewall.NewCounterSet()
+	firewall.IPsCookie.Set(apiClientIP, 4)
+	firewall.UnkFps = firewall.NewCounterSet()
+	firewall.UnkFps.Set("unknown-fingerprint", 9)
 
 	firewall.CacheIps.Store(apiCacheKey, apiCacheToken)
 
@@ -83,9 +98,7 @@ func apiEnv(t *testing.T) {
 		domains.DomainsMap.Delete(apiDomain)
 		delete(domains.DomainsData, apiDomain)
 
-		firewall.Mutex.Lock()
-		firewall.AccessIps, firewall.AccessIpsCookie, firewall.UnkFps = oldAccess, oldCookie, oldFps
-		firewall.Mutex.Unlock()
+		firewall.IPs, firewall.IPsCookie, firewall.UnkFps = oldIPs, oldCookie, oldFps
 
 		firewall.CacheIps.Range(func(key, _ any) bool {
 			firewall.CacheIps.Delete(key)
@@ -102,7 +115,7 @@ func apiV1(t *testing.T, secret, body string) (*httptest.ResponseRecorder, bool)
 		req.Header.Set("proxy-secret", secret)
 	}
 	rec := httptest.NewRecorder()
-	handled := Process(rec, req, domains.DomainData{Name: "other.example", TotalRequests: 999999})
+	handled := Process(rec, req, domains.DomainData{Name: "other.example", RequestsPerSecond: 999999})
 	return rec, handled
 }
 
@@ -666,17 +679,17 @@ func TestCounterActionsDoNotMarshalLiveMaps(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for {
+		// WAVE 12: churn writes go through the shard sets' own locks; the
+		// global mutex no longer covers these maps.
+		for n := 0; ; n++ {
 			select {
 			case <-stop:
 				return
 			default:
 			}
-			firewall.Mutex.Lock()
-			firewall.UnkFps["churn"]++
-			firewall.AccessIps["churn"]++
-			firewall.AccessIpsCookie["churn"]++
-			firewall.Mutex.Unlock()
+			firewall.UnkFps.Set("churn", n)
+			firewall.IPs.Set("churn", n)
+			firewall.IPsCookie.Set("churn", n)
 		}
 	}()
 

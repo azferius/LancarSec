@@ -7,27 +7,27 @@ package server
 // middleware_test.go that shares package `server`.
 //
 // HONESTY NOTE (read this before trusting the ratelimit coverage below):
-// `evaluateRatelimit` is `for { ...; time.Sleep(5 * time.Second) }`. It cannot
-// be called in-process without either leaking a goroutine that keeps mutating
-// package globals underneath every later test in this package (guaranteed
-// -race failures) or parking it on firewall.Mutex forever (guaranteed deadlock
-// of the whole test binary). So most of the sliding-window arithmetic below is
-// driven through `rlPrefillWindows` + `rlSweepWindows`, which are a
-// line-for-line transcription of the loop body. Those tests are a SPEC, not an
-// exercise of the shipped code: an edit inside `func evaluateRatelimit` alone
-// leaves every one of them passing.
+// `evaluateRatelimit` is still `for { ...; time.Sleep(5 * time.Second) }` and
+// cannot be called in-process without leaking a goroutine that keeps mutating
+// package state underneath every later test in this package. But WAVE 12 moved
+// the loop BODY into `firewall.counterSet.Sweep`, a method that CAN be called
+// in-process (each family sweeps under its own shard locks; no global lock).
+// `rlSweepWindows` below therefore calls the SHIPPED Sweep for all three
+// families — the old line-for-line transcription is gone, the real code runs.
 //
-// TestRatelimitEvaluateRatelimitOnePass closes that gap. It runs the REAL
-// function once in a child process - which can afford the goroutine leak,
-// because the process exits - and asserts the prefill horizon, the expiry
-// direction and the summation on the output. Keep it: without it the
-// transcription is unanchored.
+// TestRatelimitEvaluateRatelimitOnePass keeps its child process. It pins the
+// WIRING the in-process calls cannot see: that evaluateRatelimit reads the
+// clock off the atomic publisher, sweeps all three families, and publishes
+// proxy.Initialised after the sweeps. Without it the Sweep calls are anchored
+// only to each other, not to the function that is supposed to drive them.
 //
-// Directly exercised (real production functions, no transcription):
-//   utils.TrimTime, evaluateRatelimit (via the child process), checkAttack,
-//   utils.SendWebhook's notification types (via checkAttack, in a
-//   network-isolated child process), and the nil-map write shape from
-//   middleware.go:96.
+// Directly exercised (real production code, no transcription):
+//   utils.TrimTime, counterSet.Sweep (via rlSweepWindows), evaluateRatelimit
+//   (via the child process), checkAttack, utils.SendWebhook's notification
+//   types (via checkAttack, in a network-isolated child process). CONC-01's
+//   lazy bucket creation is pinned from the middleware side
+//   (middleware_test.go); the old nil-map panic tests here retired with the
+//   panic shape itself.
 
 import (
 	"context"
@@ -59,17 +59,15 @@ const rlBase = 1700000000
 // ---------------------------------------------------------------------------
 
 // rlSnapshotGlobals saves and restores every package-level global the ratelimit
-// arithmetic touches. evaluateRatelimit replaces the AccessIps/AccessIpsCookie/
-// UnkFps map VARIABLES wholesale each pass, so saving the variables (not their
-// contents) is what restores correctly.
+// arithmetic touches. WAVE 12: the three counter families are shard-set
+// VARIABLES (firewall.IPs / IPsCookie / UnkFps), so like the old maps they are
+// swapped wholesale — saving the variables (not their contents) is what
+// restores correctly.
 func rlSnapshotGlobals(t *testing.T) {
 	t.Helper()
 
-	oldWindowAccessIps := firewall.WindowAccessIps
-	oldWindowAccessIpsCookie := firewall.WindowAccessIpsCookie
-	oldWindowUnkFps := firewall.WindowUnkFps
-	oldAccessIps := firewall.AccessIps
-	oldAccessIpsCookie := firewall.AccessIpsCookie
+	oldIPs := firewall.IPs
+	oldIPsCookie := firewall.IPsCookie
 	oldUnkFps := firewall.UnkFps
 
 	// WAVE 7: the clock is atomics now — there is nothing to snapshot. Every
@@ -81,23 +79,17 @@ func rlSnapshotGlobals(t *testing.T) {
 	proxy.Initialised.Store(false)
 
 	t.Cleanup(func() {
-		firewall.WindowAccessIps = oldWindowAccessIps
-		firewall.WindowAccessIpsCookie = oldWindowAccessIpsCookie
-		firewall.WindowUnkFps = oldWindowUnkFps
-		firewall.AccessIps = oldAccessIps
-		firewall.AccessIpsCookie = oldAccessIpsCookie
+		firewall.IPs = oldIPs
+		firewall.IPsCookie = oldIPsCookie
 		firewall.UnkFps = oldUnkFps
 
 		proxy.RatelimitWindow = oldWindow
 		proxy.Initialised.Store(false)
 	})
 
-	firewall.WindowAccessIps = map[int]map[string]int{}
-	firewall.WindowAccessIpsCookie = map[int]map[string]int{}
-	firewall.WindowUnkFps = map[int]map[string]int{}
-	firewall.AccessIps = map[string]int{}
-	firewall.AccessIpsCookie = map[string]int{}
-	firewall.UnkFps = map[string]int{}
+	firewall.IPs = firewall.NewCounterSet()
+	firewall.IPsCookie = firewall.NewCounterSet()
+	firewall.UnkFps = firewall.NewCounterSet()
 	proxy.RatelimitWindow = 120
 }
 
@@ -108,102 +100,15 @@ func rlSetClock(unix int64) {
 	proxy.UpdateClock(time.Unix(unix, 0))
 }
 
-// rlPrefillWindows is a verbatim transcription of the bucket-prefill loop at
-// the top of evaluateRatelimit's body. Note the hardcoded literal 120 — it is
-// NOT proxy.RatelimitWindow. TestRatelimitPrefillIgnoresConfiguredWindow pins
-// that divergence.
-func rlPrefillWindows() {
-	last10 := int(proxy.Last10SecondTimestamp())
-	for i := last10; i < last10+120; i = i + 10 {
-		if firewall.WindowAccessIps[i] == nil {
-			firewall.WindowAccessIps[i] = map[string]int{}
-		}
-		if firewall.WindowAccessIpsCookie[i] == nil {
-			firewall.WindowAccessIpsCookie[i] = map[string]int{}
-		}
-		if firewall.WindowUnkFps[i] == nil {
-			firewall.WindowUnkFps[i] = map[string]int{}
-		}
-	}
-}
-
-// rlSweepWindows is a verbatim transcription of evaluateRatelimit's expiry +
-// summation pass. The lock, the `proxy.Initialised = true` publish and the
-// 5-second sleep are the only parts omitted.
+// rlSweepWindows runs the SHIPPED sweep — counterSet.Sweep for all three
+// families — the way evaluateRatelimit drives it: prefill horizon, expiry,
+// summation, exactly the production code, no transcription.
 func rlSweepWindows() {
 	now := int(proxy.LastSecondTimestamp())
-	firewall.AccessIps = map[string]int{}
-	for windowTime, accessIPs := range firewall.WindowAccessIps {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-			delete(firewall.WindowAccessIps, windowTime)
-		} else {
-			for IP, requests := range accessIPs {
-				firewall.AccessIps[IP] += requests
-			}
-		}
-	}
-	firewall.AccessIpsCookie = map[string]int{}
-	for windowTime, accessIPsCookie := range firewall.WindowAccessIpsCookie {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-			delete(firewall.WindowAccessIpsCookie, windowTime)
-		} else {
-			for IP, requests := range accessIPsCookie {
-				firewall.AccessIpsCookie[IP] += requests
-			}
-		}
-	}
-	firewall.UnkFps = map[string]int{}
-	for windowTime, unkFps := range firewall.WindowUnkFps {
-		if utils.TrimTime(windowTime)+proxy.RatelimitWindow < now {
-			delete(firewall.WindowUnkFps, windowTime)
-		} else {
-			for IP, requests := range unkFps {
-				firewall.UnkFps[IP] += requests
-			}
-		}
-	}
-}
-
-// rlPass runs one complete evaluateRatelimit iteration body.
-func rlPass() {
-	rlPrefillWindows()
-	rlSweepWindows()
-}
-
-func rlBucketKeys(m map[int]map[string]int) []int {
-	return slices.Sorted(maps.Keys(m))
-}
-
-// rlMustPanic runs fn and returns the recovered value formatted as a string.
-// It fails the test if fn did not panic. It deliberately takes NO lock, so a
-// panic recovered here can never strand firewall.Mutex and hang the binary.
-func rlMustPanic(t *testing.T, fn func()) (msg string) {
-	t.Helper()
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-				msg = rlPanicString(r)
-			}
-		}()
-		fn()
-	}()
-	if !panicked {
-		t.Fatal("expected a panic, got none")
-	}
-	return msg
-}
-
-func rlPanicString(v any) string {
-	switch p := v.(type) {
-	case error:
-		return p.Error()
-	case string:
-		return p
-	default:
-		return fmt.Sprintf("%v", p)
-	}
+	last10 := int(proxy.Last10SecondTimestamp())
+	firewall.IPs.Sweep(now, last10, proxy.RatelimitWindow)
+	firewall.IPsCookie.Sweep(now, last10, proxy.RatelimitWindow)
+	firewall.UnkFps.Sweep(now, last10, proxy.RatelimitWindow)
 }
 
 // ---------------------------------------------------------------------------
@@ -269,35 +174,37 @@ func TestRatelimitPrefillCreatesTwelveBucketsAhead(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase + 5)
 
-	rlPrefillWindows()
+	rlSweepWindows()
 
 	want := []int{}
 	for i := rlBase; i < rlBase+120; i += 10 {
 		want = append(want, i)
 	}
 
-	for name, m := range map[string]map[int]map[string]int{
-		"WindowAccessIps":       firewall.WindowAccessIps,
-		"WindowAccessIpsCookie": firewall.WindowAccessIpsCookie,
-		"WindowUnkFps":          firewall.WindowUnkFps,
+	for _, fam := range []struct {
+		label string
+		got   []int
+	}{
+		{"IPs", firewall.IPs.WindowTimestamps()},
+		{"IPsCookie", firewall.IPsCookie.WindowTimestamps()},
+		{"UnkFps", firewall.UnkFps.WindowTimestamps()},
 	} {
-		got := rlBucketKeys(m)
-		if !slices.Equal(got, want) {
-			t.Errorf("%s buckets = %v, want %v", name, got, want)
+		if !slices.Equal(fam.got, want) {
+			t.Errorf("%s buckets = %v, want %v", fam.label, fam.got, want)
 		}
-		if len(got) != 12 {
-			t.Errorf("%s bucket count = %d, want 12 (120s of 10s buckets)", name, len(got))
+		if len(fam.got) != 12 {
+			t.Errorf("%s bucket count = %d, want 12 (120s of 10s buckets)", fam.label, len(fam.got))
 		}
 	}
 
 	// The prefill is half-open: [now, now+120). The bucket exactly 120s out is
-	// NOT created. This is the boundary that produces the nil-map panic pinned
-	// by TestRatelimitMissingBucketWritePanics.
-	if _, ok := firewall.WindowAccessIps[rlBase+120]; ok {
+	// NOT created. (Once this pinned a nil-map panic; the write is lazy now,
+	// so it is only the horizon being asserted.)
+	if slices.Contains(firewall.IPs.WindowTimestamps(), rlBase+120) {
 		t.Error("bucket at now+120 was created; prefill is supposed to be half-open")
 	}
 	// Nor is anything in the past.
-	if _, ok := firewall.WindowAccessIps[rlBase-10]; ok {
+	if slices.Contains(firewall.IPs.WindowTimestamps(), rlBase-10) {
 		t.Error("bucket at now-10 was created; prefill only looks forward")
 	}
 }
@@ -306,25 +213,25 @@ func TestRatelimitPrefillPreservesExistingCounts(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
-	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 7}
-	firewall.WindowAccessIpsCookie[rlBase+30] = map[string]int{"2.2.2.2": 3}
-	firewall.WindowUnkFps[rlBase+60] = map[string]int{"deadbeef": 5}
+	firewall.IPs.AddWindow(rlBase, "1.1.1.1", 7)
+	firewall.IPsCookie.AddWindow(rlBase+30, "2.2.2.2", 3)
+	firewall.UnkFps.AddWindow(rlBase+60, "deadbeef", 5)
 
-	rlPrefillWindows()
+	rlSweepWindows()
 
-	if got := firewall.WindowAccessIps[rlBase]["1.1.1.1"]; got != 7 {
-		t.Errorf("prefill clobbered an existing WindowAccessIps bucket: got %d, want 7", got)
+	if got := firewall.IPs.WindowCount(rlBase, "1.1.1.1"); got != 7 {
+		t.Errorf("prefill clobbered an existing IPs bucket: got %d, want 7", got)
 	}
-	if got := firewall.WindowAccessIpsCookie[rlBase+30]["2.2.2.2"]; got != 3 {
-		t.Errorf("prefill clobbered an existing WindowAccessIpsCookie bucket: got %d, want 3", got)
+	if got := firewall.IPsCookie.WindowCount(rlBase+30, "2.2.2.2"); got != 3 {
+		t.Errorf("prefill clobbered an existing IPsCookie bucket: got %d, want 3", got)
 	}
-	if got := firewall.WindowUnkFps[rlBase+60]["deadbeef"]; got != 5 {
-		t.Errorf("prefill clobbered an existing WindowUnkFps bucket: got %d, want 5", got)
+	if got := firewall.UnkFps.WindowCount(rlBase+60, "deadbeef"); got != 5 {
+		t.Errorf("prefill clobbered an existing UnkFps bucket: got %d, want 5", got)
 	}
-	// The nil check is per-map, so a bucket that exists in one window map is
-	// still created in the other two.
-	if len(firewall.WindowAccessIps) != 12 {
-		t.Errorf("WindowAccessIps bucket count = %d, want 12", len(firewall.WindowAccessIps))
+	// Buckets are created in every family's set regardless of what the other
+	// two already held.
+	if got := len(firewall.IPs.WindowTimestamps()); got != 12 {
+		t.Errorf("IPs bucket count = %d, want 12", got)
 	}
 }
 
@@ -333,19 +240,19 @@ func TestRatelimitPrefillPreservesExistingCounts(t *testing.T) {
 // configurable via config.json `ratelimit_time`. Raise the window to 300 and
 // the sweep will happily keep 300 seconds of buckets, but the prefill still
 // only creates 12. Nothing ever creates buckets between now+120 and now+300;
-// they are only born lazily by a LATER pass once Last10SecondTimestamp has
+// they are only born lazily by a request once Last10SecondTimestamp has
 // advanced. When the two are unified, the assertion below flips from 12 to 30.
 func TestRatelimitPrefillIgnoresConfiguredWindow(t *testing.T) {
 	rlSnapshotGlobals(t)
 	proxy.RatelimitWindow = 300
 	rlSetClock(rlBase)
 
-	rlPrefillWindows()
+	rlSweepWindows()
 
-	if got := len(firewall.WindowAccessIps); got != 12 {
+	if got := len(firewall.IPs.WindowTimestamps()); got != 12 {
 		t.Errorf("bucket count with RatelimitWindow=300 = %d, want 12 (prefill hardcodes 120)", got)
 	}
-	if _, ok := firewall.WindowAccessIps[rlBase+200]; ok {
+	if slices.Contains(firewall.IPs.WindowTimestamps(), rlBase+200) {
 		t.Error("prefill created a bucket beyond the hardcoded 120s horizon")
 	}
 }
@@ -367,7 +274,7 @@ func TestRatelimitSweepExpiresOutdatedBuckets(t *testing.T) {
 
 	seeded := []int{rlBase - 140, rlBase - 130, rlBase - 120, rlBase - 110, rlBase - 10, rlBase}
 	for _, ts := range seeded {
-		firewall.WindowAccessIps[ts] = map[string]int{"1.1.1.1": 1}
+		firewall.IPs.AddWindow(ts, "1.1.1.1", 1)
 	}
 
 	rlSweepWindows()
@@ -391,7 +298,7 @@ func TestRatelimitSweepExpiresOutdatedBuckets(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, alive := firewall.WindowAccessIps[tc.bucket]
+			alive := slices.Contains(firewall.IPs.WindowTimestamps(), tc.bucket)
 			if alive != tc.wantAlive {
 				t.Errorf("bucket %d alive = %v, want %v", tc.bucket, alive, tc.wantAlive)
 			}
@@ -406,19 +313,19 @@ func TestRatelimitSweepExpiryFollowsTheClockNotThePassCount(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
-	firewall.WindowAccessIps[rlBase-100] = map[string]int{"1.1.1.1": 3}
+	firewall.IPs.AddWindow(rlBase-100, "1.1.1.1", 3)
 
 	for range 5 {
 		rlSweepWindows()
 	}
-	if _, alive := firewall.WindowAccessIps[rlBase-100]; !alive {
+	if !slices.Contains(firewall.IPs.WindowTimestamps(), rlBase-100) {
 		t.Fatal("bucket expired without the clock moving")
 	}
 
 	// Advance the clock past the window and a single pass reaps it.
 	rlSetClock(rlBase + 25)
 	rlSweepWindows()
-	if _, alive := firewall.WindowAccessIps[rlBase-100]; alive {
+	if slices.Contains(firewall.IPs.WindowTimestamps(), rlBase-100) {
 		t.Error("bucket survived past the ratelimit window")
 	}
 }
@@ -432,21 +339,23 @@ func TestRatelimitSweepSumsAcrossLiveBucketsOnly(t *testing.T) {
 	rlSetClock(rlBase + 5)
 
 	// live
-	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 4, "2.2.2.2": 1}
-	firewall.WindowAccessIps[rlBase-10] = map[string]int{"1.1.1.1": 6}
-	firewall.WindowAccessIps[rlBase-110] = map[string]int{"1.1.1.1": 90}
-	// expired: its 5000 requests must not reach AccessIps
-	firewall.WindowAccessIps[rlBase-200] = map[string]int{"1.1.1.1": 5000, "3.3.3.3": 5000}
+	firewall.IPs.AddWindow(rlBase, "1.1.1.1", 4)
+	firewall.IPs.AddWindow(rlBase, "2.2.2.2", 1)
+	firewall.IPs.AddWindow(rlBase-10, "1.1.1.1", 6)
+	firewall.IPs.AddWindow(rlBase-110, "1.1.1.1", 90)
+	// expired: its 5000 requests must not reach the totals
+	firewall.IPs.AddWindow(rlBase-200, "1.1.1.1", 5000)
+	firewall.IPs.AddWindow(rlBase-200, "3.3.3.3", 5000)
 
-	// A stale total from a previous pass, to prove AccessIps is rebuilt and
+	// A stale total from a previous pass, to prove the totals are rebuilt and
 	// not accumulated into.
-	firewall.AccessIps = map[string]int{"9.9.9.9": 999999}
+	firewall.IPs.Set("9.9.9.9", 999999)
 
 	rlSweepWindows()
 
 	want := map[string]int{"1.1.1.1": 100, "2.2.2.2": 1}
-	if !maps.Equal(firewall.AccessIps, want) {
-		t.Errorf("AccessIps = %v, want %v", firewall.AccessIps, want)
+	if !maps.Equal(firewall.IPs.CopyCounts(), want) {
+		t.Errorf("IPs totals = %v, want %v", firewall.IPs.CopyCounts(), want)
 	}
 }
 
@@ -454,18 +363,18 @@ func TestRatelimitSweepIsIdempotentForAFixedClock(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase + 5)
 
-	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 4}
-	firewall.WindowAccessIps[rlBase-10] = map[string]int{"1.1.1.1": 6}
+	firewall.IPs.AddWindow(rlBase, "1.1.1.1", 4)
+	firewall.IPs.AddWindow(rlBase-10, "1.1.1.1", 6)
 
 	rlSweepWindows()
-	first := maps.Clone(firewall.AccessIps)
+	first := firewall.IPs.CopyCounts()
 	rlSweepWindows()
 
-	if !maps.Equal(firewall.AccessIps, first) {
-		t.Errorf("second sweep changed totals: %v then %v", first, firewall.AccessIps)
+	if !maps.Equal(firewall.IPs.CopyCounts(), first) {
+		t.Errorf("second sweep changed totals: %v then %v", first, firewall.IPs.CopyCounts())
 	}
-	if got := firewall.AccessIps["1.1.1.1"]; got != 10 {
-		t.Errorf("AccessIps[1.1.1.1] = %d, want 10 (sweep must reset, not accumulate)", got)
+	if got := firewall.IPs.Count("1.1.1.1"); got != 10 {
+		t.Errorf("IPs.Count(1.1.1.1) = %d, want 10 (sweep must reset, not accumulate)", got)
 	}
 }
 
@@ -473,39 +382,39 @@ func TestRatelimitSweepKeepsTheThreeWindowsIndependent(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase + 5)
 
-	firewall.WindowAccessIps[rlBase] = map[string]int{"1.1.1.1": 1}
-	firewall.WindowAccessIpsCookie[rlBase] = map[string]int{"1.1.1.1": 2}
-	firewall.WindowUnkFps[rlBase] = map[string]int{"deadbeef": 3}
+	firewall.IPs.AddWindow(rlBase, "1.1.1.1", 1)
+	firewall.IPsCookie.AddWindow(rlBase, "1.1.1.1", 2)
+	firewall.UnkFps.AddWindow(rlBase, "deadbeef", 3)
 
 	rlSweepWindows()
 
-	if !maps.Equal(firewall.AccessIps, map[string]int{"1.1.1.1": 1}) {
-		t.Errorf("AccessIps = %v", firewall.AccessIps)
+	if !maps.Equal(firewall.IPs.CopyCounts(), map[string]int{"1.1.1.1": 1}) {
+		t.Errorf("IPs totals = %v", firewall.IPs.CopyCounts())
 	}
-	if !maps.Equal(firewall.AccessIpsCookie, map[string]int{"1.1.1.1": 2}) {
-		t.Errorf("AccessIpsCookie = %v", firewall.AccessIpsCookie)
+	if !maps.Equal(firewall.IPsCookie.CopyCounts(), map[string]int{"1.1.1.1": 2}) {
+		t.Errorf("IPsCookie totals = %v", firewall.IPsCookie.CopyCounts())
 	}
-	if !maps.Equal(firewall.UnkFps, map[string]int{"deadbeef": 3}) {
-		t.Errorf("UnkFps = %v", firewall.UnkFps)
+	if !maps.Equal(firewall.UnkFps.CopyCounts(), map[string]int{"deadbeef": 3}) {
+		t.Errorf("UnkFps totals = %v", firewall.UnkFps.CopyCounts())
 	}
 }
 
 // A full pass with an empty world must not blow up and must publish empty
-// totals rather than nil ones — middleware reads these maps unconditionally.
+// totals rather than nil ones — middleware reads the counters unconditionally.
 func TestRatelimitFullPassFromEmptyStateProducesEmptyTotals(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
-	rlPass()
+	rlSweepWindows()
 
-	if firewall.AccessIps == nil || len(firewall.AccessIps) != 0 {
-		t.Errorf("AccessIps = %v, want empty non-nil map", firewall.AccessIps)
+	if firewall.IPs.CopyCounts() == nil || len(firewall.IPs.CopyCounts()) != 0 {
+		t.Errorf("IPs totals = %v, want empty non-nil map", firewall.IPs.CopyCounts())
 	}
-	if got := firewall.AccessIps["8.8.8.8"]; got != 0 {
+	if got := firewall.IPs.Count("8.8.8.8"); got != 0 {
 		t.Errorf("lookup of an unseen ip = %d, want 0", got)
 	}
-	if len(firewall.WindowAccessIps) != 12 {
-		t.Errorf("bucket count after a full pass = %d, want 12", len(firewall.WindowAccessIps))
+	if got := len(firewall.IPs.WindowTimestamps()); got != 12 {
+		t.Errorf("bucket count after a full pass = %d, want 12", got)
 	}
 }
 
@@ -513,30 +422,30 @@ func TestRatelimitFullPassFromEmptyStateProducesEmptyTotals(t *testing.T) {
 // until the NEXT pass runs. evaluateRatelimit sleeps 5 seconds between passes,
 // so an attacker gets up to a 5-second free window against IPRatelimit /
 // FPRatelimit. This is the "hot path reads stale totals" defect; a later wave
-// is expected to make ratelimit decisions read the Window* maps directly, at
+// is expected to make ratelimit decisions read the windows directly, at
 // which point the first assertion below flips from 0 to 50.
 func TestRatelimitTotalsLagBehindTheCurrentBucketByOnePass(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
-	rlPass()
+	rlSweepWindows()
 
 	// Simulate 50 requests landing in the current bucket (the middleware's
-	// `firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][ip]++`).
+	// firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), rateKey)).
 	for range 50 {
-		firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
+		firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), "1.1.1.1")
 	}
 
 	// BUG (a later wave flips this to 50): the published total the ratelimit
 	// actually consults still says zero.
-	if got := firewall.AccessIps["1.1.1.1"]; got != 0 {
-		t.Errorf("AccessIps[1.1.1.1] = %d immediately after the burst, want 0 (stale by design today)", got)
+	if got := firewall.IPs.Count("1.1.1.1"); got != 0 {
+		t.Errorf("IPs.Count(1.1.1.1) = %d immediately after the burst, want 0 (stale by design today)", got)
 	}
 
-	rlPass()
+	rlSweepWindows()
 
-	if got := firewall.AccessIps["1.1.1.1"]; got != 50 {
-		t.Errorf("AccessIps[1.1.1.1] = %d after the next pass, want 50", got)
+	if got := firewall.IPs.Count("1.1.1.1"); got != 50 {
+		t.Errorf("IPs.Count(1.1.1.1) = %d after the next pass, want 50", got)
 	}
 }
 
@@ -556,12 +465,13 @@ func TestRatelimitTotalsLagBehindTheCurrentBucketByOnePass(t *testing.T) {
 // process: it runs one real pass, reports what the globals look like
 // afterwards, and exits. The leak dies with it.
 //
-// Synchronisation with the child's evaluateRatelimit goroutine goes entirely
-// through firewall.Mutex. The child seeds firewall.AccessIps with a sentinel
-// key; the sweep's unconditional `firewall.AccessIps = map[string]int{}` drops
-// it, so "sentinel gone" means the whole locked pass has completed, and reading
-// under the same lock gives a proper happens-before edge. The child never reads
-// proxy.Initialised, which evaluateRatelimit publishes outside the lock.
+// WAVE 12: the pass no longer runs under firewall.Mutex — each family sweeps
+// under its own shard locks — so the handshake is the sentinel plus those
+// locks. The child seeds a sentinel key into every family's published TOTALS;
+// Sweep rebuilds the totals from the windows and so drops it, and every
+// accessor the child polls with takes the shard lock the sweeper released,
+// which is the happens-before edge. The child never reads proxy.Initialised,
+// which evaluateRatelimit publishes outside every lock.
 
 const rlChildEnv = "LANCARSEC_TEST_EVALUATE_RATELIMIT_CHILD"
 
@@ -595,44 +505,45 @@ func TestRatelimitEvaluateRatelimitChild(t *testing.T) {
 	rlSetClock(rlBase + 5)
 	proxy.RatelimitWindow = 120
 
-	firewall.WindowAccessIps = map[int]map[string]int{
-		rlBase - 1000: {"expired.example": 5000},
-		rlBase - 110:  {"1.1.1.1": 90},
-		rlBase - 10:   {"1.1.1.1": 6},
-		rlBase:        {"1.1.1.1": 4, "2.2.2.2": 1},
-	}
-	firewall.WindowAccessIpsCookie = map[int]map[string]int{
-		rlBase - 1000: {"expired.example": 5000},
-		rlBase:        {"1.1.1.1": 2},
-	}
-	firewall.WindowUnkFps = map[int]map[string]int{
-		rlBase - 1000: {"expired-fp": 5000},
-		rlBase:        {"deadbeef": 3},
-	}
-	firewall.AccessIps = map[string]int{rlChildSentinel: 1}
-	firewall.AccessIpsCookie = map[string]int{rlChildSentinel: 1}
-	firewall.UnkFps = map[string]int{rlChildSentinel: 1}
+	firewall.IPs.AddWindow(rlBase-1000, "expired.example", 5000)
+	firewall.IPs.AddWindow(rlBase-110, "1.1.1.1", 90)
+	firewall.IPs.AddWindow(rlBase-10, "1.1.1.1", 6)
+	firewall.IPs.AddWindow(rlBase, "1.1.1.1", 4)
+	firewall.IPs.AddWindow(rlBase, "2.2.2.2", 1)
+
+	firewall.IPsCookie.AddWindow(rlBase-1000, "expired.example", 5000)
+	firewall.IPsCookie.AddWindow(rlBase, "1.1.1.1", 2)
+
+	firewall.UnkFps.AddWindow(rlBase-1000, "expired-fp", 5000)
+	firewall.UnkFps.AddWindow(rlBase, "deadbeef", 3)
+
+	// The sentinel goes into the published TOTALS, which Sweep rebuilds from
+	// the windows and therefore drops. It is seeded on all three so the report
+	// can assert each family was rebuilt rather than accumulated into.
+	firewall.IPs.Set(rlChildSentinel, 1)
+	firewall.IPsCookie.Set(rlChildSentinel, 1)
+	firewall.UnkFps.Set(rlChildSentinel, 1)
 
 	go evaluateRatelimit()
 
 	var report rlChildReport
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		firewall.Mutex.Lock()
-		_, stillSeeded := firewall.AccessIps[rlChildSentinel]
+		// Poll UnkFps: evaluateRatelimit sweeps IPs, then IPsCookie, then
+		// UnkFps, so the LAST family losing its sentinel is what says the
+		// whole pass finished. Every accessor takes its own shard locks, which
+		// the sweeper released in that same order, so the reads below are
+		// properly ordered after all three sweeps.
+		_, stillSeeded := firewall.UnkFps.CopyCounts()[rlChildSentinel]
 		if !stillSeeded {
 			report = rlChildReport{
-				AccessIps:       maps.Clone(firewall.AccessIps),
-				AccessIpsCookie: maps.Clone(firewall.AccessIpsCookie),
-				UnkFps:          maps.Clone(firewall.UnkFps),
-				AccessBuckets:   rlBucketKeys(firewall.WindowAccessIps),
-				CookieBuckets:   rlBucketKeys(firewall.WindowAccessIpsCookie),
-				UnkFpBuckets:    rlBucketKeys(firewall.WindowUnkFps),
+				AccessIps:       firewall.IPs.CopyCounts(),
+				AccessIpsCookie: firewall.IPsCookie.CopyCounts(),
+				UnkFps:          firewall.UnkFps.CopyCounts(),
+				AccessBuckets:   firewall.IPs.WindowTimestamps(),
+				CookieBuckets:   firewall.IPsCookie.WindowTimestamps(),
+				UnkFpBuckets:    firewall.UnkFps.WindowTimestamps(),
 			}
-		}
-		firewall.Mutex.Unlock()
-
-		if !stillSeeded {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -785,106 +696,112 @@ func TestRatelimitEvaluateRatelimitOnePass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The missing-bucket panic (audit finding at core/server/middleware.go:96)
+// The missing-bucket write (audit finding CONC-01, fixed)
 // ---------------------------------------------------------------------------
 
-// This is the tripwire that matters most. middleware.go does, under a bare
-// firewall.Mutex.Lock() with NO defer Unlock:
+// This is the tripwire that matters most, and wave 12 flipped it.
+//
+// The proxy used to increment the raw map from the request path:
 //
 //	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())][ip]++
 //
-// If the monitor thread has not prefilled that bucket, the inner map is nil and
-// the increment panics. pnc.PanicHndl recovers it — and because the Unlock is a
-// plain statement that is now skipped, firewall.Mutex stays locked forever and
-// every subsequent request blocks on it. The proxy is dead, silently.
+// under a bare firewall.Mutex.Lock() with no defer. If the monitor had not
+// prefilled that bucket the inner map was nil, the increment panicked,
+// pnc.PanicHndl recovered it, the plain Unlock statement was skipped, and the
+// mutex stayed locked forever: every later request blocked and the proxy was
+// dead, silently. The tests here USED TO ASSERT THAT PANIC as current
+// behaviour, naming this wave as the one that would flip them.
 //
-// The test below reproduces the WRITE, not the lock. It never touches
-// firewall.Mutex, so it demonstrates the panic without any chance of hanging
-// the test binary.
-func TestRatelimitMissingBucketWritePanics(t *testing.T) {
+// It is flipped. The raw maps are gone; the request path calls
+// counterSet.IncrWindow, which creates the bucket lazily under its key's shard
+// lock with a deferred unlock. The prefill in Sweep is now an optimisation --
+// it keeps the common case off the allocation path -- not the thing standing
+// between a lagging monitor and a permanent deadlock. So what is pinned below
+// is that a write with NO prefill at all is safe and counts.
+func TestRatelimitMissingBucketWriteIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
 	// No prefill has run: the bucket does not exist.
-	if _, ok := firewall.WindowAccessIps[rlBase]; ok {
-		t.Fatal("test setup wrong: bucket should be absent")
+	if got := firewall.IPs.WindowKeyCount(rlBase); got != 0 {
+		t.Fatalf("test setup wrong: bucket holds %d keys, should be absent", got)
 	}
 
-	msg := rlMustPanic(t, func() {
-		firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
-	})
-	if !strings.Contains(msg, "nil map") {
-		t.Errorf("panic message = %q, want it to mention a nil map", msg)
+	firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), "1.1.1.1")
+	firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), "1.1.1.1")
+
+	if got := firewall.IPs.WindowCount(rlBase, "1.1.1.1"); got != 2 {
+		t.Errorf("count through a lazily created bucket = %d, want 2", got)
 	}
 }
 
-// The realistic trigger: a pass ran, so buckets exist for [now, now+120), but
-// the monitor thread then stalled for more than 120 seconds while traffic kept
-// arriving. Last10SecondTimestamp has walked past the prefilled horizon and the
-// next request writes into a hole. All three window maps have the same hole.
-func TestRatelimitMissingBucketWritePanicsWhenMonitorStallsPastHorizon(t *testing.T) {
+// The realistic trigger for the old panic: a pass ran, so buckets exist for
+// [now, now+120), but the monitor then stalled for more than 120 seconds while
+// traffic kept arriving. Last10SecondTimestamp has walked past the prefilled
+// horizon and the next request writes into a hole. All three families have the
+// same hole, and none of them may panic on it.
+func TestRatelimitWriteBeyondPrefillHorizonIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
-	rlPass()
+	rlSweepWindows()
 
 	// Furthest bucket the pass created is rlBase+110; rlBase+120 is the hole.
-	if _, ok := firewall.WindowAccessIps[rlBase+110]; !ok {
+	if got := firewall.IPs.WindowKeyCount(rlBase + 110); got != 0 {
+		t.Fatalf("rlBase+110 should be prefilled and empty, holds %d keys", got)
+	}
+	if !slices.Contains(firewall.IPs.WindowTimestamps(), rlBase+110) {
 		t.Fatal("expected rlBase+110 to be prefilled")
 	}
-
-	tests := []struct {
-		name  string
-		write func()
-	}{
-		{
-			name:  "WindowAccessIps",
-			write: func() { firewall.WindowAccessIps[rlBase+120]["1.1.1.1"]++ },
-		},
-		{
-			name:  "WindowAccessIpsCookie",
-			write: func() { firewall.WindowAccessIpsCookie[rlBase+120]["1.1.1.1"]++ },
-		},
-		{
-			name:  "WindowUnkFps",
-			write: func() { firewall.WindowUnkFps[rlBase+120]["deadbeef"]++ },
-		},
+	if slices.Contains(firewall.IPs.WindowTimestamps(), rlBase+120) {
+		t.Fatal("test setup wrong: rlBase+120 should be past the horizon")
 	}
 
-	for _, tc := range tests {
+	for _, tc := range []struct {
+		name string
+		set  interface {
+			IncrWindow(ts int, key string)
+			WindowCount(ts int, key string) int
+		}
+		key string
+	}{
+		{"IPs", firewall.IPs, "1.1.1.1"},
+		{"IPsCookie", firewall.IPsCookie, "1.1.1.1"},
+		{"UnkFps", firewall.UnkFps, "deadbeef"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := rlMustPanic(t, tc.write)
-			if !strings.Contains(msg, "nil map") {
-				t.Errorf("panic message = %q, want it to mention a nil map", msg)
+			tc.set.IncrWindow(rlBase+120, tc.key)
+			if got := tc.set.WindowCount(rlBase+120, tc.key); got != 1 {
+				t.Errorf("count past the prefill horizon = %d, want 1", got)
 			}
 		})
 	}
 }
 
-// Reading a missing bucket is safe — only writing panics. Worth pinning so a
-// later wave does not "fix" the read path and assume the write path is covered.
+// Reading a missing bucket is safe too — it always was, and it must stay that
+// way now that the write beside it no longer panics either.
 func TestRatelimitMissingBucketReadIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
 
-	if got := firewall.WindowAccessIps[rlBase]["1.1.1.1"]; got != 0 {
+	if got := firewall.IPs.WindowCount(rlBase, "1.1.1.1"); got != 0 {
 		t.Errorf("read through a missing bucket = %d, want 0", got)
 	}
-	if got := len(firewall.WindowAccessIps[rlBase]); got != 0 {
-		t.Errorf("len of a missing bucket = %d, want 0", got)
+	if got := firewall.IPs.WindowKeyCount(rlBase); got != 0 {
+		t.Errorf("key count of a missing bucket = %d, want 0", got)
 	}
 }
 
-// A prefilled bucket makes the same write safe. This is the invariant the
-// prefill loop exists to maintain.
+// A prefilled bucket takes the same write. This is what the prefill loop is
+// for now that it is an optimisation rather than a safety property.
 func TestRatelimitPrefilledBucketWriteIsSafe(t *testing.T) {
 	rlSnapshotGlobals(t)
 	rlSetClock(rlBase)
-	rlPrefillWindows()
+	rlSweepWindows()
 
-	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
-	firewall.WindowAccessIps[int(proxy.Last10SecondTimestamp())]["1.1.1.1"]++
+	firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), "1.1.1.1")
+	firewall.IPs.IncrWindow(int(proxy.Last10SecondTimestamp()), "1.1.1.1")
 
-	if got := firewall.WindowAccessIps[rlBase]["1.1.1.1"]; got != 2 {
+	if got := firewall.IPs.WindowCount(rlBase, "1.1.1.1"); got != 2 {
 		t.Errorf("bucket count = %d, want 2", got)
 	}
 }
@@ -903,8 +820,14 @@ func rlRegisterDomain(t *testing.T, name string, s domains.DomainSettings) {
 	// stays empty: utils.SendWebhook returns immediately on an empty URL, so
 	// checkAttack makes no network call.
 	domains.DomainsMap.Store(name, s)
+	// WAVE 12: the request counters are a package-level atomic map keyed on the
+	// domain name, so they outlive DomainsData and must be cleared on both
+	// sides of the test -- a name reused by a later test would otherwise start
+	// with the previous test's totals.
+	domains.DeleteDomainCounters(name)
 	t.Cleanup(func() {
 		domains.DomainsMap.Delete(name)
+		domains.DeleteDomainCounters(name)
 		firewall.Mutex.Lock()
 		delete(domains.DomainsData, name)
 		firewall.Mutex.Unlock()
@@ -923,13 +846,44 @@ func rlThresholds() domains.DomainSettings {
 	}
 }
 
+// rlCountRequests drives the counters the request path drives: total real
+// AddDomainTotal calls and bypassed real AddDomainBypassed calls. Looping the
+// shipped functions rather than poking a test-only setter is deliberate --
+// those atomics are what checkAttack folds, so this is the one seam that
+// cannot drift from production.
+func rlCountRequests(name string, total, bypassed int) {
+	for range total {
+		domains.AddDomainTotal(name)
+	}
+	for range bypassed {
+		domains.AddDomainBypassed(name)
+	}
+}
+
+// rlCatchUpCounters brings a domain's atomics up to where the fixture claims
+// the previous tick left them, so the delta checkAttack computes is exactly
+// this tick's traffic. A fixture whose Prev* is already behind the counters
+// would silently measure a negative second, so it fails loudly instead.
+func rlCatchUpCounters(t *testing.T, name string, prevTotal, prevBypassed int) {
+	t.Helper()
+	haveTotal, haveBypassed := int(domains.DomainTotal(name)), int(domains.DomainBypassed(name))
+	if prevTotal < haveTotal || prevBypassed < haveBypassed {
+		t.Fatalf("fixture drifted: %s counters are at %d/%d, past Prev %d/%d", name, haveTotal, haveBypassed, prevTotal, prevBypassed)
+	}
+	rlCountRequests(name, prevTotal-haveTotal, prevBypassed-haveBypassed)
+}
+
 // rlTick adds one second's worth of traffic and runs checkAttack, returning the
 // state checkAttack persisted.
+//
+// WAVE 12: TotalRequests/BypassedRequests are no longer struct fields a test
+// can assign -- checkAttack folds the lock-free atomics the request path
+// increments -- so a tick is that many real increments.
 func rlTick(t *testing.T, name string, d domains.DomainData, total, bypassed int) domains.DomainData {
 	t.Helper()
 	d.Name = name
-	d.TotalRequests += total
-	d.BypassedRequests += bypassed
+	rlCatchUpCounters(t, name, d.PrevRequests, d.PrevBypassed)
+	rlCountRequests(name, total, bypassed)
 	checkAttack(name, d)
 	firewall.Mutex.RLock()
 	out := domains.DomainsData[name]
@@ -941,7 +895,7 @@ func TestMonitorCheckAttackComputesPerSecondDeltas(t *testing.T) {
 	const name = "rl-deltas.test"
 	rlRegisterDomain(t, name, rlThresholds())
 
-	d := domains.DomainData{Name: name, Stage: 1, TotalRequests: 40, BypassedRequests: 10, PrevRequests: 40, PrevBypassed: 10}
+	d := domains.DomainData{Name: name, Stage: 1, PrevRequests: 40, PrevBypassed: 10}
 	got := rlTick(t, name, d, 60, 0)
 
 	if got.RequestsPerSecond != 60 {
@@ -980,7 +934,7 @@ func TestMonitorCheckAttackSkipsDebugDomain(t *testing.T) {
 
 	// No DomainsMap entry is registered on purpose: if checkAttack did not
 	// return early it would panic on the unchecked type assertion.
-	checkAttack("debug", domains.DomainData{Name: "debug", Stage: 1, TotalRequests: 100000})
+	checkAttack("debug", domains.DomainData{Name: "debug", Stage: 1, PrevRequests: 100000})
 
 	firewall.Mutex.RLock()
 	_, written := domains.DomainsData["debug"]

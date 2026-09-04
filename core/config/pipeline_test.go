@@ -104,6 +104,9 @@ func cfgIsolate(t *testing.T) {
 	domains.Domains = []string{}
 	domains.DomainsData = map[string]domains.DomainData{}
 	domains.DomainsMap = sync.Map{}
+	// WAVE 12: the request counters are a package-global atomic map that
+	// outlives DomainsData, so isolation has to clear them too.
+	domains.ResetCounters()
 
 	t.Cleanup(func() {
 		domains.Publish(oldConfig)
@@ -575,8 +578,6 @@ func TestPublishReloadPreservesLiveState(t *testing.T) {
 	live.RawAttack = true
 	live.BypassAttack = true
 	live.BufferCooldown = 7
-	live.TotalRequests = 91000
-	live.BypassedRequests = 4100
 	live.PrevRequests = 90000
 	live.PrevBypassed = 4000
 	live.RequestsPerSecond = 1000
@@ -585,6 +586,15 @@ func TestPublishReloadPreservesLiveState(t *testing.T) {
 	live.RequestLogger = []domains.RequestLog{{Total: 1000}}
 	domains.DomainsData["a.example"] = live
 	firewall.Mutex.Unlock()
+
+	// The request counters are atomics keyed on the domain name, counted
+	// through the shipped functions the request path calls.
+	for range 91000 {
+		domains.AddDomainTotal("a.example")
+	}
+	for range 4100 {
+		domains.AddDomainBypassed("a.example")
+	}
 
 	next := cfgFixture("a.example")
 	next.Domains[0].Stage2Difficulty = 6
@@ -597,8 +607,10 @@ func TestPublishReloadPreservesLiveState(t *testing.T) {
 	if !got.RawAttack || !got.BypassAttack || got.BufferCooldown != 7 {
 		t.Errorf("attack state was reset: raw=%v bypass=%v cooldown=%d", got.RawAttack, got.BypassAttack, got.BufferCooldown)
 	}
-	if got.TotalRequests != 91000 || got.BypassedRequests != 4100 {
-		t.Errorf("counters were zeroed: total=%d bypassed=%d", got.TotalRequests, got.BypassedRequests)
+	// WAVE 12: the request counters are atomics keyed on the domain name, so
+	// what has to survive a reload is the counter map entry, not a struct field.
+	if total, bypassed := domains.DomainTotal("a.example"), domains.DomainBypassed("a.example"); total != 91000 || bypassed != 4100 {
+		t.Errorf("counters were zeroed: total=%d bypassed=%d", total, bypassed)
 	}
 	if got.PrevRequests != 90000 || got.PrevBypassed != 4000 || got.RequestsPerSecond != 1000 || got.PeakRequestsPerSecond != 2500 {
 		t.Errorf("rate state was zeroed: %+v", got)
@@ -619,8 +631,19 @@ func TestPublishReloadRemovesDeletedDomains(t *testing.T) {
 	resetTransports = func(map[string]struct{}) { resets++ }
 
 	cfgPublish(t, cfgFixture("a.example", "b.example"), modeStartup)
+	domains.AddDomainTotal("a.example")
+	domains.AddDomainTotal("b.example")
 	cfgPublish(t, cfgFixture("a.example"), modeReload)
 
+	// WAVE 12: the counters are a package-global atomic map, so a removed
+	// domain has to be forgotten there as well - otherwise re-adding it later
+	// resumes from the old total and checkAttack reads a huge first delta.
+	if got := domains.DomainTotal("b.example"); got != 0 {
+		t.Errorf("removed domain kept its request counter (%d); re-adding it would resume from there", got)
+	}
+	if got := domains.DomainTotal("a.example"); got != 1 {
+		t.Errorf("surviving domain's counter = %d, want the live 1", got)
+	}
 	if _, ok := domains.DomainsData["b.example"]; ok {
 		t.Error("a domain removed from config.json still has DomainsData; it would keep serving to its old backend")
 	}

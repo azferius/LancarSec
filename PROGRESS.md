@@ -7,7 +7,7 @@ next, and what will bite you.
 **Keep it current.** Update this file at the end of every wave, in the same commit as the work.
 A wave that landed but is not recorded here will be redone by whoever comes next.
 
-Last updated: 2026-08-31 · HEAD when written: see `git log -1`
+Last updated: 2026-09-04 · HEAD when written: see `git log -1`
 
 ---
 
@@ -23,9 +23,10 @@ Last updated: 2026-08-31 · HEAD when written: see `git log -1`
 | 6 | Client identity: trusted-proxy resolution, IPv6 | **DONE** |
 | 7 | Hot-path concurrency rewrite | **DONE** — clock `d8dffe6`, gauges `a7a3254` |
 | 8 | Upstream transport and response path | **DONE** — HEAD `ee1daf2`, verified PASS |
-| 9 | Challenge rendering, XSS, middleware decomposition | not started |
-| 10 | Wire-visible rebrand + legal notices (atomic, one commit) | not started |
-| 11 | Cf-Ja3-Hash passthrough, stage-3 captcha redesign | **UNBLOCKED** — owner decided 2026-08-31: deploy behind Cloudflare, see below |
+| 9 | Challenge rendering, XSS, middleware decomposition | **DONE** — W1 `d1d62e9`, W2 `7767cf8`, W3 `1f9d878`, W4 `cdc269c`/`7b5b813`/`b3a417f` |
+| 10 | Wire-visible rebrand + legal notices (atomic, one commit) | **DONE** — cutover `335ffd2`, fixes `de088a0`, docs `e7a7a58`/`e2c7982`, straggler `75e38f5` |
+| 11 | Cf-Ja3-Hash passthrough, stage-3 captcha redesign, Go 1.26 | **DONE** — `edd8fc7`, `9c8b1cd`, `ff0a8fe`, `79b2ac9`, `ba82695` |
+| 12 | Keyed-state sharding: firewall.Mutex off the request path | **DONE** — see below |
 
 ---
 
@@ -460,6 +461,84 @@ is `fmt.Fprint` (verbatim). The page still 200s, echoes `r.Host`, and brands "ba
 
 ---
 
+## Wave 12 outcome (2026-09-04) — keyed state off `firewall.Mutex`
+
+This is PERF-01 / CONC-09 / CONC-04, the largest remaining item from the re-audit: the one global
+`RWMutex` taken three to four times per request, twice for writing.
+
+**What moved.** `core/firewall/shard.go` (new) puts the per-key ratelimit state on 16-way sharded
+locks, key-hashed with an inline FNV-1a. `core/domains/counters.go` (new) puts the per-domain
+request totals on lock-free atomics.
+
+| Was | Is | Lock per request |
+| --- | --- | --- |
+| `AccessIps` + `WindowAccessIps` | `firewall.IPs` (`*counterSet`) | one shard |
+| `AccessIpsCookie` + `WindowAccessIpsCookie` | `firewall.IPsCookie` | one shard |
+| `UnkFps` + `WindowUnkFps` | `firewall.UnkFps` | one shard |
+| `Connections map[string]string` | `firewall.Connections` (`*connSet`) | one shard |
+| `DomainData.TotalRequests` / `.BypassedRequests` | `domains.AddDomainTotal` / `AddDomainBypassed` | none (`atomic.Int64`) |
+
+`firewall.Mutex` keeps what is not per-client: `DomainsData`, the fingerprint tables, the
+access-log append, the config publish. A request never holds two shard locks at once, so no cycle
+is possible; `Sweep` takes every shard in index order and releases each before the next.
+
+**The number.** Measured as a same-machine A/B against `9fdb563` from a clean worktree, because
+the harness itself has drifted since wave 3 (`HarnessBaseline` 31.6 -> 93 ns) and cross-wave
+absolute comparison is no longer valid. Full tables in `core/server/BENCHMARK_BASELINE.md`.
+
+- `DecisionPathParallel` **-46% at 4 cores, -49.7% at 16** (1597 -> 862, 1582 -> 795 ns). The
+  audit's inversion — slower with more cores — is gone even on the shared-key benchmark, which is
+  the case sharding *cannot* help.
+- New `BenchmarkMiddlewareDecisionPathParallelDistinctKeys` (a flood from many addresses, which is
+  what this product is for): **1582 -> 272.6 ns at 16 cores, 5.8x**, and it now scales *down* with
+  cores (1021 -> 393 -> 273).
+- Serial is unchanged: **+1.8% median over n=12**, inside the run-to-run spread. The n=5 table
+  shows +22..+72% across `-cpu` values on a benchmark that ignores GOMAXPROCS — that spread is the
+  tell, and it was re-measured rather than explained away. Do not cite it as a regression.
+- `144 B/op, 9 allocs/op` on both sides. This wave moved locks, not allocations.
+
+**Bugs found in the wave-12 code itself, during verification.** The working tree was not green when
+it was picked up; these were all live defects in the new code, not test breakage:
+
+- **The CONC-04 memory cap was 16x too large.** `len(bucket) >= windowKeyCap` was checked against
+  ONE SHARD's bucket, so the real bound was `shardCount * windowKeyCap` = 3.2M keys. Now
+  `windowShardKeyCap = windowKeyCap / shardCount`, which makes the set-wide bound exactly
+  `windowKeyCap`. **This mutation survived the first test pass** (every cap test fills one shard
+  and compares against the same constant); `TestWindowKeyCapIsDividedAcrossShards` is what kills it.
+- **`counterSet.Stats()` always reported 0 requests** — the range variable shadowed the named
+  return (`for _, requests := range ...; requests += requests`). It feeds `GET_IP_REQUESTS`.
+- **`WindowKeyCount()` returned the first shard that held the bucket**, not the total.
+- **`TestOnStateChangeEvictionHoldsTheShard` self-deadlocked**: it holds a shard's write lock and
+  then called `Connections.Get`, which re-takes that shard's RLock. It hung the whole `core/firewall`
+  package for the full 10-minute timeout. `peekLocked` is the counterpart to `LockShard`.
+- **`core/server` did not compile**: `monitor_test.go` still referenced `firewall.WindowAccessIps`.
+
+**Tests flipped, per the rule.** CONC-01 (the nil-map panic that wedged `firewall.Mutex` forever) is
+fixed by lazy bucket creation under a deferred unlock, so the four tests that pinned the panic as
+current behaviour became `TestRatelimitMissingBucketWriteIsSafe` and
+`TestRatelimitWriteBeyondPrefillHorizonIsSafe`. The prefill horizon is now an optimisation, not a
+safety property.
+
+**Deleted.** `DomainData.TotalRequests` and `.BypassedRequests` — after the move nothing in
+production wrote or read them, and four tests were asserting on dead fields. `firewall.IncrWindow`
+and the six package-level counter maps are gone with them.
+
+**Mutation-tested**, as the wave-3 rule requires: 8 mutations, 8 killed (the cap divisor, the cap
+check, an unlocked `connSet.Delete`, the `Stats` shadow, the one-shard `WindowKeyCount`, a missing
+`DeleteDomainCounters` on converge, bypassed-counted-as-total, and a dropped window increment).
+The first pass killed 7 of 8 — see the cap note above.
+
+**Breaking for operators: nothing on the wire.** No config key, no header, no cookie, no path
+changed. The one behavioural change an operator could notice: a domain removed from `config.json`
+now also loses its request counters, so re-adding it starts from zero instead of resuming.
+
+**Left open.** The two IP families (`IPs`, `IPsCookie`) hash the same `rateKey` separately, so the
+request path computes FNV over it twice and takes two locks where one set with two counters per key
+would take one. Measured cost is inside the noise today; revisit only with a benchmark that shows
+it.
+
+---
+
 ## Wave 11 was blocked on a decision — DECIDED 2026-08-31: behind Cloudflare
 
 The owner confirmed LancarSec deploys **behind Cloudflare**. Cloudflare terminates TLS; the
@@ -540,6 +619,11 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
   invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
   happens once, atomically, after the security work.
 - **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
+- **`firewall.Mutex` no longer guards the keyed state** (wave 12). Ratelimit counters, sliding
+  windows and per-connection fingerprints are on 16-way shards in `core/firewall/shard.go`; the
+  per-domain request totals are lock-free atomics in `core/domains/counters.go`. Do not add a
+  `firewall.Mutex` acquisition around them, and do not call a `counterSet`/`connSet` method while
+  already holding that structure's shard lock — `LockShard` has `peekLocked` for exactly that.
 - **Wave 7 has started on `main`.** The request-path clock moved to atomics in
   `core/proxy/clock.go` (commit `d8dffe6`) — the clock goroutine is the only writer, everything
   else reads. The CPU/RAM gauges followed in `core/proxy/usage.go` (commit `a7a3254`) — same

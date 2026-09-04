@@ -116,9 +116,11 @@ type DomainData struct {
 
 	LastLogs []DomainLog
 
-	TotalRequests    int
-	BypassedRequests int
-
+	// WAVE 12: TotalRequests and BypassedRequests were struct fields here,
+	// incremented once per request behind the global write lock with the whole
+	// value copied in and back out of DomainsData. They are lock-free atomics
+	// now (counters.go); Prev* stay struct fields because only checkAttack
+	// touches them, once a second.
 	PrevRequests int
 	PrevBypassed int
 

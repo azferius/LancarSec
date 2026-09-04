@@ -51,37 +51,30 @@ func newFakeConn(t *testing.T, addr string) *fakeConn {
 	return &fakeConn{Conn: local, addr: fakeAddr(addr)}
 }
 
-// withCleanConnections swaps the package-global Connections map for a fresh one
-// and restores the original in t.Cleanup, so these tests never leak state into
-// each other or into the rest of the package. Fingerprint writes under Mutex,
-// so the swap is done under the same lock.
+// withCleanConnections swaps the package-global Connections set for a fresh
+// one and restores the original in t.Cleanup, so these tests never leak state
+// into each other or into the rest of the package. WAVE 12: Connections is a
+// shard set now; the swap replaces the whole set, and each individual access
+// is safe under its shard lock, so no global lock is needed around the swap
+// itself (the setup here is single-goroutine).
 func withCleanConnections(t *testing.T) {
 	t.Helper()
-	Mutex.Lock()
 	saved := Connections
-	Connections = map[string]string{}
-	Mutex.Unlock()
+	Connections = NewConnSet()
 
 	t.Cleanup(func() {
-		Mutex.Lock()
 		Connections = saved
-		Mutex.Unlock()
 	})
 }
 
-// readConnection reads Connections through the same mutex Fingerprint writes
-// under, so `go test -race` stays clean.
+// readConnection reads Connections through its shard lock, so `go test -race`
+// stays clean.
 func readConnection(addr string) (string, bool) {
-	Mutex.RLock()
-	defer Mutex.RUnlock()
-	v, ok := Connections[addr]
-	return v, ok
+	return Connections.Get(addr)
 }
 
 func connectionCount() int {
-	Mutex.RLock()
-	defer Mutex.RUnlock()
-	return len(Connections)
+	return Connections.Len()
 }
 
 // ---------------------------------------------------------------------------
@@ -532,13 +525,11 @@ func TestFingerprintConcurrentWrites(t *testing.T) {
 		t.Errorf("Connections has %d entries, want %d", n, goroutines)
 	}
 
-	Mutex.RLock()
-	defer Mutex.RUnlock()
-	for k, v := range Connections {
+	Connections.Range(func(k, v string) {
 		if v != "0x1301,0x1302,0x583235353139,0x0," {
 			t.Errorf("Connections[%q] = %q, want the shared fingerprint", k, v)
 		}
-	}
+	})
 }
 
 // TestGREASEPattern pins the GREASE detector itself, element by element.
@@ -1145,11 +1136,12 @@ func TestOnStateChangeEvictsFingerprint(t *testing.T) {
 	}
 }
 
-// TestOnStateChangeEvictionHoldsTheMutex proves the eviction actually takes
-// firewall.Mutex, rather than merely proving the entry ends up gone.
+// TestOnStateChangeEvictionHoldsTheShard proves the eviction actually takes
+// the connection's shard lock, rather than merely proving the entry ends up
+// gone.
 //
-// Why an assertion on the LOCK and not just on the map: Connections is a plain
-// Go map. Fingerprint writes it from a TLS-handshake goroutine; OnStateChange
+// Why an assertion on the LOCK and not just on the map: Connections is shared
+// state. Fingerprint writes it from a TLS-handshake goroutine; OnStateChange
 // deletes from it on every connection close. Those two run concurrently by
 // construction -- net/http calls ConnState from the connection's own serve
 // goroutine while other connections are still handshaking. An unsynchronised
@@ -1158,23 +1150,23 @@ func TestOnStateChangeEvictsFingerprint(t *testing.T) {
 // cannot catch. The process dies, and it dies hardest exactly when connection
 // churn peaks: during an attack.
 //
-// A test that only checks "the key is gone afterwards" passes with the
-// Lock/Unlock pair deleted, because a single-goroutine delete needs no lock.
-// So this test holds the mutex itself and requires OnStateChange to BLOCK:
+// A test that only checks "the key is gone afterwards" passes with locking
+// deleted, because a single-goroutine delete needs no lock. So this test
+// holds the key's own shard lock (via the test-only LockShard helper) and
+// requires OnStateChange to BLOCK:
 //
-//   - correct code blocks on Mutex.Lock() and can never signal while we hold it,
-//     so the "finished early" branch is unreachable -- no flake in that direction;
+//   - correct code blocks on that shard's Lock() and can never signal while we
+//     hold it, so the "finished early" branch is unreachable -- no flake in
+//     that direction;
 //   - code with the lock removed deletes immediately and signals.
 //
 // The goroutine announces itself before calling OnStateChange, so the wait
 // covers only the handful of instructions between that announcement and the
 // delete.
 //
-// Wave 7 replaces this global RWMutex with sharding or a sync.Map. That is a
-// fine change -- but it must keep eviction and insertion mutually excluded, and
-// if it does, this test needs rewriting against the new primitive rather than
-// deleting.
-func TestOnStateChangeEvictionHoldsTheMutex(t *testing.T) {
+// Wave 12 moved the whole set to 16-way sharding: the key's shard lock is what
+// eviction and insertion mutually exclude on, so that is what this test holds.
+func TestOnStateChangeEvictionHoldsTheShard(t *testing.T) {
 	withCleanConnections(t)
 
 	const addr = "192.0.2.77:8100"
@@ -1195,12 +1187,13 @@ func TestOnStateChangeEvictionHoldsTheMutex(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan struct{})
 
-	// Take the lock the eviction must contend for. releaseOnce guards against a
-	// double Unlock on the failure paths, and the defer makes sure the lock is
-	// released even if the test aborts via t.Fatalf (which runs deferred calls).
+	// Take the shard lock the eviction must contend for. releaseOnce guards
+	// against a double release on the failure paths, and the defer makes sure
+	// the lock is released even if the test aborts via t.Fatalf (which runs
+	// deferred calls).
+	unlock := Connections.LockShard(addr)
 	var releaseOnce sync.Once
-	Mutex.Lock()
-	release := func() { releaseOnce.Do(func() { Mutex.Unlock() }) }
+	release := func() { releaseOnce.Do(unlock) }
 	defer release()
 
 	go func() {
@@ -1214,17 +1207,19 @@ func TestOnStateChangeEvictionHoldsTheMutex(t *testing.T) {
 	select {
 	case <-finished:
 		release()
-		t.Fatalf("OnStateChange evicted Connections[%q] while the test held firewall.Mutex; "+
+		t.Fatalf("OnStateChange evicted Connections[%q] while the test held its shard lock; "+
 			"the eviction must take the lock, because it races Fingerprint's write to the "+
-			"same map on every connection close", addr)
+			"same shard on every connection close", addr)
 	case <-time.After(250 * time.Millisecond):
-		// Expected: blocked on Mutex.Lock().
+		// Expected: blocked on the shard's Lock().
 	}
 
 	// Entry must still be there -- nothing can have deleted it under our lock.
-	if _, ok := Connections[addr]; !ok {
+	// peekLocked, not Get: we hold this shard's write lock, so Get's RLock
+	// would deadlock against us.
+	if _, ok := Connections.peekLocked(addr); !ok {
 		release()
-		t.Fatalf("Connections[%q] disappeared while the test held firewall.Mutex", addr)
+		t.Fatalf("Connections[%q] disappeared while the test held its shard lock", addr)
 	}
 
 	release()
@@ -1232,7 +1227,7 @@ func TestOnStateChangeEvictionHoldsTheMutex(t *testing.T) {
 	select {
 	case <-finished:
 	case <-time.After(10 * time.Second):
-		t.Fatal("OnStateChange never completed after firewall.Mutex was released")
+		t.Fatal("OnStateChange never completed after the shard lock was released")
 	}
 
 	if _, ok := readConnection(addr); ok {

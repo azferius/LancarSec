@@ -178,7 +178,7 @@ func Process(writer http.ResponseWriter, request *http.Request, domainData domai
 	requestedData := domains.DomainsData[apiRequest.Domain]
 	firewall.Mutex.RUnlock()
 
-	handleDomainActions(apiRequest.Action, writer, &requestedData, &domainSettings)
+	handleDomainActions(apiRequest.Action, writer, apiRequest.Domain, &requestedData, &domainSettings)
 	return true
 }
 
@@ -211,10 +211,10 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 	// replace these maps wholesale instead of mutating them, which is not a
 	// property this package should be depending on.
 	case "GET_IP_REQUESTS":
-		firewall.Mutex.RLock()
-		ips, ipRequests := len(firewall.AccessIps), sumCounts(firewall.AccessIps)
-		cookieIps, cookieRequests := len(firewall.AccessIpsCookie), sumCounts(firewall.AccessIpsCookie)
-		firewall.Mutex.RUnlock()
+		// WAVE 12: the counter maps moved to shard sets; Stats walks every
+		// shard under its own RLock.
+		ips, ipRequests := firewall.IPs.Stats()
+		cookieIps, cookieRequests := firewall.IPsCookie.Stats()
 
 		APIResponse(writer, true, map[string]any{
 			"TOTAL_IPS":             ips,
@@ -228,9 +228,8 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 	// the per-fingerprint counts are what an operator writes firewall rules
 	// against. Snapshotted under the lock rather than marshalled live.
 	case "GET_FINGERPRINT_REQUESTS":
-		firewall.Mutex.RLock()
-		fingerprints := copyCounts(firewall.UnkFps)
-		firewall.Mutex.RUnlock()
+		// WAVE 12: shard-set snapshot instead of the global-locked copy.
+		fingerprints := firewall.UnkFps.CopyCounts()
 
 		APIResponse(writer, true, map[string]any{
 			"TOTAL_FINGERPRINT_REQUESTS": fingerprints,
@@ -269,15 +268,20 @@ func handleProxyActions(action string, writer http.ResponseWriter) {
 	}
 }
 
-func handleDomainActions(action string, writer http.ResponseWriter, domainData *domains.DomainData, domainSettings *domains.DomainSettings) {
+// domainName is the domain the totals are answered FOR: TotalRequests and
+// BypassedRequests moved to lock-free atomics (domains/counters.go) keyed by
+// domain name, so handleDomainActions needs the name the caller asked about -
+// the domainData struct argument alone is the snapshot of the domain the
+// request happened to arrive on.
+func handleDomainActions(action string, writer http.ResponseWriter, domainName string, domainData *domains.DomainData, domainSettings *domains.DomainSettings) {
 	switch action {
 	case "GET_TOTAL_REQUESTS":
 		APIResponse(writer, true, map[string]any{
-			"TOTAL_REQUESTS": domainData.TotalRequests,
+			"TOTAL_REQUESTS": domains.DomainTotal(domainName),
 		})
 	case "GET_BYPASSED_REQUESTS":
 		APIResponse(writer, true, map[string]any{
-			"BYPASSED_REQUESTS": domainData.BypassedRequests,
+			"BYPASSED_REQUESTS": domains.DomainBypassed(domainName),
 		})
 	case "GET_TOTAL_REQUESTS_PER_SECOND":
 		APIResponse(writer, true, map[string]any{
@@ -349,7 +353,7 @@ func ProcessV2(w http.ResponseWriter, r *http.Request) bool {
 	domainData := domains.DomainsData[parts[0]]
 	firewall.Mutex.RUnlock()
 
-	handleDomainActions(parts[1], w, &domainData, &domainSettings)
+	handleDomainActions(parts[1], w, parts[0], &domainData, &domainSettings)
 	return true
 }
 
@@ -369,20 +373,4 @@ func APIResponse(writer http.ResponseWriter, success bool, response map[string]a
 
 	fmt.Fprint(writer, string(jsonResponse))
 	return nil
-}
-
-func sumCounts(counts map[string]int) int {
-	total := 0
-	for _, count := range counts {
-		total += count
-	}
-	return total
-}
-
-func copyCounts(counts map[string]int) map[string]int {
-	out := make(map[string]int, len(counts))
-	for key, count := range counts {
-		out[key] = count
-	}
-	return out
 }
