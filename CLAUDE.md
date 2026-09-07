@@ -338,8 +338,9 @@ Not bugs to fix — things that will waste your time if you don't know them. The
   names are gone from the registry, so a rule using one is refused at config load with the field
   named. `core/firewall/filter.go`'s `Fields` map is the single source of truth and three tests
   guard it in both directions. The broken README examples were corrected in the same wave.
-- **~79% of generated captchas are unsolvable by a human.** `core/utils/image.go:48-49` erases answer
-  pixels that were never written into the mask.
+- **~~~79% of generated captchas are unsolvable by a human.~~ GONE IN WAVE 11.** The hand-rolled
+  bitmap captcha was replaced by a harder proof-of-work tier; `core/utils/image.go` and the
+  `x/image` dependency no longer exist. Ignore every `image.go` line cite in `docs/AUDIT.md`.
 - **~~There is no graceful shutdown.~~ FIXED IN WAVE 13.** `main` waits for SIGINT/SIGTERM and
   drains every listener through `server.Shutdown(ctx)` with a 20s grace period, exiting non-zero if
   the drain does not finish.
