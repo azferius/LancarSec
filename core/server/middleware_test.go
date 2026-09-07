@@ -1192,21 +1192,26 @@ func TestMiddlewareVersionHeaderHiddenByDefault(t *testing.T) {
 	}
 }
 
-// WAVE 10: one-release verify grace for the rebrand. A client still carrying
-// the pre-rebrand cookie NAME is verified against the same token space and is
-// re-issued the current name in the same response; the token VALUE is what
-// actually gates.
-func TestMiddlewareLegacyCookieGrace(t *testing.T) {
-	t.Run("stage 1 legacy name verifies and is re-issued", func(t *testing.T) {
+// The wave-10 verify grace is OVER. A pre-rebrand cookie NAME is no longer a
+// clearance token: it is not verified, not re-issued, and the client is
+// challenged exactly as if it had presented nothing. The token VALUE being
+// correct changes nothing - the name is what selects the cookie.
+//
+// This test is the inverse of the grace test it replaces. If a later change
+// re-accepts the legacy name, these three cases fail.
+func TestMiddlewareLegacyCookieNameIsNoLongerAccepted(t *testing.T) {
+	t.Run("stage 1 legacy name is re-challenged", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(1)
 
 		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v="+mwCookieToken())))
-		mwAssertStatus(t, rec, http.StatusOK)
-		mwAssertBodyContains(t, rec, mwBackendBody)
-		wantReissue := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
-		if got := rec.Result().Header.Get("Set-Cookie"); got != wantReissue {
-			t.Errorf("reissue Set-Cookie = %q, want %q", got, wantReissue)
+		mwAssertStatus(t, rec, http.StatusFound)
+		wantChallenge := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
+		if got := rec.Result().Header.Get("Set-Cookie"); got != wantChallenge {
+			t.Errorf("Set-Cookie = %q, want the fresh stage-1 challenge cookie %q", got, wantChallenge)
+		}
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached with only a legacy-named cookie")
 		}
 	})
 
@@ -1215,8 +1220,6 @@ func TestMiddlewareLegacyCookieGrace(t *testing.T) {
 		env.mwSetStage(1)
 
 		rec := mwDo(mwRequest("/", mwWithCookie("_1__bProxy_v=deadbeef")))
-		// A failed legacy check is just a fresh stage-1 challenge: 302 plus a
-		// new token under the CURRENT name - never the presented junk.
 		mwAssertStatus(t, rec, http.StatusFound)
 		wantChallenge := mwStage1Cookie + "=" + mwCookieToken() + "; SameSite=Lax; path=/; Secure; HttpOnly"
 		if got := rec.Result().Header.Get("Set-Cookie"); got != wantChallenge {
@@ -1227,13 +1230,27 @@ func TestMiddlewareLegacyCookieGrace(t *testing.T) {
 		}
 	})
 
-	t.Run("stage 2 legacy name verifies", func(t *testing.T) {
+	t.Run("stage 2 legacy name is re-challenged", func(t *testing.T) {
 		env := mwNewEnv(t)
 		env.mwSetStage(2)
 
 		rec := mwDo(mwRequest("/", mwWithCookie("_2__bProxy_v="+mwJSToken())))
+		mwAssertBodyContains(t, rec, "Completing challenge")
+		if env.mwBackendHits() != 0 {
+			t.Error("backend was reached with only a legacy-named stage-2 cookie")
+		}
+	})
+
+	t.Run("the current name still verifies", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(1)
+
+		rec := mwDo(mwRequest("/", mwWithCookie(mwStage1Cookie+"="+mwCookieToken())))
 		mwAssertStatus(t, rec, http.StatusOK)
 		mwAssertBodyContains(t, rec, mwBackendBody)
+		if env.mwBackendHits() != 1 {
+			t.Errorf("backend hits = %d, want 1", env.mwBackendHits())
+		}
 	})
 }
 
@@ -2976,9 +2993,11 @@ func TestMiddlewareAccessKeyEncodingIsInjective(t *testing.T) {
 // answer a plain 404 - not 401 or 403 - so the endpoints cannot be discovered
 // by probing.
 func TestMiddlewareMitigationStateEndpointsAreGated(t *testing.T) {
+	// The legacy /_bProxy/ spellings are no longer routed at all; see
+	// TestMiddlewareLegacyReservedPathsAreNoLongerRouted.
 	leaks := map[string][]string{
-		"/_bProxy/stats":       {"Bypassed R/s", "Total Requests", "Proxy Fingerprint", "mw-proxy-fingerprint"},
-		"/_bProxy/fingerprint": {"IP Requests", "SusLV", "Fingerprint: "},
+		"/_lancarsec/stats":       {"Bypassed R/s", "Total Requests", "Proxy Fingerprint", "mw-proxy-fingerprint"},
+		"/_lancarsec/fingerprint": {"IP Requests", "SusLV", "Fingerprint: "},
 	}
 
 	cases := []struct {
@@ -3041,7 +3060,11 @@ func TestMiddlewareMitigationStateEndpointsAreGated(t *testing.T) {
 // enough, and the two other reserved endpoints stay open because the captcha
 // page fetches /_bProxy/verified and the GPL requires /_bProxy/credits.
 func TestMiddlewareUngatedReservedPathsStayOpen(t *testing.T) {
-	for _, path := range []string{"/_bProxy/verified", "/_bProxy/credits"} {
+	// /_bProxy/credits keeps its route deliberately: the GPL attribution
+	// endpoint must stay reachable at the URL that was published for it.
+	// /_bProxy/verified does not - it is fetched by the proxy's own challenge
+	// page, which now asks for the current spelling.
+	for _, path := range []string{"/_lancarsec/verified", "/_lancarsec/credits", "/_bProxy/credits"} {
 		t.Run(path, func(t *testing.T) {
 			env := mwNewEnv(t)
 			env.mwSetStage(0)
@@ -3467,4 +3490,89 @@ func TestMiddlewareEnforceOriginRejectsUntrustedPeers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The wave-10 path grace is OVER. Every legacy /_bProxy/ spelling except the
+// GPL credits endpoint is an ordinary unknown path now: it is proxied to the
+// backend rather than answered by the proxy, so no mitigation state is served
+// under the old URL and no CDN rule keyed on it keeps working by accident.
+func TestMiddlewareLegacyReservedPathsAreNoLongerRouted(t *testing.T) {
+	for _, path := range []string{
+		"/_bProxy/stats",
+		"/_bProxy/fingerprint",
+		"/_bProxy/verified",
+		"/_bProxy/api/v2/domains",
+	} {
+		t.Run(path, func(t *testing.T) {
+			env := mwNewEnv(t)
+			env.mwSetStage(0)
+
+			// Sent WITH the correct secret: the point is that the route is
+			// gone, not that the caller is unauthorised.
+			rec := mwDo(mwRequest(path, mwWithAPISecret(), mwWithHeader("Admin-Secret", mwAdminSecret)))
+			mwAssertStatus(t, rec, http.StatusOK)
+			mwAssertBodyContains(t, rec, mwBackendBody)
+			if env.mwBackendHits() != 1 {
+				t.Errorf("backend hits = %d, want 1: a legacy path must fall through", env.mwBackendHits())
+			}
+			if got := rec.Result().Header.Get("X-Echo-Path"); got != path {
+				t.Errorf("backend saw path %q, want %q unrewritten", got, path)
+			}
+		})
+	}
+
+	// The one exception, and the reason it is an exception: a legacy admin URL
+	// carries the admin secret in its PATH. Falling through would hand that
+	// secret to the customer backend, so this shape is still recognised and
+	// killed here.
+	t.Run("legacy admin URL is not forwarded to the backend", func(t *testing.T) {
+		env := mwNewEnv(t)
+		env.mwSetStage(0)
+
+		rec := mwDo(mwRequest("/_bProxy/" + mwAdminSecret + "/api/v1"))
+		mwAssertStatus(t, rec, http.StatusNotFound)
+		if env.mwBackendHits() != 0 {
+			t.Errorf("backend hits = %d, want 0: the admin secret must never reach the backend", env.mwBackendHits())
+		}
+	})
+}
+
+// A wrong Proxy-Secret or Admin-Secret is charged to the caller's ratelimit
+// key, so guessing a 25-character secret costs the guesser his own budget.
+// Without this a 404 was free and the admin gate had no brute-force cost at
+// all.
+func TestMiddlewareWrongSecretIsCharged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  *http.Request
+	}{
+		{"stats with no secret", mwRequest("/_lancarsec/stats")},
+		{"fingerprint with a wrong secret", mwRequest("/_lancarsec/fingerprint", mwWithHeader("Proxy-Secret", "nope"))},
+		{"admin api with a wrong secret", mwRequest("/_lancarsec/api/v1", mwWithHeader("Admin-Secret", "nope"))},
+		{"legacy admin URL", mwRequest("/_bProxy/" + mwAdminSecret + "/api/v1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mwNewEnv(t).mwSetStage(0)
+			ts := int(proxy.Last10SecondTimestamp())
+			before := firewall.IPsCookie.WindowCount(ts, mwIP)
+
+			mwDo(tc.req)
+
+			if after := firewall.IPsCookie.WindowCount(ts, mwIP); after <= before {
+				t.Errorf("challenge-failure window %d -> %d, want an increment: a wrong secret must not be free", before, after)
+			}
+		})
+	}
+
+	t.Run("a correct secret is not charged", func(t *testing.T) {
+		mwNewEnv(t).mwSetStage(0)
+		ts := int(proxy.Last10SecondTimestamp())
+		before := firewall.IPsCookie.WindowCount(ts, mwIP)
+
+		mwDo(mwRequest("/_lancarsec/stats", mwWithAPISecret()))
+
+		if after := firewall.IPsCookie.WindowCount(ts, mwIP); after != before {
+			t.Errorf("challenge-failure window %d -> %d, want unchanged on a successful auth", before, after)
+		}
+	})
 }

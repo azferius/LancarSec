@@ -27,16 +27,14 @@ import (
 // issues: "_1"+suffix for stage 1, "_2"+suffix for stage 2 and "_3"+suffix
 // for stage 3.
 //
-// WAVE 10 rebrand: the token was renamed from "__bProxy_v" to "__lSec_v",
-// which by itself invalidates every clearance cookie in flight. To keep the
-// cutover from challenging every established client, legacyProxyCookieSuffix
-// below is still ACCEPTED for one release (issued never).
+// WAVE 10 rebrand: the token was renamed from "__bProxy_v" to "__lSec_v".
 const proxyCookieSuffix = "__lSec_v"
 
-// legacyProxyCookieSuffix is the pre-rebrand cookie token. One release of
-// grace: a client presenting it is verified and immediately re-issued the new
-// name, and stripProxyCookies strips it from every forwarded request either
-// way. Remove this const (and its use sites) one release after the cutover.
+// legacyProxyCookieSuffix is the pre-rebrand cookie token. The grace release
+// is OVER: it is never issued and never verified. It survives here for one
+// reason only - stripProxyCookies still recognises it, so a client that has
+// carried the dead cookie since before the cutover does not hand it to the
+// customer backend. Nothing else may use this const.
 const legacyProxyCookieSuffix = "__bProxy_v"
 
 // challengeCookieName is the name of the cookie a client is expected to
@@ -94,58 +92,12 @@ func requestCookie(request *http.Request, name string) (string, bool) {
 
 // carriesProxyToken reports whether a raw Cookie header or a single cookie
 // NAME carries one of the proxy's clearance tokens - current or legacy. The
-// match is a substring test BY DESIGN here: it is what stripProxyCookies and
-// the verify grace use to catch a token under ANY prefix, and neither site
-// uses it to decide what a request is.
-//
-// WAVE 10: the legacy arm goes away with legacyProxyCookieSuffix.
+// match is a substring test BY DESIGN here: it is what stripProxyCookies uses
+// to catch a token under ANY prefix, and that site does not use it to decide
+// what a request is. Verification never goes through here - it looks the
+// cookie up by exact name and compares the value in constant time.
 func carriesProxyToken(s string) bool {
 	return strings.Contains(s, proxyCookieSuffix) || strings.Contains(s, legacyProxyCookieSuffix)
-}
-
-// legacyCookieNames returns the pre-rebrand cookie NAMES a challenged client
-// may still present for susLv, in lookup order. The proxy never issues these
-// any more; they exist only for the one-release verify grace. Legacy stage-3
-// cookies predate wave 9, so the name may embed the raw client ip - the ip is
-// passed in and both spellings are offered. The constant-time compare at the
-// verify site gates the VALUE either way.
-//
-// WAVE 10: remove this helper with legacyProxyCookieSuffix.
-func legacyCookieNames(susLv int, ip string) []string {
-	switch susLv {
-	case 1:
-		return []string{"_1" + legacyProxyCookieSuffix}
-	case 2:
-		return []string{"_2" + legacyProxyCookieSuffix}
-	case 3:
-		names := []string{"_3" + legacyProxyCookieSuffix}
-		if ip != "" {
-			return append(names, ip+"_3"+legacyProxyCookieSuffix)
-		}
-		return names
-	default:
-		return nil
-	}
-}
-
-// reissueClearanceCookie re-writes the CURRENT name for susLv with the token
-// the client just proved via a legacy cookie, so an established client
-// migrates off the old name during the grace release instead of carrying it
-// forever. Stage 1 gets HttpOnly (the proxy is its only reader); stages 2 and
-// 3 cannot - the challenge pages rewrite those names from script, and a
-// browser refuses to let script set an HttpOnly cookie - so they are written
-// exactly as the pages write them.
-//
-// WAVE 10: remove this helper with legacyProxyCookieSuffix.
-func reissueClearanceCookie(writer http.ResponseWriter, susLv int, encryptedIP string) {
-	if susLv < 1 || susLv > 3 || encryptedIP == "" {
-		return
-	}
-	cookie := challengeCookieName(susLv) + "=" + encryptedIP + "; SameSite=Lax; path=/; Secure"
-	if susLv == 1 {
-		cookie += "; HttpOnly"
-	}
-	writer.Header().Add("Set-Cookie", cookie)
 }
 
 // stripProxyCookies removes every challenge cookie from the request before it

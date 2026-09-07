@@ -1,6 +1,6 @@
 # Stage-2 proof-of-work bundle
 
-Compiled-in (`//go:embed`, see `pow.go`), served first-party from `/_bProxy/`.
+Compiled-in (`//go:embed`, see `pow.go`), served first-party from `/_lancarsec/`.
 This removes the last runtime dependency on third-party CDNs: the stage-2 page
 previously loaded `cdn.jsdelivr.net/gh/41Baloo/balooPow@main` (mutable ref, no
 SRI) and `cdnjs.cloudflare.com/.../crypto-js/4.0.0` on every challenge.
@@ -9,7 +9,7 @@ SRI) and `cdnjs.cloudflare.com/.../crypto-js/4.0.0` on every challenge.
 
 | File | Source | SHA-256 (as vendored) |
 | --- | --- | --- |
-| `balooPow.min.js` | `cdn.jsdelivr.net/gh/41Baloo/balooPow@main/balooPow.min.js`, fetched 2026-08-31 | `80137512f0c1b9c7de9443f070a25e17207812e3a4694deea30b563ec3a216aa` |
+| `pow.min.js` | `cdn.jsdelivr.net/gh/41Baloo/balooPow@main/balooPow.min.js`, fetched 2026-08-31 | `f89b9368804bda853f5f40c0b7bcd774cd6c4fdb389a865e23b4966d1fa53f1a` |
 | `crypto-js.min.js` | `cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js`, fetched 2026-08-31 | `769a555de553babc35a3338f344dd7aa16260c93cea2c7db290707c90484e7cc` |
 
 ## The one-line patch
@@ -21,7 +21,7 @@ one substring was rewritten (quotes are escaped in the source because the
 worker script is a JS string literal):
 
 - before: `importScripts('https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.0.0/crypto-js.min.js');`
-- after:  `importScripts(self.location.origin+'/_bProxy/crypto-js.min.js');`
+- after:  `importScripts(self.location.origin+'/_lancarsec/crypto-js.min.js');`
 
 `self.location.origin` inside a blob worker is the origin of the creating
 page, so the worker resolves the first-party path on whichever domain is being
@@ -29,7 +29,15 @@ challenged. SHA-256 before the patch:
 `71273963e8355d9187de0d91f237e543b3bdb2cf9353d241f38e2ac9368e7073`.
 
 The stage-2 page's own crypto-js `<script>` tag is kept (upstream order
-preserved) but now also points at `/_bProxy/crypto-js.min.js`.
+preserved) but now also points at `/_lancarsec/crypto-js.min.js`.
+
+**2026-09-07:** the wave-10 rebrand renamed the served route to `/_lancarsec/`
+but missed this string, which lives inside a minified JS string literal and so
+matched no `.go` grep. The worker therefore imported a path nothing served:
+`importScripts` threw, every worker resolved with no solution, and stage 2 was
+unsolvable for every challenged visitor from the wave-10 cutover until this
+fix. `TestPowAssetsReferenceOnlyServedPaths` now fails if any embedded asset
+names a path the middleware does not route.
 
 ## Licenses
 

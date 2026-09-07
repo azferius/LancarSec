@@ -709,6 +709,83 @@ from `Cf-Connecting-Ip`; see `hack/README.md`. `examples/config.json` shows the 
 a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against the real structs by
 `TestExampleConfigTemplate` / `TestHackTemplateStillLoads`, so a template that rots fails the build.
 
+## WAVE 14 — close the rebrand grace window, drop Docker, throttle the admin gate (2026-09-07)
+
+Not on the original roadmap. It is the cleanup the owner asked for after waves 1-13 landed, plus
+one live bug the cleanup uncovered.
+
+### The live bug: stage 2 was unsolvable
+
+`global/pow/pow.min.js` builds its Web Worker from a JS string literal, and inside that literal the
+worker imported `/_bProxy/crypto-js.min.js`. Wave 10 renamed the served route to
+`/_lancarsec/crypto-js.min.js` by editing Go source; the string inside the minified bundle matched
+no `.go` grep and was missed. `importScripts` therefore threw in every worker, every worker resolved
+with no solution, and **stage 2 could not be cleared by any visitor from the wave-10 cutover
+(2026-09-01) until this fix.** Stage 1 and stage 3 were unaffected; stage 3 serves the same page but
+was equally dead, since it reuses the same bundle.
+
+Fixed by rewriting the one substring. `global/pow/README.md` records the new SHA-256
+(`f89b9368...`). Two tests now guard it: `TestPowAssetsReferenceOnlyServedPaths` fails if any
+embedded asset names a `/_lancarsec/` or `/_bProxy/` path the middleware does not route, and
+`TestPowWorkerImportsCryptoJSFirstParty` fails if the worker import points at a CDN again.
+
+**The lesson generalises:** a rebrand that only greps `.go` is not finished. Embedded assets carry
+routes too.
+
+### Grace window closed
+
+Wave 10 kept the pre-rebrand spellings alive for one release. That release is over:
+
+- `/_bProxy/stats`, `/_bProxy/fingerprint`, `/_bProxy/verified` and `/_bProxy/api/v2/*` are no
+  longer routed. They fall through to the backend as ordinary unknown paths, unrewritten.
+- The `__bProxy_v` cookie name is no longer verified and no longer re-issued.
+  `legacyCookieNames` and `reissueClearanceCookie` are deleted. The const survives for one use
+  only: `stripProxyCookies` still recognises it, so a stale cookie is not handed to the backend.
+- **Two exceptions, both deliberate.** `/_bProxy/credits` keeps its route — the GPL attribution
+  endpoint must stay reachable at the URL published for it. `/_bProxy/<secret>/api/v1` is still
+  recognised and 404'd rather than proxied, because that URL carries the admin secret in its path
+  and falling through would hand it to a customer backend.
+
+**What this breaks:** any client still holding a pre-rebrand clearance cookie is challenged once.
+Any automation still calling a legacy path now gets whatever the backend answers for it.
+
+### Docker removed
+
+`Dockerfile`, `.dockerignore`, the dependabot docker ecosystem and the `.gitattributes` EOL rules
+are gone. Nothing in CI ever built an image; `release.yml` already cross-compiles seven standalone
+targets. README's "Docker Setup" is replaced by "Deployment": `setcap cap_net_bind_service` for
+privileged ports, `StandardInput=tty` under systemd for the terminal UI, and the existing 20s
+SIGTERM drain that already fits systemd's 30s `TimeoutStopSec`.
+
+Code comments naming `docker stop` or `docker run` without `-i` are kept on purpose: they document
+the SIGTERM and no-TTY paths, which systemd and nohup reach identically.
+
+`assets/` (`captcha.html`, `error.html`, `login.html`) is deleted too — no Go file has referenced it
+since wave 9 moved every page to `html/template`, and `captcha.html` still carried a pre-rebrand
+cookie name in dead code.
+
+### Admin gate now costs the guesser something
+
+A wrong `Proxy-Secret` or `Admin-Secret` was a free 404: nothing was charged, so a 25-character
+secret could be sprayed at line rate. `noteSecretFailure` now charges the failure to the caller's
+ratelimit key.
+
+ponytail: it reuses the challenge-failure window rather than adding a fourth counter family. That
+window is already sharded, already swept every 5s, already capped in distinct keys, and already
+blocks at `Ratelimits["challengeFailures"]` (40 per window by default) — so a caller spraying bad
+secrets is blocked by exactly the machinery that blocks a caller spraying bad challenge answers.
+If admin brute force ever needs its own threshold, give it its own `counterSet` and a `Sweep` call
+beside the other three.
+
+### Verification
+
+`gofmt`, `go vet`, `go build`, `go test -race ./...` all green. The pinned wave-10 grace tests were
+flipped, not weakened: `TestMiddlewareLegacyCookieGrace` became
+`TestMiddlewareLegacyCookieNameIsNoLongerAccepted`, and
+`TestMiddlewareLegacyReservedPathsAreNoLongerRouted` plus `TestMiddlewareWrongSecretIsCharged` are
+new.
+
+
 ## Traps that will cost you time
 
 - **Check `git merge-base` before trusting a subagent's view of the tree.** Wave 4 lost time to
@@ -722,9 +799,12 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
   of the parser on the first attempt.
 - **`transport` is a natural local identifier** and will shadow the `core/transport` package.
   Grep before assuming a file that gains that import compiles.
-- **Wire tokens stay `__bProxy_v` / `/_bProxy/` / `baloo-Proxy` until wave 10.** Renaming the cookie
-  invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
-  happens once, atomically, after the security work.
+- **The rebrand grace window is closed (wave 14).** Do not re-add a `/_bProxy/` route or re-accept
+  the `__bProxy_v` cookie name. The two survivors — `/_bProxy/credits` and the
+  `/_bProxy/<secret>/api/v1` 404 guard — are deliberate and documented at their call sites.
+- **Grep embedded assets, not just `.go`, when you rename a route.** `global/pow/pow.min.js`
+  carried `/_bProxy/crypto-js.min.js` inside a minified JS string literal through the whole of
+  wave 10 and killed stage 2 for six days. `TestPowAssetsReferenceOnlyServedPaths` guards it now.
 - **The firewall DSL's vocabulary is `firewall.Fields`, and it is load-bearing** (wave 13). Adding
   a name there without supplying it in the middleware's message brings back the fail-open the wave
   removed; removing one breaks every config.json using it. Three tests guard both directions —

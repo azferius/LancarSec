@@ -402,24 +402,6 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		if presented, found := requestCookie(request, cookieName); found {
 			verified = subtle.ConstantTimeCompare([]byte(presented), []byte(encryptedIP)) == 1
 		}
-		// WAVE 10: one-release verify grace for the rebrand. A client still
-		// carrying a pre-rebrand clearance cookie under the legacy name is
-		// verified against the same token space and re-issued the current
-		// name, so the cutover does not re-challenge every established client
-		// at once. The legacy name is never issued again; remove with
-		// legacyProxyCookieSuffix.
-		if !verified {
-			for _, legacyName := range legacyCookieNames(susLv, ip) {
-				presented, found := requestCookie(request, legacyName)
-				if !found {
-					continue
-				}
-				if subtle.ConstantTimeCompare([]byte(presented), []byte(encryptedIP)) == 1 {
-					verified = true
-					reissueClearanceCookie(writer, susLv, encryptedIP)
-				}
-			}
-		}
 	}
 
 	if !verified {
@@ -462,11 +444,11 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	//Access logs of clients that passed the challenge
 	// WAVE 10 moved the admin secret out of the URI into the Admin-Secret
 	// header, and the API secret was always a header, so a well-behaved call
-	// no longer puts a secret in the log line at all. The redaction stays for
-	// the grace release: a legacy /_bProxy/<adminsecret>/api/v1 request still
-	// carries the secret in its URI, and it is logged below (then 404'd by
-	// the reserved switch). Empty secrets must not be replaced (an empty
-	// needle would splice [redacted] between every character).
+	// no longer puts a secret in the log line at all. The redaction stays
+	// anyway: a caller running pre-rebrand automation still puts the secret in
+	// its URI (/_bProxy/<adminsecret>/api/v1), and that URI is logged here
+	// before the reserved switch 404s it. Empty secrets must not be replaced
+	// (an empty needle would splice [redacted] between every character).
 	loggedURI := request.RequestURI
 	if adminSecret := cfg.Proxy.AdminSecret; adminSecret != "" {
 		loggedURI = strings.ReplaceAll(loggedURI, adminSecret, "[redacted]")
@@ -500,21 +482,24 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// shape match rather than an exact one; any /_bProxy/.../api/v1 dies here.
 	// It has already been logged redacted above.
 	if strings.HasPrefix(request.URL.Path, "/_bProxy/") && strings.HasSuffix(request.URL.Path, "/api/v1") {
+		noteSecretFailure(rateKey)
 		proxyEndpointNotFound(writer, buffer)
 		return
 	}
 
 	switch request.URL.Path {
-	case "/_lancarsec/stats", "/_bProxy/stats":
+	case "/_lancarsec/stats":
 		if !authorisedProxyEndpoint(request) {
+			noteSecretFailure(rateKey)
 			proxyEndpointNotFound(writer, buffer)
 			return
 		}
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("Stage: "+utils.StageToString(domainData.Stage)+"\nTotal Requests: "+strconv.FormatInt(domains.DomainTotal(domainName), 10)+"\nBypassed Requests: "+strconv.FormatInt(domains.DomainBypassed(domainName), 10)+"\nTotal R/s: "+strconv.Itoa(domainData.RequestsPerSecond)+"\nBypassed R/s: "+strconv.Itoa(domainData.RequestsBypassedPerSecond)+"\nProxy Fingerprint: "+proxy.Fingerprint, buffer, writer)
 		return
-	case "/_lancarsec/fingerprint", "/_bProxy/fingerprint":
+	case "/_lancarsec/fingerprint":
 		if !authorisedProxyEndpoint(request) {
+			noteSecretFailure(rateKey)
 			proxyEndpointNotFound(writer, buffer)
 			return
 		}
@@ -526,7 +511,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		// named on the first line.
 		SendResponse("IP: "+ip+"\nRatelimit Key: "+rateKey+"\nIP Requests: "+strconv.Itoa(ipCount)+"\nIP Challenge Requests: "+strconv.Itoa(ipCountCookie)+"\nSusLV: "+strconv.Itoa(susLv)+"\nFingerprint: "+tlsFp+"\nBrowser: "+browser+botFp, buffer, writer)
 		return
-	case "/_lancarsec/verified", "/_bProxy/verified":
+	case "/_lancarsec/verified":
 		writer.Header().Set("Content-Type", "text/plain")
 		SendResponse("verified", buffer, writer)
 		return
@@ -536,6 +521,7 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	// with the Proxy-Secret/API secret in constant time, so both gates hold.
 	case "/_lancarsec/api/v1":
 		if !authorisedAdminEndpoint(request) {
+			noteSecretFailure(rateKey)
 			proxyEndpointNotFound(writer, buffer)
 			return
 		}
@@ -553,15 +539,10 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// WAVE 10: the API v2 prefix moved to /_lancarsec/api/v2; the legacy
-	// spelling is honoured for one release. The rewrite is scoped INSIDE this
-	// branch - the only caller of ProcessV2 - so api.go's TrimPrefix keeps
-	// working for both spellings and no /_bProxy path is ever rewritten for
-	// the backend.
-	if path := request.URL.Path; strings.HasPrefix(path, "/_lancarsec/api/v2") || strings.HasPrefix(path, "/_bProxy/api/v2") {
-		if strings.HasPrefix(path, "/_bProxy/") {
-			request.URL.Path = "/_lancarsec" + strings.TrimPrefix(path, "/_bProxy")
-		}
+	// WAVE 10 moved the API v2 prefix to /_lancarsec/api/v2. The grace release
+	// is over: the legacy /_bProxy/api/v2 spelling is no longer routed here and
+	// falls through to the backend like any other unknown path.
+	if strings.HasPrefix(request.URL.Path, "/_lancarsec/api/v2") {
 		result := api.ProcessV2(writer, request)
 		if result {
 			return
@@ -583,4 +564,19 @@ func Middleware(writer http.ResponseWriter, request *http.Request) {
 	request.Header.Set("proxy-tls-name", browser+botFp)
 
 	domainSettings.DomainProxy.ServeHTTP(writer, request)
+}
+
+// noteSecretFailure charges a wrong Proxy-Secret / Admin-Secret to the
+// caller's ratelimit key, so guessing a 25-character secret is not free.
+//
+// ponytail: this reuses the challenge-failure window instead of adding a
+// fourth counter family. That window is already sharded, already swept every
+// 5s by evaluateRatelimit, already capped in distinct keys, and already drives
+// a block at cfg.Proxy.Ratelimits["challengeFailures"] (40 per window by
+// default) - so a caller spraying bad secrets is blocked by exactly the
+// machinery that blocks a caller spraying bad challenge answers. If admin
+// brute force ever needs its own threshold, give it its own counterSet and a
+// Sweep call next to the other three.
+func noteSecretFailure(rateKey string) {
+	firewall.IPsCookie.IncrWindow(int(proxy.Last10SecondTimestamp()), rateKey)
 }

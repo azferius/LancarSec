@@ -95,7 +95,7 @@ dependency and risk, not by severity. Do not reorder waves 1–3.
 | 7 | ~~Hot-path concurrency rewrite~~ **DONE 2026-08-31** | Clock and TUI gauges to atomics. The lock work itself landed in waves 9 W4 and 12. |
 | 8 | ~~Upstream transport and response path~~ **DONE 2026-08-31** | Breaking: backends TLS-verified by default; real 5xx passthrough. See [`PROGRESS.md`](PROGRESS.md). |
 | 9 | ~~Challenge rendering, XSS, middleware decomposition~~ **DONE 2026-09-01** | Four slices W1-W4; `html/template`, config correctness, concurrency hardening. |
-| 10 | ~~Wire-visible rebrand + legal notices~~ **DONE 2026-09-01** | Landed atomically at `335ffd2`. Legacy `/_bProxy/` and `__bProxy_v` are routed for one release as a grace window. |
+| 10 | ~~Wire-visible rebrand + legal notices~~ **DONE 2026-09-01** | Landed atomically at `335ffd2`. **The grace window was closed 2026-09-07 (wave 14)** — see below. |
 | 11 | ~~Cf-Ja3-Hash passthrough, stage-3 captcha, Go 1.26~~ **DONE 2026-09-01** | Spec-accurate JA4 was dropped: the owner deploys behind Cloudflare, so the origin never sees the real ClientHello. |
 | 13 | ~~Access-log cap, DSL fields that never matched, graceful shutdown~~ **DONE 2026-09-05** | PERF-03, the five unsupplied rule fields, gofilter bool equality, rule actions parsed at load, SIGTERM drain, headless CPU spin. See [`PROGRESS.md`](PROGRESS.md). |
 | 12 | ~~Keyed-state sharding~~ **DONE 2026-09-04** | PERF-01/CONC-09/CONC-04. Ratelimit state on 16-way shards, domain totals on atomics. Parallel decision path -50%; distinct-key 5.8x. See [`PROGRESS.md`](PROGRESS.md). |
@@ -266,10 +266,11 @@ under systemd/docker) in wave 13. Do not re-derive them from this file; check `P
 
 ## Rebrand map
 
-**DONE — wave 10 landed the whole table below atomically at `335ffd2` (2026-09-01).** Kept here
-because it is the record of what changed on the wire and what that broke; the legacy `/_bProxy/`
-path and `__bProxy_v` cookie are still routed as a one-release grace window, so removing them is a
-second, separate break.
+**DONE — wave 10 landed the whole table below atomically at `335ffd2` (2026-09-01), and wave 14
+closed the grace window on 2026-09-07.** No legacy `/_bProxy/` route survives except
+`/_bProxy/credits` (GPL attribution) and the `/_bProxy/<secret>/api/v1` shape, which is still
+recognised only so the admin secret in that URL is never forwarded to a customer backend. The
+`__bProxy_v` cookie name is no longer verified; it is still stripped from forwarded requests.
 
 **Decided 2026-08-31 by the owner, do not relitigate:** the product is **LancarSec**, one brand.
 Not LancarProxy, not two names.
@@ -314,6 +315,11 @@ body to **add** LancarSec's identity while **preserving** upstream's. Add a `NOT
 - **No `panic()` for ordinary errors.** 22 sites do this today, including the live reload path where a
   config typo kills a running proxy.
 - **Cookie/header/path tokens are `lSec` / `LancarSec` / `_lancarsec`.** Never mix with `bProxy`.
+- **A rebrand is not done when the Go source is done.** Wave 10 renamed every route in `.go` and
+  missed `/_bProxy/crypto-js.min.js` inside `global/pow/pow.min.js` — a path in a JS string literal
+  in a minified bundle. Stage 2 was unsolvable for six days. Grep the embedded assets, not just the
+  source; `TestPowAssetsReferenceOnlyServedPaths` now does it for you.
+- **No container.** LancarSec is a standalone binary. Do not reintroduce a Dockerfile.
 - Don't reintroduce `io/ioutil`.
 
 ## Known traps
