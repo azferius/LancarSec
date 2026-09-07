@@ -546,7 +546,7 @@ In this example, the rule checks whether or not the request is made by a known b
 
 ## **v2**
 
-`GET/POST /_lancarsec/api/v2/:domain/:action` (or `/:action` for the aggregate view) with the `Proxy-Secret` header set to the configured `apisecret`. Also reachable as the legacy `/_bProxy/api/v2` spelling until the next release.
+`GET/POST /_lancarsec/api/v2/:domain/:action` (or `/:action` for the aggregate view) with the `Proxy-Secret` header set to the configured `apisecret`. The legacy `/_bProxy/api/v2` spelling is no longer routed: it falls through to your backend like any other unknown path.
 
 ## **v1**
 
