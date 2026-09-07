@@ -1,6 +1,7 @@
 package server
 
 import (
+	"html/template"
 	"regexp"
 	"strings"
 	"testing"
@@ -53,5 +54,43 @@ func TestPowWorkerImportsCryptoJSFirstParty(t *testing.T) {
 	}
 	if strings.Contains(src, "cdnjs.cloudflare.com") || strings.Contains(src, "cdn.jsdelivr.net") {
 		t.Error("pow.min.js reaches a third-party CDN at challenge time")
+	}
+}
+
+// The stage-2 page shipped upstream's own Discord handle in its failure
+// branch, so a visitor whose challenge failed on this fork was told to contact
+// a stranger. It also called alert() with e.match on a null result: when the
+// solver found nothing - which is exactly what happened while the worker's
+// crypto-js import was broken - reading .match on null threw, the handler died
+// silently, and the page sat on its loader forever with no message and no
+// retry.
+func TestStage2PageFailurePath(t *testing.T) {
+	var rendered strings.Builder
+	if err := stage2Page.Execute(&rendered, stage2PageData{
+		CookieName:   "_2__lSec_v",
+		PublicSalt:   "salt",
+		Challenge:    "challenge",
+		Difficulty:   template.JS("4"),
+		BalooPowPath: powAssetPath,
+		CryptoJSPath: powCryptoJSPath,
+	}); err != nil {
+		t.Fatalf("stage2Page.Execute: %v", err)
+	}
+	page := rendered.String()
+
+	for _, leak := range []string{"@ddosmitigation", "41Baloo", "baloo.dog"} {
+		if strings.Contains(page, leak) {
+			t.Errorf("stage-2 page contains upstream contact %q; a challenged visitor must not be sent to a stranger", leak)
+		}
+	}
+	if strings.Contains(page, "alert(") {
+		t.Error("stage-2 page reports failure with alert(); it must render into the page instead")
+	}
+	// A null or unsolved result must reload rather than throw.
+	if !strings.Contains(page, "location.reload()") {
+		t.Error("stage-2 page has no retry path for an unsolved challenge")
+	}
+	if !strings.Contains(page, ".catch(") {
+		t.Error("stage-2 solve has no catch; a throwing solver leaves the visitor on the loader forever")
 	}
 }

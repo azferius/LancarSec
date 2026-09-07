@@ -729,8 +729,30 @@ Fixed by rewriting the one substring. `global/pow/README.md` records the new SHA
 embedded asset names a `/_lancarsec/` or `/_bProxy/` path the middleware does not route, and
 `TestPowWorkerImportsCryptoJSFirstParty` fails if the worker import points at a CDN again.
 
+Two more defects on the same page, found while fixing that one:
+
+- The stage-2 page's failure branch called `alert("... contact @ddosmitigation")` — **upstream's own
+  Discord handle**, so a visitor whose challenge failed on this fork was told to contact a stranger.
+- That branch read `e.match` on the solver's result without a null check. `Solve()` returns `null`
+  when no worker finds a solution — which is exactly what the broken import caused — so the handler
+  threw a TypeError, died silently, and left the visitor staring at the loader forever with no
+  message and no retry. The two bugs hid each other: the outage was invisible because the code that
+  should have reported it crashed first.
+
+Both fixed: failure now renders into the page (`#status`), a null or unsolved result reloads after
+3s, and the promise has a `.catch`. `TestStage2PageFailurePath` guards all three plus the absence of
+any upstream contact handle.
+
+**Verified end to end, not just by inspection.** `hack/powsmoke.mjs` runs the real minified bundle
+under a fake `Worker`/`importScripts` in Node — no browser, no proxy, no network — mints a challenge
+the way `core/server` does, and checks the solution and the access hash against the server's own
+derivation. On the fixed bundle it exits 0 and imports only `/_lancarsec/crypto-js.min.js`; on the
+pre-fix bundle (`git show 034d381^:global/pow/pow.min.js`) it fails with
+`importScripts: 404 /_bProxy/crypto-js.min.js` and `Solve()` returns null. That is the outage,
+reproduced.
+
 **The lesson generalises:** a rebrand that only greps `.go` is not finished. Embedded assets carry
-routes too.
+routes too, and a page that reports its own failures must survive the failure it is reporting.
 
 ### Grace window closed
 

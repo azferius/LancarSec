@@ -226,3 +226,24 @@ for:
 - `-u URL` / `-H HOST` — retarget if you change the domain in the config.
 - `stuborigin -delay 5ms` — model a slow backend (leave at 0 for any real
   measurement); `-size N` — response body size; `-status N` — response code.
+
+## `powsmoke.mjs` — does the stage-2 solver actually solve?
+
+    node hack/powsmoke.mjs
+
+Runs the embedded proof-of-work bundle (`global/pow/`) end to end with no
+browser, no proxy and no network: it emulates just enough `Worker` /
+`importScripts` surface to execute the real minified solver, mints a challenge
+the way `core/server` does, and checks that the solution AND the access hash
+match what the server will derive. Exit 0 means stage 2 works.
+
+`importScripts` resolves against a table of the paths the middleware actually
+serves, so an asset naming an unserved route fails here exactly as it fails in
+a browser.
+
+**Run it whenever `pow.min.js` or `crypto-js.min.js` is refreshed, or whenever
+an asset route is renamed.** The wave-10 rebrand renamed the served route but
+missed the copy of the path inside the worker's script literal; stage 2 was
+unsolvable for six days and no test failed. `TestPowAssetsReferenceOnlyServedPaths`
+now catches that specific mismatch in CI; this harness is the deeper check that
+the bundle still computes the right answer.

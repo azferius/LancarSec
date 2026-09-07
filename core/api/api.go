@@ -20,9 +20,9 @@ import (
 const (
 	// apiV2Prefix is the path marker core/server routes to ProcessV2. It is
 	// duplicated rather than shared because the middleware owns the routing
-	// decision and this package owns the parsing of what is left. WAVE 10: the
-	// middleware rewrites the legacy /_bProxy/api/v2 spelling onto this prefix
-	// inside its v2 branch, so this stays the only spelling parsed here.
+	// decision and this package owns the parsing of what is left. WAVE 14: the
+	// legacy /_bProxy/api/v2 spelling is no longer routed here at all, so this
+	// is the only spelling that ever reaches this package.
 	apiV2Prefix = "/_lancarsec/api/v2"
 
 	// maxBodyBytes caps the admin API request body. An API_REQUEST is two short
