@@ -30,7 +30,7 @@ balooProxy is a single-binary reverse proxy whose entire startup is a straight-l
 | `core/utils/text.go` | Terminal colour state set from config, TUI drawing helpers, interactive Ask* prompts used by the generator, TrimTime bucket helper | `ColorsString`, `PrimaryColor(input string)`, `SetColor(colorMap []string)`, `TrimTime(timestamp int) int`, `AskBool`, `AskInt`, `AskString`, `ReadLogs`, `ClearLogs`, `AddLogs` |
 | `core/utils/domain.go` | Second copy of the add-domain dialogue, called by the TUI 'add' command (config.AddDomain is the other copy) | `AddDomain()` |
 | `go.mod` | Module name and pinned dependency set | `module goProxy`, `go 1.19` |
-| `Dockerfile` | Build/run image; declares the two exposed ports | `FROM golang:1.19-alpine`, `EXPOSE 80 443` |
+| ~~`Dockerfile`~~ | **Deleted 2026-09-07.** Standalone binary only — see README "Deployment". |  |
 | `examples/config.json` | Starter config showing the on-disk JSON shape consumed by domains.Configuration | `proxy.cloudflare`, `proxy.secrets`, `proxy.timeout`, `proxy.ratelimits`, `domains[].firewallRules` |
 
 ### Control and data flow
@@ -379,7 +379,7 @@ Operations on this proxy happen through three disjoint channels, none of which i
 | `core/proxy/proxy.go` | Global mutable runtime state read and written by the monitor, the API and the middleware without synchronisation. | `ProxyVersion = 1.5 (:6)`, `AdminSecret / APISecret (:21-22)`, `CpuUsage / RamUsage (:18-19)`, `MaxLogLength (:16)`, `WatchedDomain (:12)`, `Initialised (:59)`, `RatelimitWindow = 120 (:45)` |
 | `core/domains/domain.go` | Config schema (JSON tags) and the shared per-domain settings/data structs the API and HUD read. | `Configuration (:20)`, `Domain (:25)`, `DomainSettings (:42)`, `DomainData (:70)`, `Proxy (:94)`, `WebhookSettings (:112)`, `DomainsData / DomainsMap / Config (:14-18)` |
 | `core/firewall/general.go` | The single RWMutex plus every counter map the API dumps and the monitor rotates. | `Mutex (:10)`, `AccessIps / WindowAccessIps (:18-20)`, `AccessIpsCookie / WindowAccessIpsCookie (:23-25)`, `UnkFps / WindowUnkFps (:13-15)`, `CacheIps (:29)`, `CacheImgs (:33)`, `Connections (:35)`, `OnStateChange (:38)` |
-| `Dockerfile` | Single-stage golang:1.19-alpine build; exposes 80/443, runs ./main as root with the build context's config baked in. | `FROM golang:1.19-alpine (:1)`, `RUN go build -o main . (:11)`, `EXPOSE 80 443 (:13)`, `CMD ["./main"] (:15)` |
+| ~~`Dockerfile`~~ | **Deleted 2026-09-07.** No container; the release workflow cross-compiles seven standalone targets. |  |
 | `examples/config.json` | Starter config showing the proxy/domains schema, CHANGE_ME placeholders, and the default four-rule firewall set. | `proxy.adminsecret / apisecret (:5-6)`, `proxy.secrets (:7-11)`, `proxy.timeout (:12-17)`, `proxy.ratelimits (:18-23)`, `domains[].webhook (:36-42)`, `domains[].firewallRules (:43-60)` |
 | `README.md` | Operator-facing documentation for the terminal commands, config fields, firewall DSL and API. Several statements no longer match the code. | `maxLogLength doc (:89)`, `Terminal Commands (:188-212)`, `reload 'automatically executed every 5 hours' claim (:212)`, `connections HUD field claim (:180)`, `API link to SwaggerHub 2.0 (:502)` |
 | `.vscode/launch.json` | Single Go launch config for main.go; no env vars, args or build flags. | `configurations[0] 'Debug main.go' (:5-9)` |

@@ -67,7 +67,7 @@ crash.log
 *.log
 
 # --- Build output ---------------------------------------------------------
-# 'main' is what the Dockerfile (go build -o main .) and the release workflow
+# 'main' is what a bare `go build` and the release workflow
 # (go build -o dist/main) produce; 88 revisions of it sit in history awaiting
 # the purge. 'oryxBuildBinary' was a tracked Azure Oryx artifact, untracked as
 # of this commit.

@@ -16,7 +16,7 @@
 # load-bearing -- ci.yml and release.yml use it deliberately so Dependabot can
 # keep the pins current without anyone hand-resolving a SHA again.
 #
-# The docker ecosystem reads the FROM lines in ./Dockerfile. Both are pinned
+# There is no container ecosystem here: LancarSec ships as a standalone binary.
 # as tag@sha256:..., which Dependabot updates in place.
 
 version: 2
@@ -64,30 +64,6 @@ updates:
       prefix: "deps(actions)"
     groups:
       actions-minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-
-  # -------------------------------------------------------------------------
-  # Docker base images (Dockerfile)
-  # -------------------------------------------------------------------------
-  - package-ecosystem: docker
-    directory: "/"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: Asia/Jakarta
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - docker
-    commit-message:
-      prefix: "deps(docker)"
-    groups:
-      docker-minor-and-patch:
         patterns:
           - "*"
         update-types:

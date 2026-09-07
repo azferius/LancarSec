@@ -165,8 +165,8 @@ Landed as six independently revertable commits (`2b6bd93`..`38f0beb`).
 sites are startup and live reload, meaning one config typo kills the proxy. This was not in the
 original audit. Fix it in wave 4 alongside the other reload-path hardening.
 
-**Not verified: the Docker image does not build here** (no Docker daemon on this machine). The YAML
-parses and every action SHA resolves, but run `docker build` before cutting a release.
+**Superseded:** the Dockerfile this paragraph used to warn about is gone. LancarSec is a standalone
+binary; there is no image to build or verify. See "Deployment" in `README.md`.
 
 **Toolchain caveat.** `toolchain go1.25.14` makes any builder with `GOTOOLCHAIN=local`, or without
 proxy egress, fail loudly rather than build with a stale compiler. That is intended — it is what

@@ -725,7 +725,6 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
 - **Wire tokens stay `__bProxy_v` / `/_bProxy/` / `baloo-Proxy` until wave 10.** Renaming the cookie
   invalidates every clearance cookie in flight and re-challenges every visitor at once, so it
   happens once, atomically, after the security work.
-- **Docker image is unverified.** No daemon on the dev machine. Run `docker build` before a release.
 - **The firewall DSL's vocabulary is `firewall.Fields`, and it is load-bearing** (wave 13). Adding
   a name there without supplying it in the middleware's message brings back the fail-open the wave
   removed; removing one breaks every config.json using it. Three tests guard both directions —
@@ -758,5 +757,6 @@ a peer means believing its `Cf-Connecting-Ip`. Both files are decoded against th
 - Module path is `github.com/azferius/lancarsec` (lower-case; the module cache escapes upper-case
   as `!l!ancar!sec`).
 - `core/gofilter` and `core/screen` are vendored, not dependencies.
-- Alpine over distroless for the runtime image — the reasoning is in the Dockerfile header, and it
-  is about `CAP_NET_BIND_SERVICE` and the stdin TUI, not about size.
+- **No container.** LancarSec ships as one standalone binary. The Dockerfile, `.dockerignore` and
+  the dependabot docker ecosystem were deleted; `setcap cap_net_bind_service` and a systemd unit
+  cover what the image was for (privileged ports and the stdin TUI). Owner decided 2026-09-07.
